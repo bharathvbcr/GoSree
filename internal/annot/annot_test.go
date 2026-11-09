@@ -37,8 +37,9 @@ func TestGuardedDirectives(t *testing.T) {
 	for _, mu := range ix.Guarded {
 		byMutex[mu.Name()]++
 	}
-	// S.n and S.m by mu, S.r by rw, E.n by the embedded Mutex, count and total by gmu.
-	want := map[string]int{"mu": 2, "rw": 1, "Mutex": 1, "gmu": 2}
+	// S.n and S.m by mu, S.r by rw, E.n by the embedded Mutex, count, total and local c by gmu,
+	// local x and inner by lmu, local y and z by lrw.
+	want := map[string]int{"mu": 2, "rw": 1, "Mutex": 1, "gmu": 3, "lmu": 2, "lrw": 2}
 	if len(byMutex) != len(want) {
 		t.Errorf("Guarded by mutex: got %v, want %v", byMutex, want)
 	}

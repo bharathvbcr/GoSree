@@ -64,7 +64,7 @@ only. One finding is reported per source line.
 
 ### SAFE009: guarded memory
 
-A field or package variable annotated `//safe:guarded_by mu` may be read only while `mu` is held
+A field, package variable or local variable annotated `//safe:guarded_by mu` may be read only while `mu` is held
 (`RLock` is enough for a `sync.RWMutex`), and written only while it is locked. A function marked
 `//safe:holds mu` may be called only with `mu` held, and must not unlock it (SAFE007). Nothing
 non-shareable read from guarded memory may leave the lock. That covers being returned, sent,
@@ -81,9 +81,16 @@ function whose summary says it may keep it.
   receives, including through `fmt.Println(c)`'s variadic slice.
 - **Closures:** a closure called in place starts with its caller's locks. Any other function starts
   with none, plus its `//safe:holds`.
+- **Locals:** a guarded local is a cell: its `Alloc` in the declaring function and, in each closure
+  that captures it, the free variable bound to it. Its mutex is found the same way, so a goroutine
+  that locks its captured `mu` holds the guard of its captured `x`. A closure that does not capture
+  `mu` cannot hold it. A guarded local is not moved by the goroutines that capture it (no SAFE003),
+  because SAFE009 checks every access to it instead.
 
-Exempt: package variables during initialisation, and an object this function allocated that nothing
-else can see yet (a constructor filling it in before it is returned, stored or moved).
+Exempt: package variables during initialisation; a guarded local in its own function until a closure
+captures it or its address goes anywhere but a direct load or store; and an object this function
+allocated that nothing else can see yet (a constructor filling it in before it is returned, stored
+or moved).
 
 ## Annotations
 
@@ -106,11 +113,21 @@ func (s *Server) evictLocked() { clear(s.hits) }
 ```
 
 `//safe:guarded_by mu` goes on an unexported struct field (mu is a field of the same struct; an
-embedded mutex is named `Mutex`) or on a package variable (mu is a package variable). The mutex is a
-`sync.Mutex` or `sync.RWMutex` held by value. Pointers to mutexes, `sync.Locker` values, exported
-fields and local variables are rejected as SAFE007. These are checked claims, like `imm` and `iso`,
-so they count toward neither the hatch ratio nor the override budget. SAFE009 enforces them, and a
-guarded package variable is exempt from SAFE006.
+embedded mutex is named `Mutex`), on a package variable (mu is a package variable), or on a local
+variable declared with `var` or `:=` (mu is a variable in scope there: a local of this or an
+enclosing function, or a package variable). It guards every name the declaration introduces; a `:=`
+that redeclares an existing name is rejected. The mutex is a `sync.Mutex` or `sync.RWMutex` held by
+value. Pointers to mutexes, `sync.Locker` values and exported fields or package variables are
+rejected as SAFE007. These are checked claims, like `imm` and `iso`, so they count toward neither
+the hatch ratio nor the override budget. SAFE009 enforces them, and a write to a guarded package
+variable, or to a guarded field of one, is exempt from SAFE006.
+
+```go
+var mu sync.Mutex
+x := 0 //safe:guarded_by mu
+go func() { mu.Lock(); x++; mu.Unlock() }()
+mu.Lock(); x++; mu.Unlock()
+```
 
 To share a struct between goroutines, make it `//safe:imm` and guard its mutable fields. An imm
 type's guarded fields may have any type, and SAFE005 leaves them to SAFE009. Every other field still
@@ -240,7 +257,10 @@ joins, because a panic between the move and the join would run it early.
 ## Measured on the Go race detector's corpus
 
 `go run ./cmd/gocap-corpus -out build` copies `$GOROOT/src/runtime/race/testdata` into `build/` (never
-committed), runs gocap unannotated, and writes `build/corpus-report.json`. A test function counts as
+committed), runs gocap unannotated, and writes `build/corpus-report.json`. It then scores a second
+copy carrying the `//safe:guarded_by` directives listed in
+[annotations.go](cmd/gocap-corpus/annotations.go) and writes `build/corpus-report-annotated.json`
+([below](#the-annotated-copy)). A test function counts as
 flagged if gocap reports anything in it or in a same-package function it calls. A finding also
 counts where its related positions are, so a declaration-site SAFE006 counts for the functions whose
 writes make the variable mutable.
@@ -302,6 +322,53 @@ Read these numbers with care:
 - reassigning a mutex variable: `TestRaceMutexOverwrite`
 - WaitGroup misuse: `TestRaceWaitGroupWrongAdd`
 
+### The annotated copy
+
+The unannotated numbers measure gocap with no claims, and lock discipline is a claim the programmer
+makes. The annotated copy adds the comment a programmer would write who believes each test's locking
+protects a variable. That is 11 `//safe:guarded_by` directives: comments only, no code changes. Every
+corpus test whose sharing is a lock discipline is annotated, together with the race tests of the
+same shape, so the run also shows whether an annotation hides a race. Each directive anchors on one
+exact line inside one function or declaration, and the run fails if any anchor does not match.
+
+| | Annotated (11 directives) | Predicted before that run | Unannotated, same run |
+|---|---|---|---|
+| `TestRace*` flagged | 229 / 234 (97.9%) | 229 | 229 / 234 (97.9%) |
+| `TestNoRace*` clean | 40 / 129 (31.0%) | 40 (the design review said 42: its base of 38 plus Mutex, RWMutex, RWMutexMultipleReaders and RWMutexTransitive) | 36 / 129 (27.9%) |
+| `TestNoRace*` flagged only for fork-join | 6 | not predicted | 7 |
+
+Per annotated test, the categories without the directives and with them, as predicted:
+
+| Test | Without | With |
+|---|---|---|
+| `TestNoRaceMutex` | SAFE003 | clean |
+| `TestNoRaceRWMutexMultipleReaders` | SAFE003 | clean |
+| `TestNoRaceRWMutexTransitive` | SAFE003, SAFE003-forkjoin | clean |
+| `TestNoRaceFinGlobal` | SAFE006 | clean |
+| `TestNoRaceFuncUnlock` | SAFE003 | SAFE009 |
+| `TestNoRaceAsFunc4` | SAFE003-forkjoin | SAFE009 |
+| `TestRaceMutex`, `TestRaceMutex2`, `TestRaceMutexRWMutex`, `TestRaceAsFunc3` | SAFE003 or SAFE003-forkjoin | SAFE009 |
+| `TestRaceRWMutexMultipleReaders` | SAFE003, SAFE003-forkjoin | SAFE009 |
+
+- **No race was hidden.** Every annotated race test is still flagged, now by SAFE009, not by a move.
+  The scorer records categories only, so the lines were checked separately (`go vet -vettool` on
+  `build/racecorpus-annotated`). Each SAFE009 sits on an unlocked or wrongly locked access:
+  - the writes before `Lock` in `TestRaceMutex`;
+  - the writes under the other mutex in `TestRaceMutex2` and `TestRaceMutexRWMutex`;
+  - the writes of `y` under `RLock` in `TestRaceRWMutexMultipleReaders`, plus its final `_ = y`, which
+    is unlocked;
+  - the argument read outside the lock in `TestRaceAsFunc3`.
+- **Two race-free tests stay flagged, by SAFE009.** `TestNoRaceFuncUnlock` and `TestNoRaceAsFunc4`
+  take the lock inside a function they call and release it in the caller. The lock analysis models
+  releases inside callees, not acquisitions.
+- **`TestNoRaceRWMutex` is not annotated.** It declares `var x, y int64 = 0, 1` and writes `y` under
+  `RLock`. A directive on that line guards both names, so guarding `x` alone would take a code change.
+  This is where the design review's prediction differs from the result. It counted `TestNoRaceRWMutex`
+  among its four, but that test stays flagged. `TestNoRaceFinGlobal`, which the review did not count,
+  cleared instead. The review's 42 is otherwise its older base of 38 against today's 36.
+- **`TestNoRaceCond` is not annotated.** Its `x` is handed over through a `sync.Cond` signal, not
+  accessed under the mutex.
+
 ## Measuring the escape hatch on a module
 
 ```bash
@@ -324,8 +391,11 @@ denominator. Goroutines started by a library function missing from the spawner t
 - **Fork-join covers channel and WaitGroup joins only.** The [shapes](#fork-join) outside it keep
   what they were given for good.
 - **Lock discipline is declared, not inferred.** SAFE009 checks memory annotated
-  `//safe:guarded_by`. A local variable shared under a lock (the race corpus's mutex tests) cannot
-  be annotated yet. A struct with guarded fields crosses goroutines only if it is also `//safe:imm`.
+  `//safe:guarded_by`. A struct with guarded fields crosses goroutines only if it is also
+  `//safe:imm`. A directive guards every name its declaration introduces.
+- **SAFE009 does not see a lock taken inside a callee.** A function that locks a mutex and returns
+  with it held leaves the caller believing it is not held (`TestNoRaceFuncUnlock`). A closure that
+  does not capture the mutex cannot hold it, even when it is called in place under the lock.
 - **Only listed callback functions are goroutine boundaries.** A library function that runs its
   argument on another goroutine but is not in `spawn.go` (a worker pool, a scheduler) is an ordinary
   call to gocap. Its callback is checked only through the callee's summary, which treats it as
@@ -387,8 +457,10 @@ Done:
      hole: the address of a field or element of a shared value (`&cfg.port` on an imm `*Config`)
      used to look owned and could be moved to a goroutine. It is now foreign (SAFE002). The race
      corpus and the reference service did not move, as predicted.
-   - Guarded local variables, and the corpus scored a second time on an annotated copy (predicted
-     229 / 42).
+   - **Done:** guarded local variables, and the corpus scored a second time on an annotated copy:
+     229 / 40, as predicted before the run ([the annotated copy](#the-annotated-copy)). The design
+     review predicted 229 / 42 from the earlier base of 38. A write to a guarded field of a package
+     variable is no longer SAFE006. The reference service did not move (no annotations).
 2. A function override table beside the type table; summaries that record a call linking two
    arguments (`root.Add(child)`) instead of reporting an escape; and a writes bit in summaries, so
    SAFE008 follows calls into other packages.

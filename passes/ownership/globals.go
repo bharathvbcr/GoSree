@@ -3,7 +3,6 @@ package ownership
 import (
 	"fmt"
 	"go/token"
-	"go/types"
 	"sort"
 
 	"golang.org/x/tools/go/analysis"
@@ -27,12 +26,16 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 			continue
 		}
 		forEachInstr(fn, func(ins ssa.Instruction) {
-			g, ok := writtenGlobal(ins)
+			addr, ok := writtenAddr(ins)
+			if !ok {
+				return
+			}
+			g, ok := globalRoot(addr)
 			if !ok || g.Pkg != st.ssa.Pkg {
 				return
 			}
-			if v, ok := g.Object().(*types.Var); ok && st.ix.Guarded[v] != nil {
-				return // SAFE009 checks guarded variables at every access
+			if _, guarded := st.slotOf(addr); guarded {
+				return // SAFE009 checks guarded variables and fields at every access
 			}
 			writes[g] = append(writes[g], posOf(ins, ins))
 		})
@@ -161,17 +164,19 @@ func globalRoot(v ssa.Value) (*ssa.Global, bool) {
 	return nil, false
 }
 
-func writtenGlobal(ins ssa.Instruction) (*ssa.Global, bool) {
+// writtenAddr returns what ins writes into, for the writes SAFE006 counts: stores, map updates, and
+// copy, delete and clear. (append is not one: it writes a backing array only its result can see.)
+func writtenAddr(ins ssa.Instruction) (ssa.Value, bool) {
 	switch ins := ins.(type) {
 	case *ssa.Store:
-		return globalRoot(ins.Addr)
+		return ins.Addr, true
 	case *ssa.MapUpdate:
-		return globalRoot(ins.Map)
+		return ins.Map, true
 	case *ssa.Call:
 		if b, ok := ins.Call.Value.(*ssa.Builtin); ok && len(ins.Call.Args) > 0 {
 			switch b.Name() {
 			case "copy", "delete", "clear":
-				return globalRoot(ins.Call.Args[0])
+				return ins.Call.Args[0], true
 			}
 		}
 	}

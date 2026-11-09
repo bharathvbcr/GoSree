@@ -153,14 +153,17 @@ type slot struct {
 }
 
 func (s slot) name() string {
-	if s.v.IsField() {
+	switch {
+	case s.v.IsField():
 		return "field " + s.v.Name()
+	case s.v.Parent() == s.v.Pkg().Scope():
+		return "package variable " + s.v.Name()
 	}
-	return "package variable " + s.v.Name()
+	return "local variable " + s.v.Name()
 }
 
 // guardedAt reports whether v itself names guarded memory: a field address or field of a guarded
-// field, or a guarded package variable.
+// field, a guarded package variable, or the cell of a guarded local.
 func (st *state) guardedAt(v ssa.Value) (slot, bool) {
 	switch x := v.(type) {
 	case *ssa.FieldAddr:
@@ -189,6 +192,8 @@ func (st *state) guardedAt(v ssa.Value) (slot, bool) {
 			out.muPath, out.known = guardPath{root: mg}, true
 		}
 		return out, true
+	case *ssa.Alloc, *ssa.FreeVar:
+		return st.localSlot(x)
 	}
 	return slot{}, false
 }
@@ -803,11 +808,17 @@ func muName(mus []*types.Var, paths []guardPath, p guardPath) string {
 }
 
 // guardExempt reports accesses that need no lock: a guarded package variable during
-// initialisation, and an object this function allocated that nothing else can see yet (a
-// constructor filling it in before it is returned, stored or moved).
+// initialisation, a guarded local before anything can share it, and an object this function
+// allocated that nothing else can see yet (a constructor filling it in before it is returned, stored
+// or moved).
 func (st *state) guardExempt(gs *guardState, fn *ssa.Function, ins ssa.Instruction, s slot) bool {
 	if _, ok := s.base.root.(*ssa.Global); ok && !s.v.IsField() {
 		return gs.initOnly[fn]
+	}
+	if lg, ok := st.localGuards[s.base.root]; ok && lg.v == s.v {
+		// A guarded local needs no lock in its own function until a closure or pointer can share it.
+		a, ok := s.base.root.(*ssa.Alloc)
+		return ok && a.Parent() == fn && !sharedBefore(a, ins)
 	}
 	if !s.known {
 		return false

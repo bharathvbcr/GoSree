@@ -5,7 +5,8 @@
 // TestNoRace* functions it leaves clean. The corpus is copied into <out>/racecorpus on every run and
 // never committed: it is GOROOT content, and copying it fresh ties the numbers to the installed Go
 // release. Files that cannot build outside GOROOT (cgo, GOROOT-internal imports) are skipped and
-// counted.
+// counted. It then measures a second copy, <out>/racecorpus-annotated, carrying the //safe:guarded_by
+// directives its lock-discipline tests would have (annotations.go), and reports both.
 //
 //	go run ./cmd/gocap-corpus -out build
 //
@@ -49,8 +50,10 @@ type Report struct {
 	GoVersion string   `json:"go_version"`
 	Files     int      `json:"files"`
 	Skipped   []string `json:"skipped_files"`
-	Race      Side     `json:"race"`
-	NoRace    Side     `json:"norace"`
+	// Annotations counts the //safe directives added to the corpus (0 for the corpus as shipped).
+	Annotations int  `json:"annotations"`
+	Race        Side `json:"race"`
+	NoRace      Side `json:"norace"`
 }
 
 // Side summarises one half of the corpus.
@@ -100,15 +103,43 @@ func main() {
 	if err != nil {
 		log.Fatalf("copy corpus: %v", err)
 	}
+	rep := measureCorpus(dst)
+	rep.Files = copied
+	rep.Skipped = skipped
+	path := writeJSON(*out, "corpus-report.json", rep)
+	printSummary("gocap race corpus", rep, path)
 
+	// The same corpus with the //safe directives its lock-discipline tests would carry.
+	adst, err := filepath.Abs(filepath.Join(*out, "racecorpus-annotated"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if _, _, err := copyCorpus(src, adst); err != nil {
+		log.Fatalf("copy corpus: %v", err)
+	}
+	if err := applyAnnotations(adst); err != nil {
+		log.Fatalf("annotate corpus: %v", err)
+	}
+	arep := measureCorpus(adst)
+	arep.Files = copied
+	arep.Skipped = skipped
+	arep.Annotations = len(corpusAnnotations)
+	apath := writeJSON(*out, "corpus-report-annotated.json", arep)
+	fmt.Println()
+	printSummary(fmt.Sprintf("gocap race corpus, annotated (%d directives)", len(corpusAnnotations)), arep, apath)
+	printAnnotated(rep, arep)
+}
+
+// measureCorpus loads the corpus copy in dir as a race build and scores gocap's findings on it.
+func measureCorpus(dir string) Report {
 	// The corpus calls runtime.RaceDisable, which only exists in race builds.
-	cfg := &packages.Config{Mode: packages.LoadAllSyntax, Tests: true, Dir: dst, BuildFlags: []string{"-race"}}
+	cfg := &packages.Config{Mode: packages.LoadAllSyntax, Tests: true, Dir: dir, BuildFlags: []string{"-race"}}
 	pkgs, err := packages.Load(cfg, "./...")
 	if err != nil {
 		log.Fatalf("load corpus: %v", err)
 	}
 	if packages.PrintErrors(pkgs) > 0 {
-		log.Fatal("corpus did not type-check")
+		log.Fatalf("corpus in %s did not type-check", dir)
 	}
 	var test *packages.Package
 	for _, p := range pkgs {
@@ -119,18 +150,37 @@ func main() {
 	if test == nil {
 		log.Fatal("no external test package race_test was loaded")
 	}
-
 	var diags []analysis.Diagnostic
 	for _, act := range analyze([]*packages.Package{test}) {
 		diags = append(diags, act.Diagnostics...)
 	}
-
 	rep := score(test, diags)
 	rep.GoVersion = runtime.Version()
-	rep.Files = copied
-	rep.Skipped = skipped
-	path := writeJSON(*out, "corpus-report.json", rep)
-	printSummary(rep, path)
+	return rep
+}
+
+// printAnnotated shows, for each annotated test, its categories without and with the annotations.
+func printAnnotated(plain, annotated Report) {
+	cats := func(r Report) map[string]string {
+		out := map[string]string{}
+		for _, s := range []Side{r.Race, r.NoRace} {
+			for _, f := range s.Flags {
+				out[f.Test] = strings.Join(f.Categories, ",")
+			}
+		}
+		return out
+	}
+	before, after := cats(plain), cats(annotated)
+	show := func(c string) string {
+		if c == "" {
+			return "clean"
+		}
+		return c
+	}
+	fmt.Println("  annotated tests (without -> with):")
+	for _, name := range annotatedTests() {
+		fmt.Printf("    %-40s %s -> %s\n", name, show(before[name]), show(after[name]))
+	}
 }
 
 // analyze runs every gocap analyzer on pkgs and returns the root actions, failing on any analyzer
@@ -359,10 +409,10 @@ func pct(a, b int) float64 {
 	return 100 * float64(a) / float64(b)
 }
 
-func printSummary(rep Report, path string) {
+func printSummary(title string, rep Report, path string) {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "gocap race corpus (%s, %d files copied, %d skipped: %s)\n",
-		rep.GoVersion, rep.Files, len(rep.Skipped), strings.Join(rep.Skipped, ", "))
+	fmt.Fprintf(&b, "%s (%s, %d files copied, %d skipped: %s)\n",
+		title, rep.GoVersion, rep.Files, len(rep.Skipped), strings.Join(rep.Skipped, ", "))
 	fmt.Fprintf(&b, "  TestRace*   flagged %3d / %3d  (%.1f%%)\n", rep.Race.Flagged, rep.Race.Total, pct(rep.Race.Flagged, rep.Race.Total))
 	clean := rep.NoRace.Total - rep.NoRace.Flagged
 	fmt.Fprintf(&b, "  TestNoRace* clean   %3d / %3d  (%.1f%%); flagged only for fork-join: %d\n",

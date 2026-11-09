@@ -38,6 +38,13 @@ func TestGuarded(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "guarded")
 }
 
+// TestGuardedLocals checks SAFE009 on guarded local variables shared with closures: the race
+// corpus's lock-discipline shapes are clean, its lock-misuse shapes are reported, and a guarded local
+// is not moved by the goroutines that capture it.
+func TestGuardedLocals(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "guardedlocal")
+}
+
 // TestSuppression checks that //safe:unsafe on a transfer mutes everything that transfer reports, and
 // that Stats counts transfers, suppressed transfers and suppressed findings once each.
 func TestSuppression(t *testing.T) {

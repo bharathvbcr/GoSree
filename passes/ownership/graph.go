@@ -106,6 +106,11 @@ func (g *graph) val(v ssa.Value) *node {
 		return n.find()
 	}
 	var n *node
+	if _, guarded := g.st.localGuards[v]; guarded {
+		// A guarded local's cell is shared by design; SAFE009 checks its accesses.
+		g.nodes[v] = nil
+		return nil
+	}
 	switch v := v.(type) {
 	case *ssa.Const, *ssa.Function, *ssa.Builtin:
 	case *ssa.Global:

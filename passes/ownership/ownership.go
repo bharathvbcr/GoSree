@@ -97,6 +97,9 @@ type state struct {
 	// reads a goroutine body's graph while checking its parent.
 	graphs    map[*ssa.Function]*graph
 	joinCache map[ssa.Instruction]map[ssa.Instruction]bool
+	// localGuards maps the cells of guarded local variables (their Alloc, and the free variables of
+	// closures that capture them) to their guard.
+	localGuards map[ssa.Value]localGuard
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the
@@ -136,6 +139,7 @@ func run(pass *analysis.Pass) (any, error) {
 	st.cls = st.newClassifier()
 
 	fns := st.ssa.SrcFuncs
+	st.localGuards = st.guardedCells(fns)
 	st.computeSummaries(fns)
 	st.exportFacts(fns)
 

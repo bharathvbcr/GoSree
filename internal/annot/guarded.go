@@ -8,11 +8,13 @@ import (
 	"golang.org/x/tools/go/analysis"
 )
 
-// applyGuardedBy records `//safe:guarded_by mu` on a struct field or a package variable. mu names a
-// field of the same struct (an embedded sync.Mutex is "Mutex") or, for a package variable, another
-// package variable. It must be a sync.Mutex or sync.RWMutex held by value, so "the same mutex" is a
-// question about paths, not about pointers. The guarded field or variable must be unexported: its
-// accesses are checked in this package only.
+// applyGuardedBy records `//safe:guarded_by mu` on a struct field, a package variable or a local
+// variable (a var declaration or a := that declares only new names). mu names a field of the same
+// struct (an embedded sync.Mutex is "Mutex"); for a package variable, another package variable; for a
+// local, a variable in scope at its declaration (a local of this or an enclosing function, or a
+// package variable). It must be a sync.Mutex or sync.RWMutex held by value, so "the same mutex" is a
+// question about paths, not about pointers. A guarded field or package variable must be unexported:
+// its accesses are checked in this package only.
 func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string, structOf map[*ast.Field]*ast.StructType, malformed func(string, ...any)) {
 	if !isIdent(args) {
 		malformed("//safe:guarded_by needs one mutex name")
@@ -42,31 +44,43 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 			return
 		}
 	default:
-		vs := valueSpec(target)
-		if vs == nil {
-			malformed("//safe:guarded_by must be on a struct field or a package variable")
+		names, ok := declaredNames(target)
+		if !ok {
+			malformed("//safe:guarded_by must be on a struct field or a variable declaration")
 			return
 		}
-		for _, id := range vs.Names {
+		for _, id := range names {
 			v, ok := pass.TypesInfo.Defs[id].(*types.Var)
 			if !ok {
+				if _, blank := pass.TypesInfo.Defs[id]; !blank && id.Name != "_" {
+					malformed("//safe:guarded_by on a := that redeclares %s; declare guarded variables on their own line", id.Name)
+					return
+				}
 				continue
-			}
-			if v.Parent() != pass.Pkg.Scope() {
-				malformed("//safe:guarded_by on a local variable is not supported yet; guard a struct field or package variable")
-				return
 			}
 			guarded = append(guarded, v)
 		}
 		if len(guarded) == 0 {
 			return
 		}
-		obj, ok := pass.Pkg.Scope().Lookup(args).(*types.Var)
-		if !ok {
-			malformed("//safe:guarded_by names %q, which is not a package variable", args)
-			return
+		if scope := guarded[0].Parent(); scope == pass.Pkg.Scope() {
+			obj, ok := scope.Lookup(args).(*types.Var)
+			if !ok {
+				malformed("//safe:guarded_by names %q, which is not a package variable", args)
+				return
+			}
+			mu = obj
+		} else {
+			// A local is guarded by a mutex in scope where it is declared: a local of this function or
+			// an enclosing one, or a package variable.
+			_, obj := scope.LookupParent(args, guarded[0].Pos())
+			v, ok := obj.(*types.Var)
+			if !ok || v.IsField() {
+				malformed("//safe:guarded_by names %q, which is not a variable in scope here", args)
+				return
+			}
+			mu = v
 		}
-		mu = obj
 	}
 	if why := notValueMutex(mu.Type()); why != "" {
 		malformed("//safe:guarded_by names %s, which %s", args, why)
@@ -76,7 +90,7 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 		switch {
 		case v == mu:
 			malformed("//safe:guarded_by: %s cannot guard itself", v.Name())
-		case v.Exported():
+		case v.Exported() && (v.IsField() || v.Parent() == pass.Pkg.Scope()):
 			malformed("//safe:guarded_by on exported %s: accesses are checked in this package only, so guard an unexported field or variable", v.Name())
 		default:
 			ix.Guarded[v] = mu
@@ -121,6 +135,26 @@ func applyHolds(pass *analysis.Pass, ix *Index, target ast.Node, args string, ma
 }
 
 func isIdent(s string) bool { return s != "" && token.IsIdentifier(s) }
+
+// declaredNames returns the names a variable declaration introduces: a var spec, or a := statement.
+func declaredNames(n ast.Node) ([]*ast.Ident, bool) {
+	if vs := valueSpec(n); vs != nil {
+		return vs.Names, true
+	}
+	as, ok := n.(*ast.AssignStmt)
+	if !ok || as.Tok != token.DEFINE {
+		return nil, false
+	}
+	names := make([]*ast.Ident, 0, len(as.Lhs))
+	for _, e := range as.Lhs {
+		id, ok := e.(*ast.Ident)
+		if !ok {
+			return nil, false
+		}
+		names = append(names, id)
+	}
+	return names, true
+}
 
 func valueSpec(n ast.Node) *ast.ValueSpec {
 	switch n := n.(type) {

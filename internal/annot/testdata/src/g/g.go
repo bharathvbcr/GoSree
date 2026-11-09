@@ -49,9 +49,24 @@ func badHolds() {}
 //safe:holds gmu // want `SAFE007: //safe:holds must be in a function's doc comment`
 type notAFunc int
 
+// Local variables may be guarded by a mutex in scope at their declaration: a local of this function
+// or an enclosing one, or a package variable.
 func local() {
-	var mu sync.Mutex
-	_ = &mu
-	var x int //safe:guarded_by mu // want `SAFE007: //safe:guarded_by on a local variable is not supported yet`
-	_ = x
+	var lmu sync.Mutex
+	var lrw sync.RWMutex
+	var x int    //safe:guarded_by lmu
+	y, z := 1, 2 //safe:guarded_by lrw
+	var c int    //safe:guarded_by gmu
+	var p *sync.Mutex
+	var bad int   //safe:guarded_by p // want `SAFE007: //safe:guarded_by names p, which is a pointer to a mutex`
+	var early int //safe:guarded_by later // want `SAFE007: //safe:guarded_by names "later", which is not a variable in scope here`
+	var later sync.Mutex
+	x = 2        //safe:guarded_by lmu // want `SAFE007: //safe:guarded_by must be on a struct field or a variable declaration`
+	x, w := 3, 4 //safe:guarded_by lmu // want `SAFE007: //safe:guarded_by on a := that redeclares x; declare guarded variables on their own line`
+	func() {
+		var inner int //safe:guarded_by lmu
+		_ = inner
+	}()
+	_, _, _, _, _, _, _, _ = &lmu, &lrw, &later, x, y, z, c, w
+	_, _, _ = p, bad, early
 }

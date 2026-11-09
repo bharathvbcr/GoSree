@@ -60,3 +60,26 @@ func addGuarded() {
 var now = func() int { return 0 }
 
 func stubNow() { now = func() int { return 1 } }
+
+// A field guarded by the variable's own mutex is checked by SAFE009 at every access, so writing it is
+// not SAFE006; an unguarded field beside it still is.
+var finVar struct {
+	sync.Mutex
+	cnt int //safe:guarded_by Mutex
+}
+
+var mixed struct { // want `SAFE006: package variable mixed is written outside init`
+	sync.Mutex
+	hits  int //safe:guarded_by Mutex
+	loose int
+}
+
+func bumpFields() {
+	finVar.Lock()
+	finVar.cnt++
+	finVar.Unlock()
+	mixed.Lock()
+	mixed.hits++
+	mixed.Unlock()
+	mixed.loose++
+}
