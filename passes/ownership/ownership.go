@@ -10,6 +10,7 @@
 //	SAFE004  a moved value also escapes somewhere else (stored, returned, retained by a callee)
 //	SAFE005  a //safe:imm type is malformed or written after construction
 //	SAFE006  a package variable written outside init is accessed from code that runs on a goroutine
+//	SAFE008  a handler writes memory it shares with its other invocations (handlerwrite.go)
 //
 // A value crosses to another goroutine when it is an argument of a go statement, the closure a go
 // statement starts, a callback handed to a function that runs it on another goroutine (spawn.go), a
@@ -37,6 +38,8 @@ const (
 	Escapes   = "SAFE004"
 	Imm       = "SAFE005"
 	GlobalUse = "SAFE006"
+	// HandlerWrite is a write through memory a handler shares with its other invocations.
+	HandlerWrite = "SAFE008"
 	// UseAfterSynced is reported for SAFE003 uses that every path reaches only after a
 	// synchronisation point that is not a join for the move (forkjoin.go): a receive from another
 	// channel, a select, a mutex or cond, or a join shape the rule does not accept. The separate

@@ -27,7 +27,8 @@ The callback functions are a curated table in `passes/ownership/spawn.go`, an as
 callee like the type overrides. A function that runs its callback before returning (`sync.Once.Do`,
 `testing.T.Run` without `Parallel`, `slices.SortFunc`) is an ordinary call. An HTTP handler runs on
 every request's goroutine, concurrently with itself, so it never owns what it captured (moving a
-capture on is SAFE002) and never hands anything back.
+capture on is SAFE002), never hands anything back, and must not write memory it shares with its
+other invocations (SAFE008).
 
 ## Rules
 
@@ -40,7 +41,24 @@ capture on is SAFE002) and never hands anything back.
 | SAFE005 | a `//safe:imm` type is malformed, or is written after its composite literal |
 | SAFE006 | a package variable written outside `init` is accessed by code that runs on a goroutine |
 | SAFE007 | a malformed `//safe:` directive |
+| SAFE008 | a handler (a callback that runs concurrently with itself) writes memory it shares with its other invocations: what it captured, or its receiver |
 
+### SAFE008: handlers racing with themselves
+
+Two requests can run the same handler at once, and the code that registered it cannot see that
+race, so the transfer rules do not catch it. SAFE008 starts from what every invocation shares (a
+closure's captured variables, a method value's receiver, a `Handler` value's `ServeHTTP` receiver)
+and follows it through field, index, slice, conversion and load steps to any store, map update, or
+`delete`/`clear`/`copy`/`append` into it. It follows the shared memory into functions of this
+package the handler calls and into closures it calls directly. It stops at:
+- goroutines the handler starts, which the transfer rules check;
+- interface and dynamic calls, and calls into other packages (stated gaps);
+- handler values it cannot resolve to a body.
+
+There is no exemption by type: `s.count++` on an `int` races. Atomic and mutex methods are calls,
+not stores, so they are never reported. A write under a lock is reported until the guarded-by rule
+exists. A `//safe:unsafe` on the registration mutes every SAFE008 of that handler and counts as a
+suppressed transfer. One on a write mutes that line only. One finding is reported per source line.
 ## Annotations
 
 ```go
@@ -244,10 +262,11 @@ denominator. Goroutines started by a library function missing from the spawner t
   argument on another goroutine but is not in `spawn.go` (a worker pool, a scheduler) is an ordinary
   call to gocap. Its callback is checked only through the callee's summary, which treats it as
   retained.
-- **A handler racing with itself is not checked.** A handler that writes memory it captured races
-  with the same handler on the next request. gocap reports that only when the handler moves the
-  memory on (SAFE002) or the memory is a package variable (SAFE006), not for a plain write. Whether
-  to forbid writes to captured state in handlers is an open design question.
+- **SAFE008 follows in-package calls only.** A handler that hands shared memory to another
+  package's function that writes it (`sort.Ints(s)`, `json.Unmarshal(b, &cfg)`), or to an interface
+  method, is not reported: summaries record retention, not writes.
+- **Lock discipline is not modelled for SAFE008 either.** A mutex-guarded handler write is still a
+  finding.
 - **`Timer.Stop` and `context.AfterFunc`'s stop function are not modelled.** Stopping a callback does
   not hand its memory back, which is right when `Stop` returns false and over-reports when it
   returns true.
@@ -266,26 +285,40 @@ denominator. Goroutines started by a library function missing from the spawner t
 This README is the design of record: gocap checks memory where it crosses goroutines, and leaves
 aliasing within one goroutine alone. In build order:
 
-Done: callback functions as goroutine boundaries, and SAFE001 for dot imports of `unsafe` and
-functions without a Go body.
+Done:
+- callback functions as goroutine boundaries;
+- SAFE001 for dot imports of `unsafe` and functions without a Go body;
+- SAFE008 for handlers that write shared memory.
 
-1. A function override table beside the type table, and summaries that record a call linking two
-   arguments (`root.Add(child)`) instead of reporting an escape.
-2. The hatch ratio measured on the reference service: ScholarLM's `backend/go_orchestrator`, pinned
-   at ScholarLM commit `bb60b53`, measured with `-tests` on go1.27.3. Untriaged baselines, both
+1. A guarded-by rule, `//safe:guarded_by(mu)`, with SAFE006 checked where the package variable is
+   declared. It comes before item 2, since recording writes in summaries turns calls like
+   `h.cache.Set(...)` into SAFE008 findings that need it. The guarded SAFE008 findings on the
+   reference service are its acceptance cases.
+2. A function override table beside the type table; summaries that record a call linking two
+   arguments (`root.Add(child)`) instead of reporting an escape; and a writes bit in summaries, so
+   SAFE008 follows calls into other packages.
+3. The hatch ratio measured on the reference service: ScholarLM's `backend/go_orchestrator`, pinned
+   at ScholarLM commit `bb60b53`, measured with `-tests` on go1.27.3. Untriaged baselines, each
    with 0 `//safe:unsafe`:
 
-   | | Transfers | SAFE001 | SAFE002 | SAFE003 | SAFE003-forkjoin | SAFE004 | SAFE006 | Findings |
-   |---|---|---|---|---|---|---|---|---|
-   | With callbacks | 1,642 | 104 | 784 | 685 | 202 | 347 | 130 | 2,252 |
-   | Before callbacks (`538bbe2`) | 1,258 | 104 | 511 | 458 | 193 | 263 | 123 | 1,652 |
+   | | Transfers | SAFE001 | SAFE002 | SAFE003 | SAFE003-forkjoin | SAFE004 | SAFE006 | SAFE008 | Findings |
+   |---|---|---|---|---|---|---|---|---|---|
+   | With SAFE008 | 1,642 | 104 | 784 | 685 | 202 | 347 | 130 | 13 | 2,265 |
+   | With callbacks (`b56b798`) | 1,642 | 104 | 784 | 685 | 202 | 347 | 130 | - | 2,252 |
+   | Before callbacks (`538bbe2`) | 1,258 | 104 | 511 | 458 | 193 | 263 | 123 | - | 1,652 |
 
-   SAFE001 is mostly generated protobuf code and tests. The 384 new transfers are mostly HTTP
-   handlers: `internal/api` went from 365 to 633. The ratio is read against the callbacks
-   denominator, after item 1, by adding overrides until every remaining finding is a real race or
-   a policy call.
-3. A guarded-by rule, `//safe:guarded_by(mu)`, with SAFE006 checked where the package variable is
-   declared.
+   SAFE001 is mostly generated protobuf code and tests. The 384 transfers callbacks added are mostly
+   HTTP handlers: `internal/api` went from 365 to 633. The 13 SAFE008 findings are on 6 handler
+   registrations:
+   - `paper.go` ×7 and `client_telemetry.go` ×3, mostly reached through helper calls;
+   - `login.go:181` and `mcp_wiring.go:46`;
+   - one test.
+
+   Every non-test write is under a mutex: checked line by line in the 2026-11-09 design review, plus
+   `client_telemetry.go:119`, which that review's prototype missed. The ratio is read against this
+   denominator,
+   after items 1 and 2, by adding overrides until every remaining finding is a real race or a
+   policy call.
 4. Ownership of the channel's send end; joins through `select`; a differential test of the summaries
    against `-gcflags=-m`.
 
@@ -303,5 +336,8 @@ Each rule has `analysistest` cases with `// want` expectations, so a disabled ru
 `passes/ownership/testdata/src/user` checks that summaries cross package boundaries, including from
 the standard library. `passes/ownership/testdata/src/supp` checks the reach of `//safe:unsafe` and
 the exact `Stats` counts. `passes/ownership/testdata/src/callbacks` covers each callback function,
-the `Wait` join, handlers, and `sync.Once.Do` as a non-spawn; `errgroup` there is a stub under
+the `Wait` join, handlers, and `sync.Once.Do` as a non-spawn. `testdata/src/handlers` covers
+SAFE008: each kind of write, aliases and loads, bound methods, `ServeHTTP`, calls followed within the
+package, and what is not a finding (per-request memory, atomics and locks, reads, interface and
+cross-package calls, a goroutine the handler starts); `errgroup` there is a stub under
 `testdata/src/golang.org/x/sync`, so `x/sync` stays out of the module's direct dependencies.

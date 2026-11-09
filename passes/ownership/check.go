@@ -28,6 +28,9 @@ func (st *state) checkTransfers(g *graph) {
 }
 
 func (st *state) checkTransfer(g *graph, t transfer) {
+	if sp, ok := spawnOf(t.instr); ok && sp.repeated && t.v == sp.fn {
+		st.checkHandlerWrites(sp, t.pos)
+	}
 	n := g.val(t.v)
 	if n == nil {
 		return

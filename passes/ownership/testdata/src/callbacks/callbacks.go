@@ -116,19 +116,19 @@ func errgroupJoin() error {
 // A handler runs on every request's goroutine, concurrently with the code that registered it.
 func handleFunc() {
 	hits := map[string]int{}
-	http.HandleFunc("/", func(_ http.ResponseWriter, r *http.Request) { hits[r.URL.Path]++ })
-	hits["/"] = 0 // want `SAFE003: variable hits is used after it was captured by a handler registered with net/http\.HandleFunc`
+	http.HandleFunc("/", func(_ http.ResponseWriter, r *http.Request) { hits[r.URL.Path]++ }) // want `SAFE008: captured variable hits is written here by a handler registered with net/http\.HandleFunc`
+	hits["/"] = 0                                                                             // want `SAFE003: variable hits is used after it was captured by a handler registered with net/http\.HandleFunc`
 }
 
 func muxHandleFunc(mux *http.ServeMux) {
 	j := &Job{}
-	mux.HandleFunc("/j", func(http.ResponseWriter, *http.Request) { j.ID++ })
-	j.ID = 0 // want `SAFE003: variable j is used after it was captured by a handler registered with \(\*net/http\.ServeMux\)\.HandleFunc`
+	mux.HandleFunc("/j", func(http.ResponseWriter, *http.Request) { j.ID++ }) // want `SAFE008: captured variable j is written here by a handler registered with \(\*net/http\.ServeMux\)\.HandleFunc`
+	j.ID = 0                                                                  // want `SAFE003: variable j is used after it was captured by a handler registered with \(\*net/http\.ServeMux\)\.HandleFunc`
 }
 
 type counter struct{ n int }
 
-func (c *counter) ServeHTTP(http.ResponseWriter, *http.Request) { c.n++ } // want ServeHTTP:"ownership summary"
+func (c *counter) ServeHTTP(http.ResponseWriter, *http.Request) { c.n++ } // want ServeHTTP:"ownership summary" `SAFE008: receiver c is written here by a handler registered with net/http\.Handle`
 
 func handle() {
 	c := &counter{}
