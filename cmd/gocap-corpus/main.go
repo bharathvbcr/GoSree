@@ -338,5 +338,7 @@ func printSummary(rep Report, path string) {
 	}
 	fmt.Fprintf(&b, "  missed races (%d): %s\n", len(rep.Race.Unflagged), strings.Join(rep.Race.Unflagged, ", "))
 	fmt.Fprintf(&b, "  report: %s\n", path)
-	os.Stdout.Write(b.Bytes())
+	if _, err := os.Stdout.Write(b.Bytes()); err != nil {
+		log.Fatalf("write summary: %v", err)
+	}
 }

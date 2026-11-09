@@ -107,12 +107,12 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 	s := optimistic(fn, st)
 	for i, p := range fn.Params {
 		if n := g.val(p); n != nil {
-			s.leakParam[i] = regionHas(g, n, func(e event) bool { return !(e.kind == evForeign && e.param == i) })
+			s.leakParam[i] = regionHas(g, n, func(e event) bool { return e.kind != evForeign || e.param != i })
 		}
 	}
 	for j, fv := range fn.FreeVars {
 		if n := g.val(fv); n != nil {
-			s.leakFree[j] = regionHas(g, n, func(e event) bool { return !(e.kind == evForeign && e.free == j) })
+			s.leakFree[j] = regionHas(g, n, func(e event) bool { return e.kind != evForeign || e.free != j })
 		}
 	}
 	for _, b := range fn.Blocks {
