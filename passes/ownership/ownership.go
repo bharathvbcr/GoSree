@@ -40,6 +40,8 @@ const (
 	GlobalUse = "SAFE006"
 	// HandlerWrite is a write through memory a handler shares with its other invocations.
 	HandlerWrite = "SAFE008"
+	// GuardViolation is an access to //safe:guarded_by memory without its mutex (lockset.go).
+	GuardViolation = "SAFE009"
 	// UseAfterSynced is reported for SAFE003 uses that every path reaches only after a
 	// synchronisation point that is not a join for the move (forkjoin.go): a receive from another
 	// channel, a select, a mutex or cond, or a join shape the rule does not accept. The separate
@@ -146,6 +148,7 @@ func run(pass *analysis.Pass) (any, error) {
 		st.checkImmStores(fn)
 	}
 	st.checkGlobals(fns)
+	st.checkGuarded(fns)
 	return st.stats, nil
 }
 

@@ -79,14 +79,33 @@ func transitive() {
 	})
 }
 
-// A write under a lock is reported too: there is no //safe:guarded_by rule yet. This is the case that
-// rule will accept.
+// A write under a lock is still SAFE008 when nothing says the lock guards the field.
 func lockedWrite() {
 	h := &Handler{}
 	http.HandleFunc("/l", func(http.ResponseWriter, *http.Request) {
 		h.mu.Lock()
 		h.n++ // want `SAFE008: captured variable h is written here`
 		h.mu.Unlock()
+	})
+}
+
+// With //safe:guarded_by, SAFE009 owns the field: a locked write is accepted, an unlocked one is
+// SAFE009, not SAFE008.
+type Counter struct {
+	mu   sync.Mutex
+	hits map[string]int //safe:guarded_by mu
+}
+
+func guardedWrite() {
+	c := &Counter{hits: map[string]int{}}
+	http.HandleFunc("/c", func(_ http.ResponseWriter, r *http.Request) {
+		c.mu.Lock()
+		c.hits[r.URL.Path]++
+		c.mu.Unlock()
+	})
+	d := &Counter{hits: map[string]int{}}
+	http.HandleFunc("/u", func(_ http.ResponseWriter, r *http.Request) {
+		d.hits[r.URL.Path]++ // want `SAFE009: field hits is guarded by mu but is written here without holding it`
 	})
 }
 

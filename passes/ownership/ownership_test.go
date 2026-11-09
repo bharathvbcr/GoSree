@@ -32,6 +32,12 @@ func TestHandlerWrites(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "handlers")
 }
 
+// TestGuarded checks SAFE009: guarded memory is accessed only under its mutex, //safe:holds helpers
+// are called with it held, and nothing read from guarded memory leaves the lock.
+func TestGuarded(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "guarded")
+}
+
 // TestSuppression checks that //safe:unsafe on a transfer mutes everything that transfer reports, and
 // that Stats counts transfers, suppressed transfers and suppressed findings once each.
 func TestSuppression(t *testing.T) {

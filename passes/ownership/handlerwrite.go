@@ -53,6 +53,9 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 				return
 			}
 			if addr, ok := writeTarget(ins); ok {
+				if _, guarded := st.slotOf(addr); guarded {
+					return // SAFE009 checks guarded memory at every access
+				}
 				if root, ok := sharedRoot(addr, r); ok {
 					pos := posOf(ins, ins)
 					p := st.pass.Fset.Position(pos)

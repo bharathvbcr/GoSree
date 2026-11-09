@@ -42,6 +42,7 @@ other invocations (SAFE008).
 | SAFE006 | a package variable is written outside initialisation and is not `//safe:guarded_by`; reported once, at the declaration, with each write as a related position |
 | SAFE007 | a malformed `//safe:` directive |
 | SAFE008 | a handler (a callback that runs concurrently with itself) writes memory it shares with its other invocations: what it captured, or its receiver |
+| SAFE009 | `//safe:guarded_by` memory is accessed without its mutex held, a `//safe:holds` function is called without it, or a value read from guarded memory leaves the lock |
 
 ### SAFE008: handlers racing with themselves
 
@@ -56,9 +57,34 @@ package the handler calls and into closures it calls directly. It stops at:
 - handler values it cannot resolve to a body.
 
 There is no exemption by type: `s.count++` on an `int` races. Atomic and mutex methods are calls,
-not stores, so they are never reported. A write under a lock is reported until the guarded-by rule
-exists. A `//safe:unsafe` on the registration mutes every SAFE008 of that handler and counts as a
-suppressed transfer. One on a write mutes that line only. One finding is reported per source line.
+not stores, so they are never reported. A write under a lock is reported unless the memory is
+`//safe:guarded_by`; then SAFE009 checks it instead. A `//safe:unsafe` on the registration mutes
+every SAFE008 of that handler and counts as a suppressed transfer. One on a write mutes that line
+only. One finding is reported per source line.
+
+### SAFE009: guarded memory
+
+A field or package variable annotated `//safe:guarded_by mu` may be read only while `mu` is held
+(`RLock` is enough for a `sync.RWMutex`), and written only while it is locked. A function marked
+`//safe:holds mu` may be called only with `mu` held, and must not unlock it (SAFE007). Nothing
+non-shareable read from guarded memory may leave the lock. That covers being returned, sent,
+stored outside memory the same mutex guards, handed to a goroutine or callback, or passed to a
+function whose summary says it may keep it.
+
+"Held" is a forward must-analysis over each function's control-flow graph:
+- **Identity:** a mutex is identified by its path, a root SSA value plus field steps. A load is a
+  step only from a variable assigned once before the load.
+- **Lock operations:** `Lock`/`RLock` add a path and `Unlock`/`RUnlock` remove it. A `TryLock`
+  adds it on the branch where it succeeded. A deferred `Unlock` changes nothing until return.
+- **Calls:** a function of this package releases the parameter mutexes it unlocks (summarised).
+  Any call into another package, interface method or dynamic call releases every mutex in what it
+  receives, including through `fmt.Println(c)`'s variadic slice.
+- **Closures:** a closure called in place starts with its caller's locks. Any other function starts
+  with none, plus its `//safe:holds`.
+
+Exempt: package variables during initialisation, and an object this function allocated that nothing
+else can see yet (a constructor filling it in before it is returned, stored or moved).
+
 ## Annotations
 
 ```go
@@ -83,9 +109,9 @@ func (s *Server) evictLocked() { clear(s.hits) }
 embedded mutex is named `Mutex`) or on a package variable (mu is a package variable). The mutex is a
 `sync.Mutex` or `sync.RWMutex` held by value. Pointers to mutexes, `sync.Locker` values, exported
 fields and local variables are rejected as SAFE007. These are checked claims, like `imm` and `iso`,
-so they count toward neither the hatch ratio nor the override budget. **Status:** the directives are
-parsed and validated, and a guarded package variable is exempt from SAFE006. The check that every
-access holds the mutex (SAFE009) is the next commit, so a guarded field is not yet enforced.
+so they count toward neither the hatch ratio nor the override budget. SAFE009 enforces them, and a
+guarded package variable is exempt from SAFE006. Guarding a field does not yet let a struct cross
+goroutines: SAFE002/003 still treat it as ordinary memory until imm types may have guarded fields.
 
 A `//safe:unsafe` on a transfer (a `go` statement, a send, a call to a `//safe:iso` parameter) covers
 everything that transfer causes: the SAFE002 and SAFE004 at the transfer, and the SAFE003 uses after
@@ -281,7 +307,9 @@ denominator. Goroutines started by a library function missing from the spawner t
 
 - **Fork-join covers channel and WaitGroup joins only.** The [shapes](#fork-join) outside it keep
   what they were given for good.
-- **Lock discipline is not modelled.** Mutex-guarded sharing needs `//safe:unsafe`.
+- **Lock discipline is declared, not inferred.** SAFE009 checks memory annotated
+  `//safe:guarded_by`. A local variable shared under a lock (the race corpus's mutex tests) cannot
+  be annotated yet, and moving a struct with guarded fields to another goroutine is still SAFE002/003.
 - **Only listed callback functions are goroutine boundaries.** A library function that runs its
   argument on another goroutine but is not in `spawn.go` (a worker pool, a scheduler) is an ordinary
   call to gocap. Its callback is checked only through the callee's summary, which treats it as
@@ -289,8 +317,13 @@ denominator. Goroutines started by a library function missing from the spawner t
 - **SAFE008 follows in-package calls only.** A handler that hands shared memory to another
   package's function that writes it (`sort.Ints(s)`, `json.Unmarshal(b, &cfg)`), or to an interface
   method, is not reported: summaries record retention, not writes.
-- **Lock discipline is not modelled for SAFE008 either.** A mutex-guarded handler write is still a
-  finding.
+- **SAFE009 identifies a mutex by its path.** The same mutex reached another way (an alias, or
+  through a load of a pointer field) is a different path, which over-reports and never
+  under-reports. A `TryLock` counts only when its result is the branch condition, or that
+  condition's negation.
+- **SAFE009 treats any call into another package as a possible unlock** of every mutex in what it
+  receives. Its "leaves the lock" check uses callee summaries, so passing guarded memory to a
+  function that retains it (`fmt` included) is a finding.
 - **`Timer.Stop` and `context.AfterFunc`'s stop function are not modelled.** Stopping a callback does
   not hand its memory back, which is right when `Stop` returns false and over-reports when it
   returns true.
@@ -324,8 +357,15 @@ Done:
    - **Done:** SAFE006 checked where the package variable is declared. Race corpus: 229/234, and
      38 → 36 race-free tests clean. `TestNoRaceFinGlobal` (fixed by `//safe:guarded_by Mutex`) and
      `TestNoRaceRpcChan` write package variables outside init.
-   - Lock tracking and SAFE009: every access to guarded memory holds its mutex. SAFE008 leaves
-     guarded writes to SAFE009.
+   - **Done:** lock tracking and SAFE009, with SAFE008 leaving guarded writes to SAFE009. No
+     annotations exist in the corpus or the reference service, so neither moved. On a scratch copy
+     of the reference service with 8 `guarded_by` and 1 `holds` added:
+     - SAFE008 went from 13 to 1 (the unguarded test).
+     - SAFE009 found 2: `paper.go:759` returns the guarded `*TTLCache` (a policy call: accept it, or
+       override the type), and a stress test reads `len(windows)` unlocked.
+
+     The design review predicted 3. Its third, `client_telemetry_test.go:335`, reads under
+     `limiter.mu.Lock()`, so no finding is right.
    - `//safe:imm` types may have guarded fields.
    - Guarded local variables, and the corpus scored a second time on an annotated copy (predicted
      229 / 42).
@@ -375,5 +415,10 @@ the exact `Stats` counts. `passes/ownership/testdata/src/callbacks` covers each 
 the `Wait` join, handlers, and `sync.Once.Do` as a non-spawn. `testdata/src/handlers` covers
 SAFE008: each kind of write, aliases and loads, bound methods, `ServeHTTP`, calls followed within the
 package, and what is not a finding (per-request memory, atomics and locks, reads, interface and
-cross-package calls, a goroutine the handler starts); `errgroup` there is a stub under
+cross-package calls, a goroutine the handler starts). `testdata/src/guarded` covers SAFE009:
+locked, `RLock`, `TryLock` (both branch forms), `defer Unlock`, `//safe:holds` helpers, closures
+called in place, embedded mutexes, guarded package variables and `init`, and constructors. It also
+covers unlocked writes, writes under `RLock`, reads after `Unlock`, the wrong mutex, an unlock by
+another package's function, values leaking by return, by store and through a single result slot,
+closures not called in place, and a `holds` helper that unlocks; `errgroup` there is a stub under
 `testdata/src/golang.org/x/sync`, so `x/sync` stays out of the module's direct dependencies.
