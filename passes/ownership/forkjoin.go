@@ -25,23 +25,32 @@ import (
 // or close is synchronised before the receive that observes it, and Done before the Wait it
 // unblocks; F's last touch of the memory comes before its release.
 
-// joins returns the parent instructions that end the moves made at t, or nil when t is not a
-// go statement or the goroutine cannot hand anything back.
+// A callback started by a spawner with a wait method (WaitGroup.Go, errgroup.Group.Go) has one more
+// join: Wait on the same receiver returns only after every callback started on it has returned, so
+// F's last touch of the memory comes before it. This holds in a loop too, since one Wait covers every
+// callback started before it.
+
+// joins returns the parent instructions that end the moves made at t, or nil when t is not a spawn
+// site or the goroutine cannot hand anything back.
 func (st *state) joins(g *graph, t transfer) map[ssa.Instruction]bool {
-	goIns, ok := t.instr.(*ssa.Go)
+	sp, ok := spawnOf(t.instr)
 	if !ok {
 		return nil
 	}
-	if j, ok := st.joinCache[goIns]; ok {
+	if j, ok := st.joinCache[t.instr]; ok {
 		return j
 	}
-	j := st.computeJoins(g, goIns)
-	st.joinCache[goIns] = j
+	j := st.computeJoins(g, sp)
+	st.joinCache[t.instr] = j
 	return j
 }
 
-func (st *state) computeJoins(g *graph, goIns *ssa.Go) map[ssa.Instruction]bool {
-	f, mc := startedOnce(goIns)
+func (st *state) computeJoins(g *graph, sp spawnSite) map[ssa.Instruction]bool {
+	if sp.repeated {
+		// A handler runs again on the next request: it never hands anything back.
+		return nil
+	}
+	f, mc := sp.closure()
 	if f == nil {
 		return nil
 	}
@@ -53,7 +62,7 @@ func (st *state) computeJoins(g *graph, goIns *ssa.Go) map[ssa.Instruction]bool 
 			roots = append(roots, f.FreeVars[j])
 		}
 	}
-	for i, a := range goIns.Call.Args {
+	for i, a := range sp.args {
 		if g.val(a) != nil {
 			roots = append(roots, f.Params[i])
 		}
@@ -99,6 +108,22 @@ func (st *state) computeJoins(g *graph, goIns *ssa.Go) map[ssa.Instruction]bool 
 	})
 
 	var out map[ssa.Instruction]bool
+	join := func(ins ssa.Instruction) {
+		if out == nil {
+			out = map[ssa.Instruction]bool{}
+		}
+		out[ins] = true
+	}
+	if recv := sp.receiver(); recv != nil {
+		// Every access of F happens before F returns, so no release check is needed.
+		for _, w := range waitCalls(g.fn, recv, sp.wait) {
+			join(w)
+		}
+	}
+	if soleSpawn(mc, true) == nil {
+		// In a loop, a receive or Done does not say which instance of F it synchronised with.
+		return out
+	}
 	for _, b := range mc.Bindings {
 		so := syncObject(g.fn, b)
 		if so == nil {
@@ -114,48 +139,30 @@ func (st *state) computeJoins(g *graph, goIns *ssa.Go) map[ssa.Instruction]bool 
 			continue
 		}
 		for _, a := range so.acquires {
-			if out == nil {
-				out = map[ssa.Instruction]bool{}
-			}
-			out[a] = true
+			join(a)
 		}
 	}
 	return out
 }
 
-// startedOnce returns the function literal a go statement starts, when the closure value is used by
-// that go statement alone and the go statement is not inside a loop: then each run of the parent
-// starts exactly one instance of it.
-func startedOnce(goIns *ssa.Go) (*ssa.Function, *ssa.MakeClosure) {
-	mc, ok := goIns.Call.Value.(*ssa.MakeClosure)
-	if !ok {
-		return nil, nil
-	}
-	if soleGo(mc) != goIns {
-		return nil, nil
-	}
-	return mc.Fn.(*ssa.Function), mc
-}
-
-// soleGo returns the go statement that starts mc when that is mc's only use and is not in a loop.
-func soleGo(mc *ssa.MakeClosure) *ssa.Go {
-	var start *ssa.Go
-	for _, r := range *mc.Referrers() {
-		switch r := r.(type) {
-		case *ssa.DebugRef:
-		case *ssa.Go:
-			if start != nil || r.Call.Value != mc {
-				return nil
-			}
-			start = r
-		default:
-			return nil
+// waitCalls returns the non-deferred calls to the wait method on recv in fn. The receiver must be
+// the very value the spawner was called on, so both calls reach the same object.
+func waitCalls(fn *ssa.Function, recv ssa.Value, wait string) []ssa.Instruction {
+	var out []ssa.Instruction
+	for _, r := range *recv.Referrers() {
+		c, ok := r.(*ssa.Call)
+		if !ok || c.Call.IsInvoke() || len(c.Call.Args) == 0 || c.Call.Args[0] != recv || c.Parent() != fn {
+			continue
+		}
+		callee := c.Call.StaticCallee()
+		if callee == nil {
+			continue
+		}
+		if obj, ok := callee.Object().(*types.Func); ok && obj.FullName() == wait {
+			out = append(out, c)
 		}
 	}
-	if start == nil || reachableAfter(start)(start) {
-		return nil
-	}
-	return start
+	return out
 }
 
 // releasedClean reports whether no access to the moved memory can run after any release. A plain
@@ -385,7 +392,8 @@ func (so *syncObj) call(fn *ssa.Function, ins ssa.Instruction, cc *ssa.CallCommo
 			so.acquires = append(so.acquires, ins)
 		}
 	default:
-		// Includes (*sync.WaitGroup).Go, whose callback is a goroutine this rule does not see.
+		// Includes (*sync.WaitGroup).Go: a WaitGroup that also starts callbacks is not a captured
+		// sync object here. Those callbacks join through their own Wait rule (computeJoins).
 		return false
 	}
 	return true
@@ -396,13 +404,13 @@ func (so *syncObj) call(fn *ssa.Function, ins ssa.Instruction, cc *ssa.CallCommo
 // through it; every Add is in the parent, adds a positive constant, runs at most once and before
 // any of those goroutines starts; and the Adds sum to the number of those goroutines.
 func (so *syncObj) waitGroupOK() bool {
-	var starts []*ssa.Go
+	var starts []ssa.Instruction
 	for cf, rels := range so.releases {
 		mc := so.closures[cf]
 		if mc == nil {
 			return false
 		}
-		start := soleGo(mc)
+		start := soleSpawn(mc, true)
 		if start == nil {
 			return false
 		}

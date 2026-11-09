@@ -20,6 +20,12 @@ func TestImm(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "imm")
 }
 
+// TestCallbacks checks that functions which run a callback on another goroutine (time.AfterFunc,
+// WaitGroup.Go, errgroup, net/http handlers) are goroutine boundaries, and that sync.Once.Do is not.
+func TestCallbacks(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "callbacks")
+}
+
 // TestSuppression checks that //safe:unsafe on a transfer mutes everything that transfer reports, and
 // that Stats counts transfers, suppressed transfers and suppressed findings once each.
 func TestSuppression(t *testing.T) {

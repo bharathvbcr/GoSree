@@ -8,8 +8,9 @@ import (
 )
 
 // checkGlobals reports SAFE006: a package variable that is written outside initialisation and is
-// read or written by a function that runs on a goroutine started in this package. The goroutine
-// call graph follows static calls within the package only.
+// read or written by a function that runs on a goroutine started in this package, by a go statement
+// or a callback spawner (spawn.go). The goroutine call graph follows static calls within the package
+// only.
 func (st *state) checkGlobals(fns []*ssa.Function) {
 	inInit := map[*ssa.Function]bool{}
 	for _, fn := range fns {
@@ -54,10 +55,13 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 		entry[fn] = pos
 		queue = append(queue, fn)
 	}
+	prog := st.ssa.Pkg.Prog
 	for _, fn := range fns {
 		forEachInstr(fn, func(ins ssa.Instruction) {
-			if gs, ok := ins.(*ssa.Go); ok {
-				enqueue(goTarget(gs), gs.Pos())
+			if sp, ok := spawnOf(ins); ok {
+				for _, f := range sp.spawnedFuncs(prog) {
+					enqueue(f, ins.Pos())
+				}
 			}
 		})
 	}
@@ -118,14 +122,6 @@ func forEachInstr(fn *ssa.Function, f func(ssa.Instruction)) {
 			f(ins)
 		}
 	}
-}
-
-func goTarget(gs *ssa.Go) *ssa.Function {
-	cc := gs.Common()
-	if mc, ok := cc.Value.(*ssa.MakeClosure); ok {
-		return mc.Fn.(*ssa.Function)
-	}
-	return cc.StaticCallee()
 }
 
 // globalRoot follows field, index, slice and load steps back to a package variable.

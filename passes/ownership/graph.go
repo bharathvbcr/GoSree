@@ -360,11 +360,18 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		}
 		return
 	}
+	// A callback the callee runs on another goroutine moves there, like a go statement's function.
+	// Its argument is then a transfer and not also an escape into the callee.
+	spawned := -1
+	if sp, ok := spawnOf(ins); ok && sp.via != "" {
+		spawned = sp.arg
+		g.transfer(ins, sp.fn, sp.what(sp.fn))
+	}
 	sum := g.st.summary(fn)
 	name := calleeName(fn)
 	for i, a := range cc.Args {
 		an := g.val(a)
-		if an == nil {
+		if an == nil || i == spawned {
 			continue
 		}
 		switch {

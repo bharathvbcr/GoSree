@@ -271,8 +271,9 @@ func freeVarWritten(fv *ssa.FreeVar) bool {
 }
 
 // closureIsGoroutineBody reports whether fn is an anonymous function whose every closure value is
-// started directly by a go statement. Such a closure owns what it captured: the parent's transfer
-// check proves the parent no longer touches it.
+// started directly by a go statement or by a one-shot callback spawner (time.AfterFunc,
+// WaitGroup.Go). Such a closure owns what it captured: the parent's transfer check proves the parent
+// no longer touches it. A handler is never one: its invocations run concurrently with each other.
 func closureIsGoroutineBody(fn *ssa.Function) bool {
 	parent := fn.Parent()
 	if parent == nil || len(fn.FreeVars) == 0 {
@@ -287,13 +288,11 @@ func closureIsGoroutineBody(fn *ssa.Function) bool {
 			}
 			seen = true
 			for _, r := range *mc.Referrers() {
-				switch r := r.(type) {
-				case *ssa.Go:
-					if r.Call.Value != mc {
-						return false
-					}
-				case *ssa.DebugRef:
-				default:
+				if _, dbg := r.(*ssa.DebugRef); dbg {
+					continue
+				}
+				sp, ok := spawnOf(r)
+				if !ok || sp.fn != mc || sp.repeated || usedAsArg(r, mc, sp.arg) {
 					return false
 				}
 			}

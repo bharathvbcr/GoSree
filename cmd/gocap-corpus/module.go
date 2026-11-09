@@ -142,15 +142,21 @@ func distinctPackages(pkgs []*packages.Package) []*packages.Package {
 func printModuleSummary(rep ModuleReport, path string) {
 	var b bytes.Buffer
 	fmt.Fprintf(&b, "gocap on %s (%s, %s, tests=%v)\n", rep.Dir, strings.Join(rep.Patterns, " "), rep.GoVersion, rep.Tests)
-	fmt.Fprintf(&b, "  %-50s %9s %10s %9s %s\n", "package", "transfers", "suppressed", "hatch", "findings")
+	var shown []PackageStats
+	width := len("package")
 	quiet := 0
 	for _, ps := range rep.Packages {
 		if ps.Transfers == 0 && ps.Suppressed == 0 && len(ps.Findings) == 0 {
 			quiet++
 			continue
 		}
-		fmt.Fprintf(&b, "  %-50s %9d %10d %8.1f%% %s\n", ps.Package, ps.Transfers, ps.SuppressedTransfers,
-			100*ps.HatchRatio(), findings(ps.Findings))
+		shown = append(shown, ps)
+		width = max(width, len(displayName(ps.Package)))
+	}
+	fmt.Fprintf(&b, "  %-*s %9s %10s %9s  %s\n", width, "package", "transfers", "suppressed", "hatch", "findings")
+	for _, ps := range shown {
+		fmt.Fprintf(&b, "  %-*s %9d %10d %8.1f%%  %s\n", width, displayName(ps.Package), ps.Transfers,
+			ps.SuppressedTransfers, 100*ps.HatchRatio(), findings(ps.Findings))
 	}
 	if quiet > 0 {
 		fmt.Fprintf(&b, "  (%d packages with no transfers, suppressions or findings)\n", quiet)
@@ -160,12 +166,21 @@ func printModuleSummary(rep ModuleReport, path string) {
 		t.Transfers, t.SuppressedTransfers, 100*t.HatchRatio())
 	fmt.Fprintf(&b, "         %d findings muted, %d //safe:unsafe directives; remaining findings: %s\n",
 		t.Suppressed, t.UnsafeScope, findings(t.Findings))
-	b.WriteString("  transfers are go statements, channel sends and //safe:iso arguments; goroutines started\n" +
-		"  through callbacks (wg.Go, time.AfterFunc, http handlers) are not counted yet\n")
+	b.WriteString("  transfers are go statements, callbacks run on another goroutine (time.AfterFunc, WaitGroup.Go,\n" +
+		"  errgroup, net/http handlers), channel sends and //safe:iso arguments\n")
 	fmt.Fprintf(&b, "  report: %s\n", path)
 	if _, err := os.Stdout.Write(b.Bytes()); err != nil {
 		log.Fatalf("write summary: %v", err)
 	}
+}
+
+// displayName shortens a test variant's ID, "p [p.test]", to "p +tests" for the table; the JSON
+// keeps the full ID.
+func displayName(id string) string {
+	if base, rest, ok := strings.Cut(id, " ["); ok && rest == base+".test]" {
+		return base + " +tests"
+	}
+	return id
 }
 
 func findings(m map[string]int) string {

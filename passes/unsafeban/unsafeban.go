@@ -1,5 +1,6 @@
-// Package unsafeban reports uses of escape hatches that defeat Go's memory safety: package unsafe,
-// cgo, //go:linkname, and reflect calls that write through or expose raw memory (SAFE001).
+// Package unsafeban reports uses of escape hatches that defeat Go's memory safety: package unsafe
+// (however it is imported), cgo, //go:linkname, functions without a Go body (assembly), and reflect
+// calls that write through or expose raw memory (SAFE001).
 package unsafeban
 
 import (
@@ -53,9 +54,14 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch n := n.(type) {
-			case *ast.SelectorExpr:
-				if obj, ok := pass.TypesInfo.Uses[n.Sel]; ok && obj.Pkg() != nil && obj.Pkg().Path() == "unsafe" && unsafeMembers[obj.Name()] {
+			case *ast.Ident:
+				// Matching the identifier, not a selector, also catches a dot import of unsafe.
+				if obj, ok := pass.TypesInfo.Uses[n]; ok && obj.Pkg() != nil && obj.Pkg().Path() == "unsafe" && unsafeMembers[obj.Name()] {
 					report(n, "unsafe."+obj.Name()+" bypasses Go's memory safety; wrap it in //safe:unsafe <reason>")
+				}
+			case *ast.FuncDecl:
+				if n.Body == nil {
+					report(n, "function "+n.Name.Name+" has no Go body: it is implemented in assembly or linked in, which bypasses Go's memory safety")
 				}
 			case *ast.CallExpr:
 				if name := reflectWrite(pass, n); name != "" {

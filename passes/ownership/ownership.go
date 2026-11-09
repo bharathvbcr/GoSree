@@ -12,8 +12,9 @@
 //	SAFE006  a package variable written outside init is accessed from code that runs on a goroutine
 //
 // A value crosses to another goroutine when it is an argument of a go statement, the closure a go
-// statement starts, a value sent on a channel, or an argument for a //safe:iso parameter. A closure's
-// captured variables cross only when the closure itself does.
+// statement starts, a callback handed to a function that runs it on another goroutine (spawn.go), a
+// value sent on a channel, or an argument for a //safe:iso parameter. A closure's captured variables
+// cross only when the closure itself does.
 package ownership
 
 import (
@@ -85,7 +86,7 @@ type state struct {
 	// graphs caches the alias graph of each function once summaries are final; the fork-join rule
 	// reads a goroutine body's graph while checking its parent.
 	graphs    map[*ssa.Function]*graph
-	joinCache map[*ssa.Go]map[ssa.Instruction]bool
+	joinCache map[ssa.Instruction]map[ssa.Instruction]bool
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the
@@ -116,7 +117,7 @@ func run(pass *analysis.Pass) (any, error) {
 		suppressed: map[reportKey]bool{},
 
 		graphs:    map[*ssa.Function]*graph{},
-		joinCache: map[*ssa.Go]map[ssa.Instruction]bool{},
+		joinCache: map[ssa.Instruction]map[ssa.Instruction]bool{},
 	}
 	st.stats.UnsafeScope = st.ix.UnsafeScopes()
 	st.validateImm()
