@@ -6,9 +6,12 @@
 //	//safe:unsafe <reason>   exempts the statement or declaration it is attached to from every gocap rule
 //	//safe:iso p, q          on a func: parameters p and q are owned; passing an argument to them moves it
 //	//safe:imm               on a type: values of the type are deeply immutable
+//	//safe:guarded_by mu     on a struct field or package variable: every access must hold mu, a
+//	                         sibling field or package variable of type sync.Mutex or sync.RWMutex
+//	//safe:holds mu          on a func: callers must hold mu (a receiver field or package variable)
 //
-// A directive attaches to the declaration whose doc comment it is in, to the statement on the line
-// that follows the comment group, or to the statement it trails on the same line.
+// A directive attaches to the declaration whose doc comment it is in, to the statement, spec or
+// struct field on the line that follows the comment group, or to the one it trails on the same line.
 package annot
 
 import (
@@ -38,6 +41,20 @@ type Index struct {
 	// ImmTypes holds the types annotated //safe:imm. They are candidates: the ownership pass decides
 	// whether each one actually satisfies the imm rules.
 	ImmTypes map[*types.TypeName]token.Pos
+	// Guarded maps a struct field or package variable annotated //safe:guarded_by to the mutex that
+	// guards it: a field of the same struct, or a package variable.
+	Guarded map[*types.Var]*types.Var
+	// Holds maps a function annotated //safe:holds to the mutexes its callers must hold.
+	Holds map[*types.Func][]*types.Var
+}
+
+// HoldsDirectives counts the //safe:holds directives.
+func (ix *Index) HoldsDirectives() int {
+	n := 0
+	for _, mus := range ix.Holds {
+		n += len(mus)
+	}
+	return n
 }
 
 // Suppressed reports whether pos lies inside a //safe:unsafe scope.
@@ -62,9 +79,14 @@ var Analyzer = &analysis.Analyzer{
 }
 
 func run(pass *analysis.Pass) (any, error) {
-	ix := &Index{IsoVars: map[*types.Var]bool{}, ImmTypes: map[*types.TypeName]token.Pos{}}
+	ix := &Index{
+		IsoVars:  map[*types.Var]bool{},
+		ImmTypes: map[*types.TypeName]token.Pos{},
+		Guarded:  map[*types.Var]*types.Var{},
+		Holds:    map[*types.Func][]*types.Var{},
+	}
 	for _, file := range pass.Files {
-		starts := lineStarts(pass.Fset, file)
+		starts, structOf := lineStarts(pass.Fset, file)
 		for _, cg := range file.Comments {
 			for _, c := range cg.List {
 				if !strings.HasPrefix(c.Text, Prefix) {
@@ -78,14 +100,14 @@ func run(pass *analysis.Pass) (any, error) {
 				verb, args, _ := strings.Cut(strings.TrimSpace(text), " ")
 				args = strings.TrimSpace(args)
 				target := attach(pass.Fset, cg, c, starts)
-				apply(pass, ix, c, verb, args, target)
+				apply(pass, ix, c, verb, args, target, structOf)
 			}
 		}
 	}
 	return ix, nil
 }
 
-func apply(pass *analysis.Pass, ix *Index, c *ast.Comment, verb, args string, target ast.Node) {
+func apply(pass *analysis.Pass, ix *Index, c *ast.Comment, verb, args string, target ast.Node, structOf map[*ast.Field]*ast.StructType) {
 	malformed := func(format string, a ...any) {
 		pass.Report(analysis.Diagnostic{Pos: c.Pos(), End: c.End(), Category: CategoryMalformed,
 			Message: CategoryMalformed + ": " + fmt.Sprintf(format, a...)})
@@ -131,8 +153,12 @@ func apply(pass *analysis.Pass, ix *Index, c *ast.Comment, verb, args string, ta
 		if tn, ok := pass.TypesInfo.Defs[ts.Name].(*types.TypeName); ok {
 			ix.ImmTypes[tn] = ts.Pos()
 		}
+	case "guarded_by":
+		applyGuardedBy(pass, ix, target, args, structOf, malformed)
+	case "holds":
+		applyHolds(pass, ix, target, args, malformed)
 	default:
-		malformed("unknown directive //safe:%s (known: unsafe, iso, imm)", verb)
+		malformed("unknown directive //safe:%s (known: unsafe, iso, imm, guarded_by, holds)", verb)
 	}
 }
 
@@ -167,20 +193,30 @@ func typeSpec(n ast.Node) *ast.TypeSpec {
 	return nil
 }
 
-// lineStarts maps each line to the outermost statement, declaration or spec that starts on it.
-func lineStarts(fset *token.FileSet, file *ast.File) map[int]ast.Node {
+// lineStarts maps each line to the outermost statement, declaration, spec or struct field that starts
+// on it, and records the struct each field belongs to.
+func lineStarts(fset *token.FileSet, file *ast.File) (map[int]ast.Node, map[*ast.Field]*ast.StructType) {
 	starts := map[int]ast.Node{}
+	structOf := map[*ast.Field]*ast.StructType{}
+	mark := func(n ast.Node) {
+		line := fset.Position(n.Pos()).Line
+		if _, seen := starts[line]; !seen {
+			starts[line] = n
+		}
+	}
 	ast.Inspect(file, func(n ast.Node) bool {
-		switch n.(type) {
+		switch n := n.(type) {
 		case ast.Stmt, ast.Decl, ast.Spec:
-			line := fset.Position(n.Pos()).Line
-			if _, seen := starts[line]; !seen {
-				starts[line] = n
+			mark(n)
+		case *ast.StructType:
+			for _, f := range n.Fields.List {
+				structOf[f] = n
+				mark(f)
 			}
 		}
 		return true
 	})
-	return starts
+	return starts, structOf
 }
 
 // attach finds the node a directive applies to: a node it trails on the same line, otherwise the node

@@ -9,7 +9,7 @@
 //	SAFE003  a value is used after it was moved to another goroutine
 //	SAFE004  a moved value also escapes somewhere else (stored, returned, retained by a callee)
 //	SAFE005  a //safe:imm type is malformed or written after construction
-//	SAFE006  a package variable written outside init is accessed from code that runs on a goroutine
+//	SAFE006  a package variable is written outside initialisation and not //safe:guarded_by
 //	SAFE008  a handler writes memory it shares with its other invocations (handlerwrite.go)
 //
 // A value crosses to another goroutine when it is an argument of a go statement, the closure a go
@@ -50,7 +50,7 @@ const (
 // Analyzer is the ownership checker.
 var Analyzer = &analysis.Analyzer{
 	Name:      "safeownership",
-	Doc:       "check moves of memory between goroutines, package-variable sharing and //safe:imm types (SAFE002-SAFE006)",
+	Doc:       "check moves of memory between goroutines, package-variable mutation, //safe:imm types and handler writes (SAFE002-SAFE006, SAFE008)",
 	Run:       run,
 	Requires:  []*analysis.Analyzer{annot.Analyzer, buildssa.Analyzer},
 	FactTypes: []analysis.Fact{new(FuncFact), new(ImmFact)},
@@ -69,6 +69,11 @@ type Stats struct {
 	Suppressed int `json:"suppressed_findings"`
 	// UnsafeScope counts the //safe:unsafe directives in the package.
 	UnsafeScope int `json:"unsafe_directives"`
+	// Guarded counts fields and package variables annotated //safe:guarded_by, and Holds the
+	// //safe:holds directives. Like imm and iso they are checked claims, not escape hatches: neither
+	// counts toward the hatch ratio or the override budget.
+	Guarded int `json:"guarded_directives"`
+	Holds   int `json:"holds_directives"`
 }
 
 type state struct {
@@ -123,6 +128,8 @@ func run(pass *analysis.Pass) (any, error) {
 		joinCache: map[ssa.Instruction]map[ssa.Instruction]bool{},
 	}
 	st.stats.UnsafeScope = st.ix.UnsafeScopes()
+	st.stats.Guarded = len(st.ix.Guarded)
+	st.stats.Holds = st.ix.HoldsDirectives()
 	st.validateImm()
 	st.cls = st.newClassifier()
 
@@ -184,6 +191,12 @@ func (st *state) exportFacts(fns []*ssa.Function) {
 }
 
 func (st *state) report(pos token.Pos, cat, msg string) {
+	st.reportRelated(pos, cat, msg, nil)
+}
+
+// reportRelated reports a finding with related positions (the writes behind a declaration-site
+// SAFE006, say). Suppression and de-duplication go by the finding's own position.
+func (st *state) reportRelated(pos token.Pos, cat, msg string, related []analysis.RelatedInformation) {
 	k := reportKey{pos, cat}
 	if st.muted || st.ix.Suppressed(pos) {
 		if st.muted {
@@ -203,5 +216,5 @@ func (st *state) report(pos token.Pos, cat, msg string) {
 	if cat == UseAfterSynced {
 		ruleID = UseAfter
 	}
-	st.pass.Report(analysis.Diagnostic{Pos: pos, Category: cat, Message: ruleID + ": " + msg})
+	st.pass.Report(analysis.Diagnostic{Pos: pos, Category: cat, Message: ruleID + ": " + msg, Related: related})
 }

@@ -102,6 +102,8 @@ func runModule(dir string, tests bool, patterns []string, out string) {
 		rep.Total.SuppressedTransfers += ps.SuppressedTransfers
 		rep.Total.Suppressed += ps.Suppressed
 		rep.Total.UnsafeScope += ps.UnsafeScope
+		rep.Total.Guarded += ps.Guarded
+		rep.Total.Holds += ps.Holds
 		for c, n := range ps.Findings {
 			rep.Total.Findings[c] += n
 		}
@@ -166,6 +168,8 @@ func printModuleSummary(rep ModuleReport, path string) {
 		t.Transfers, t.SuppressedTransfers, 100*t.HatchRatio())
 	fmt.Fprintf(&b, "         %d findings muted, %d //safe:unsafe directives; remaining findings: %s\n",
 		t.Suppressed, t.UnsafeScope, findings(t.Findings))
+	fmt.Fprintf(&b, "         checked claims (not counted as escape hatches): %d guarded_by, %d holds\n",
+		t.Guarded, t.Holds)
 	b.WriteString("  transfers are go statements, callbacks run on another goroutine (time.AfterFunc, WaitGroup.Go,\n" +
 		"  errgroup, net/http handlers), channel sends and //safe:iso arguments\n")
 	fmt.Fprintf(&b, "  report: %s\n", path)

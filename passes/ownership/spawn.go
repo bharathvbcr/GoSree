@@ -150,20 +150,8 @@ func usedAsArg(ins ssa.Instruction, v ssa.Value, skip int) bool {
 	return false
 }
 
-// spawnedFuncs returns the functions of this package that run on the other goroutine: the closure
-// or function started, or a handler value's ServeHTTP method.
-func (sp spawnSite) spawnedFuncs(prog *ssa.Program) []*ssa.Function {
-	if fn := spawnedFunc(prog, sp.fn, sp.handler); fn != nil {
-		return []*ssa.Function{fn}
-	}
-	if c, ok := sp.ins.(*ssa.Go); ok {
-		if fn := c.Call.StaticCallee(); fn != nil {
-			return []*ssa.Function{fn}
-		}
-	}
-	return nil
-}
-
+// spawnedFunc returns the function a spawned value runs: the closure or function started, or a
+// handler value's ServeHTTP method.
 func spawnedFunc(prog *ssa.Program, v ssa.Value, handler bool) *ssa.Function {
 	for range 16 {
 		switch x := v.(type) {

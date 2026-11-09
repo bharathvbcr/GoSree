@@ -93,7 +93,7 @@ func callForward(ch chan *Job) {
 	_ = j.ID // want `SAFE003: composite literal is used after it was passed to owned parameter 1`
 }
 
-var registry []*Job
+var registry []*Job // want `SAFE006: package variable registry is written outside init`
 
 // Moving a value that is also stored in a package variable.
 func sendAndKeep(ch chan *Job) {

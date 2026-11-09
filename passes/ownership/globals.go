@@ -3,105 +3,112 @@ package ownership
 import (
 	"fmt"
 	"go/token"
+	"go/types"
+	"sort"
 
+	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ssa"
 )
 
-// checkGlobals reports SAFE006: a package variable that is written outside initialisation and is
-// read or written by a function that runs on a goroutine started in this package, by a go statement
-// or a callback spawner (spawn.go). The goroutine call graph follows static calls within the package
-// only.
+// checkGlobals reports SAFE006 at the declaration of every package variable of this package that is
+// written outside initialisation and is not //safe:guarded_by. A package variable is accessed in
+// place by whatever goroutine touches it, so a write after initialisation is shared mutable state
+// whatever its type; sync and atomic types are written through method calls, which are not writes
+// here. The writes are attached as related positions, so a reader (or the race-corpus scorer) can
+// see which code makes the variable mutable. A //safe:unsafe on the declaration accepts it.
+//
+// Initialisation is init, package variable initialisers, and init-only helpers: functions every
+// caller of which is initialisation and whose value is never taken.
 func (st *state) checkGlobals(fns []*ssa.Function) {
-	inInit := map[*ssa.Function]bool{}
+	initOnly := st.initFuncs(fns)
+	writes := map[*ssa.Global][]token.Pos{}
 	for _, fn := range fns {
-		if isInit(fn) {
-			inInit[fn] = true
-		}
-	}
-	if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil {
-		inInit[pkgInit] = true
-	}
-
-	written := map[*ssa.Global]token.Pos{}
-	for _, fn := range fns {
-		if inInit[fn] {
+		if initOnly[fn] {
 			continue
 		}
 		forEachInstr(fn, func(ins ssa.Instruction) {
-			if g, ok := writtenGlobal(ins); ok && g.Pkg == st.ssa.Pkg {
-				if _, seen := written[g]; !seen {
-					written[g] = ins.Pos()
-				}
+			g, ok := writtenGlobal(ins)
+			if !ok || g.Pkg != st.ssa.Pkg {
+				return
 			}
+			if v, ok := g.Object().(*types.Var); ok && st.ix.Guarded[v] != nil {
+				return // SAFE009 checks guarded variables at every access
+			}
+			writes[g] = append(writes[g], posOf(ins, ins))
 		})
 	}
-	if len(written) == 0 {
-		return
+	globals := make([]*ssa.Global, 0, len(writes))
+	for g := range writes {
+		globals = append(globals, g)
 	}
+	sort.Slice(globals, func(i, j int) bool { return globals[i].Pos() < globals[j].Pos() })
+	for _, g := range globals {
+		ws := writes[g]
+		sort.Slice(ws, func(i, j int) bool { return ws[i] < ws[j] })
+		related := make([]analysis.RelatedInformation, 0, len(ws))
+		for _, w := range ws {
+			related = append(related, analysis.RelatedInformation{Pos: w, Message: "written here"})
+		}
+		st.reportRelated(g.Pos(), GlobalUse, fmt.Sprintf(
+			"package variable %s is written outside init%s; guard it with //safe:guarded_by or write it only during initialisation",
+			g.Name(), st.at(ws[0])), related)
+	}
+}
 
-	// Functions that run on a goroutine, with the go statement that starts them.
-	entry := map[*ssa.Function]token.Pos{}
-	var queue []*ssa.Function
-	enqueue := func(fn *ssa.Function, pos token.Pos) {
-		if fn == nil || fn.Pkg != st.ssa.Pkg {
-			return
+// initFuncs returns the functions that run only during initialisation: init functions (and closures
+// inside them), the package initialiser, and functions whose every static caller is one of those and
+// whose value is never taken.
+func (st *state) initFuncs(fns []*ssa.Function) map[*ssa.Function]bool {
+	out := map[*ssa.Function]bool{}
+	for _, fn := range fns {
+		if isInit(fn) {
+			out[fn] = true
 		}
-		if o := fn.Origin(); o != nil {
-			fn = o
-		}
-		if _, seen := entry[fn]; seen {
-			return
-		}
-		entry[fn] = pos
-		queue = append(queue, fn)
 	}
-	prog := st.ssa.Pkg.Prog
+	if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil {
+		out[pkgInit] = true
+	}
+	callers := map[*ssa.Function][]*ssa.Function{}
+	taken := map[*ssa.Function]bool{}
 	for _, fn := range fns {
 		forEachInstr(fn, func(ins ssa.Instruction) {
-			if sp, ok := spawnOf(ins); ok {
-				for _, f := range sp.spawnedFuncs(prog) {
-					enqueue(f, ins.Pos())
+			var static *ssa.Function
+			if c, ok := ins.(ssa.CallInstruction); ok && !c.Common().IsInvoke() {
+				if f, ok := c.Common().Value.(*ssa.Function); ok {
+					static = f
+					callers[f] = append(callers[f], fn)
+				}
+			}
+			for _, op := range ins.Operands(nil) {
+				if op == nil {
+					continue
+				}
+				if f, ok := (*op).(*ssa.Function); ok && f != static {
+					taken[f] = true
 				}
 			}
 		})
 	}
-	for len(queue) > 0 {
-		fn := queue[0]
-		queue = queue[1:]
-		start := entry[fn]
-		forEachInstr(fn, func(ins ssa.Instruction) {
-			switch ins := ins.(type) {
-			case ssa.CallInstruction:
-				if _, isGo := ins.(*ssa.Go); !isGo {
-					enqueue(ins.Common().StaticCallee(), start)
+	for changed := true; changed; {
+		changed = false
+		for _, fn := range fns {
+			if out[fn] || taken[fn] || len(callers[fn]) == 0 || fn.Pkg != st.ssa.Pkg {
+				continue
+			}
+			all := true
+			for _, c := range callers[fn] {
+				if !out[c] {
+					all = false
+					break
 				}
-			case *ssa.MakeClosure:
-				enqueue(ins.Fn.(*ssa.Function), start)
 			}
-		})
-	}
-
-	type key struct {
-		fn *ssa.Function
-		g  *ssa.Global
-	}
-	done := map[key]bool{}
-	for fn, start := range entry {
-		forEachInstr(fn, func(ins ssa.Instruction) {
-			g, ok := accessedGlobal(ins)
-			if !ok {
-				return
+			if all {
+				out[fn] = true
+				changed = true
 			}
-			wpos, mutable := written[g]
-			if !mutable || done[key{fn, g}] {
-				return
-			}
-			done[key{fn, g}] = true
-			st.report(posOf(ins, ins), GlobalUse, fmt.Sprintf(
-				"package variable %s is written outside init%s and accessed here on a goroutine started%s",
-				g.Name(), st.at(wpos), st.at(start)))
-		})
+		}
 	}
+	return out
 }
 
 func isInit(fn *ssa.Function) bool {
@@ -167,23 +174,6 @@ func writtenGlobal(ins ssa.Instruction) (*ssa.Global, bool) {
 				return globalRoot(ins.Call.Args[0])
 			}
 		}
-	}
-	return nil, false
-}
-
-func accessedGlobal(ins ssa.Instruction) (*ssa.Global, bool) {
-	if g, ok := writtenGlobal(ins); ok {
-		return g, true
-	}
-	switch ins := ins.(type) {
-	case *ssa.UnOp:
-		if ins.Op == token.MUL {
-			return globalRoot(ins.X)
-		}
-	case *ssa.Lookup:
-		return globalRoot(ins.X)
-	case *ssa.Range:
-		return globalRoot(ins.X)
 	}
 	return nil, false
 }

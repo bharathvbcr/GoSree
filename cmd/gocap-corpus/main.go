@@ -270,11 +270,20 @@ func score(p *packages.Package, diags []analysis.Diagnostic) Report {
 			order = append(order, fi)
 		}
 	}
+	// A finding counts for the function it is in and for every function holding one of its related
+	// positions: a declaration-site SAFE006 implicates the functions whose writes make the variable
+	// mutable.
 	for _, d := range diags {
-		for _, fi := range order {
-			if d.Pos >= fi.decl.Pos() && d.Pos < fi.decl.End() {
-				fi.cats[d.Category] = true
-				break
+		positions := []token.Pos{d.Pos}
+		for _, r := range d.Related {
+			positions = append(positions, r.Pos)
+		}
+		for _, pos := range positions {
+			for _, fi := range order {
+				if pos >= fi.decl.Pos() && pos < fi.decl.End() {
+					fi.cats[d.Category] = true
+					break
+				}
 			}
 		}
 	}

@@ -86,12 +86,12 @@ func waitGroupOtherWait() {
 }
 
 // A callback that keeps the memory somewhere else does not hand it back at Wait.
-var kept *Job
+var kept *Job // want `SAFE006: package variable kept is written outside init`
 
 func waitGroupKeeps() {
 	var wg sync.WaitGroup
 	j := &Job{}
-	wg.Go(func() { kept = j }) // want `SAFE006: package variable kept is written outside init`
+	wg.Go(func() { kept = j })
 	wg.Wait()
 	j.ID = 2 // want `SAFE003: variable j is used after it was captured by a goroutine started by \(\*sync\.WaitGroup\)\.Go \(line \d+\) \(after a synchronisation point`
 }
@@ -145,11 +145,11 @@ func handlerSharesCapture(out chan *Job) {
 }
 
 // A package variable written in a handler is shared with every request goroutine.
-var served int
+var served int // want `SAFE006: package variable served is written outside init`
 
 func registerCounter() {
 	http.HandleFunc("/n", func(http.ResponseWriter, *http.Request) {
-		served++ // want `SAFE006: package variable served is written outside init`
+		served++
 	})
 }
 

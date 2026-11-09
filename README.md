@@ -39,7 +39,7 @@ other invocations (SAFE008).
 | SAFE003 | a value is used after it was moved; `SAFE003-forkjoin` marks uses reached only after a channel receive, `select`, `WaitGroup.Wait` or `Lock` that is not a [join](#fork-join) for that move |
 | SAFE004 | a moved value also escapes elsewhere (stored in a package variable, kept by a callee, returned) |
 | SAFE005 | a `//safe:imm` type is malformed, or is written after its composite literal |
-| SAFE006 | a package variable written outside `init` is accessed by code that runs on a goroutine |
+| SAFE006 | a package variable is written outside initialisation and is not `//safe:guarded_by`; reported once, at the declaration, with each write as a related position |
 | SAFE007 | a malformed `//safe:` directive |
 | SAFE008 | a handler (a callback that runs concurrently with itself) writes memory it shares with its other invocations: what it captured, or its receiver |
 
@@ -69,7 +69,23 @@ func forward(ch chan *Job, j *Job) { ch <- j }
 type Config struct{ name string; port int }
 
 //safe:unsafe <reason>  // exempts the next statement, or the whole function from its doc comment
+
+type Server struct {
+	mu   sync.Mutex
+	hits map[string]int //safe:guarded_by mu   // every access must hold mu
+}
+
+//safe:holds mu         // on a func: its callers must hold mu (a receiver field or package variable)
+func (s *Server) evictLocked() { clear(s.hits) }
 ```
+
+`//safe:guarded_by mu` goes on an unexported struct field (mu is a field of the same struct; an
+embedded mutex is named `Mutex`) or on a package variable (mu is a package variable). The mutex is a
+`sync.Mutex` or `sync.RWMutex` held by value. Pointers to mutexes, `sync.Locker` values, exported
+fields and local variables are rejected as SAFE007. These are checked claims, like `imm` and `iso`,
+so they count toward neither the hatch ratio nor the override budget. **Status:** the directives are
+parsed and validated, and a guarded package variable is exempt from SAFE006. The check that every
+access holds the mutex (SAFE009) is the next commit, so a guarded field is not yet enforced.
 
 A `//safe:unsafe` on a transfer (a `go` statement, a send, a call to a `//safe:iso` parameter) covers
 everything that transfer causes: the SAFE002 and SAFE004 at the transfer, and the SAFE003 uses after
@@ -183,16 +199,24 @@ joins, because a panic between the move and the join would run it early.
 
 `go run ./cmd/gocap-corpus -out build` copies `$GOROOT/src/runtime/race/testdata` into `build/` (never
 committed), runs gocap unannotated, and writes `build/corpus-report.json`. A test function counts as
-flagged if gocap reports anything in it or in a same-package function it calls.
+flagged if gocap reports anything in it or in a same-package function it calls. A finding also
+counts where its related positions are, so a declaration-site SAFE006 counts for the functions whose
+writes make the variable mutable.
 
 go1.27.3, 22 of 24 files. Skipped: `cgo_test.go` imports `internal/testenv` and `synctest_test.go`
 imports `internal/synctest`; neither can build outside GOROOT.
 
-| | With callbacks | Predicted before that run | With fork-join | Predicted before that run | MVP (`b42b26c`) | Predicted before the MVP run |
-|---|---|---|---|---|---|---|
-| `TestRace*` flagged | 229 / 234 (97.9%) | 229 | 228 / 234 (97.4%) | 228, unchanged | 228 / 234 (97.4%) | at least 85% |
-| `TestNoRace*` clean | 38 / 129 (29.5%) | 38 | 40 / 129 (31.0%) | 40 | 30 / 129 (23.3%) | 15 to 40% |
-| `TestNoRace*` flagged only for fork-join | 7 | 7 | 7 | 7 | 17 | expected to dominate the misses; **it did not** |
+| | SAFE006 at the declaration | Predicted before that run | With callbacks | Predicted before that run | With fork-join | Predicted before that run | MVP (`b42b26c`) | Predicted before the MVP run |
+|---|---|---|---|---|---|---|---|---|
+| `TestRace*` flagged | 229 / 234 (97.9%) | 229 (needs related positions) | 229 / 234 (97.9%) | 229 | 228 / 234 (97.4%) | 228, unchanged | 228 / 234 (97.4%) | at least 85% |
+| `TestNoRace*` clean | 36 / 129 (27.9%) | at most 38; the design review said 38 | 38 / 129 (29.5%) | 38 | 40 / 129 (31.0%) | 40 | 30 / 129 (23.3%) | 15 to 40% |
+| `TestNoRace*` flagged only for fork-join | 7 | 7 | 7 | 7 | 7 | 7 | 17 | expected to dominate the misses; **it did not** |
+
+Moving SAFE006 to the declaration would have dropped five races caught only by it
+(`TestRaceIssue12664`…`_4`, `TestRaceIntRWGlobalFuncs`): the finding left the test functions. Scoring
+related positions keeps them. Two race-free tests became flagged because they write a package
+variable outside init: `TestNoRaceFinGlobal` (its mutex-guarded counter needs
+`//safe:guarded_by Mutex`) and `TestNoRaceRpcChan` (a counter reset on one goroutine).
 
 The callbacks run moved exactly the three predicted tests. `TestRaceAfterFunc3` is now flagged: two
 `time.AfterFunc` callbacks capture one variable. Two `TestNoRace*` tests became flagged.
@@ -270,8 +294,11 @@ denominator. Goroutines started by a library function missing from the spawner t
 - **`Timer.Stop` and `context.AfterFunc`'s stop function are not modelled.** Stopping a callback does
   not hand its memory back, which is right when `Stop` returns false and over-reports when it
   returns true.
-- **SAFE006 is in-package only.** It follows static calls only, and misses globals mutated through
-  methods.
+- **SAFE006 sees direct writes only.** A store, map update or `copy`/`delete`/`clear` into the
+  variable counts. A write through a method of another package, or through a pointer that escaped
+  the package, does not. Initialisation is `init`, variable initialisers, and helpers every caller of
+  which is initialisation and whose value is never taken. A variable reassigned only by tests (a
+  test seam) is a finding; accept it with `//safe:unsafe` on the declaration.
 - **Imm types are minimal.** Only struct types with unexported, shareable fields qualify: no slices
   or maps. Shared imm values must be built with `&T{...}`.
 - **Trailing directives attach forward.** A `//safe:unsafe` trailing the closing line of a
@@ -290,10 +317,18 @@ Done:
 - SAFE001 for dot imports of `unsafe` and functions without a Go body;
 - SAFE008 for handlers that write shared memory.
 
-1. A guarded-by rule, `//safe:guarded_by(mu)`, with SAFE006 checked where the package variable is
-   declared. It comes before item 2, since recording writes in summaries turns calls like
+1. A guarded-by rule. It comes before item 2, since recording writes in summaries turns calls like
    `h.cache.Set(...)` into SAFE008 findings that need it. The guarded SAFE008 findings on the
-   reference service are its acceptance cases.
+   reference service are its acceptance cases. Five steps, from the 2026-11-09 design ruling:
+   - **Done:** parse `//safe:guarded_by mu` and `//safe:holds mu`.
+   - **Done:** SAFE006 checked where the package variable is declared. Race corpus: 229/234, and
+     38 → 36 race-free tests clean. `TestNoRaceFinGlobal` (fixed by `//safe:guarded_by Mutex`) and
+     `TestNoRaceRpcChan` write package variables outside init.
+   - Lock tracking and SAFE009: every access to guarded memory holds its mutex. SAFE008 leaves
+     guarded writes to SAFE009.
+   - `//safe:imm` types may have guarded fields.
+   - Guarded local variables, and the corpus scored a second time on an annotated copy (predicted
+     229 / 42).
 2. A function override table beside the type table; summaries that record a call linking two
    arguments (`root.Add(child)`) instead of reporting an escape; and a writes bit in summaries, so
    SAFE008 follows calls into other packages.
@@ -303,7 +338,8 @@ Done:
 
    | | Transfers | SAFE001 | SAFE002 | SAFE003 | SAFE003-forkjoin | SAFE004 | SAFE006 | SAFE008 | Findings |
    |---|---|---|---|---|---|---|---|---|---|
-   | With SAFE008 | 1,642 | 104 | 784 | 685 | 202 | 347 | 130 | 13 | 2,265 |
+   | SAFE006 at the declaration | 1,642 | 104 | 784 | 685 | 202 | 347 | 238 | 13 | 2,373 |
+   | With SAFE008 (`8add3ad`) | 1,642 | 104 | 784 | 685 | 202 | 347 | 130 | 13 | 2,265 |
    | With callbacks (`b56b798`) | 1,642 | 104 | 784 | 685 | 202 | 347 | 130 | - | 2,252 |
    | Before callbacks (`538bbe2`) | 1,258 | 104 | 511 | 458 | 193 | 263 | 123 | - | 1,652 |
 
