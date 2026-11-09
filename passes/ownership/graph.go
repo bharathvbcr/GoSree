@@ -196,14 +196,16 @@ func (g *graph) instr(ins ssa.Instruction) {
 		for _, e := range ins.Edges {
 			g.join(ins, e)
 		}
+	// A field or element of a shared value (one with no class: an imm or shared-by-design type) is
+	// shared memory too, not a fresh value; a load through a shared pointer is treated the same way.
 	case *ssa.FieldAddr:
-		g.join(ins, ins.X)
+		g.deriveOrForeign(ins, ins.X, "a field of shared value "+ins.X.Type().String())
 	case *ssa.Field:
-		g.join(ins, ins.X)
+		g.deriveOrForeign(ins, ins.X, "a field of shared value "+ins.X.Type().String())
 	case *ssa.IndexAddr:
-		g.join(ins, ins.X)
+		g.deriveOrForeign(ins, ins.X, "an element of shared value "+ins.X.Type().String())
 	case *ssa.Index:
-		g.join(ins, ins.X)
+		g.deriveOrForeign(ins, ins.X, "an element of shared value "+ins.X.Type().String())
 	case *ssa.Slice:
 		g.join(ins, ins.X)
 	case *ssa.ChangeType:

@@ -34,6 +34,11 @@ func mutateAfterBuild() *Config {
 	return c
 }
 
+// The address of a field of an imm value points into shared memory: it is not owned.
+func sendFieldAddr(ch chan *int, c *Config) {
+	ch <- &c.port // want `SAFE002: parameter c is sent on a channel but is not owned here: it may alias a field of shared value`
+}
+
 // Bad holds a slice, which another goroutine could still mutate.
 //
 //safe:imm

@@ -181,6 +181,50 @@ func addTotalUnlocked() {
 	total++ // want `SAFE009: package variable total is guarded by gmu but is written here without holding it`
 }
 
+// --- imm with guarded fields ---
+
+// An imm type may hold guarded fields: its other fields never change after the composite literal,
+// and SAFE009 checks the guarded ones at every access, so the whole value may be shared.
+//
+//safe:imm
+type server struct {
+	name string
+	mu   sync.Mutex
+	hits map[string]int //safe:guarded_by mu
+	n    int            //safe:guarded_by mu
+}
+
+func shareServer(ch chan *server) string {
+	s := &server{name: "a", hits: map[string]int{}}
+	ch <- s
+	go func() {
+		s.mu.Lock()
+		s.hits["x"]++
+		s.n++
+		s.mu.Unlock()
+	}()
+	s.mu.Lock()
+	s.hits["y"]++
+	s.mu.Unlock()
+	return s.name
+}
+
+func unlockedServer(s *server) {
+	s.n = 1 // want `SAFE009: field n is guarded by mu but is written here without holding it`
+}
+
+func renameServer(s *server) {
+	s.name = "b" // want `SAFE005: write to a field of server`
+}
+
+// A map that is not guarded still makes the type mutable.
+//
+//safe:imm
+type leaky struct { // want `SAFE005: //safe:imm type leaky is not immutable: field m has type map\[string\]int`
+	mu sync.Mutex
+	m  map[string]int
+}
+
 // --- SAFE007 ---
 
 //safe:holds mu

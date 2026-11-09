@@ -816,6 +816,16 @@ func (st *state) guardExempt(gs *guardState, fn *ssa.Function, ins ssa.Instructi
 	if !ok || root.Parent() != fn {
 		return false
 	}
+	// A store inside the object's own composite literal runs before anything can see the object.
+	if root.Comment == "complit" {
+		pos := ins.Pos()
+		if store, ok := ins.(*ssa.Store); ok && !pos.IsValid() {
+			pos = store.Addr.Pos()
+		}
+		if pos.IsValid() && st.inComplit(root, pos) {
+			return true
+		}
+	}
 	g := st.graphOf(fn)
 	n := g.val(root)
 	if n == nil {

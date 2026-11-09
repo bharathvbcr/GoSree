@@ -12,8 +12,10 @@ import (
 )
 
 // validateImm decides which //safe:imm annotations hold. An imm type must be a struct whose fields
-// are all unexported (so only its own package can write them) and all shareable. Validity is
-// computed to a fixpoint because a field may point to another imm type of the same package.
+// are all unexported (so only its own package can write them) and all shareable, except fields
+// annotated //safe:guarded_by, which may have any type: SAFE009 checks every access to them under the
+// struct's own mutex. Validity is computed to a fixpoint because a field may point to another imm
+// type of the same package.
 func (st *state) validateImm() {
 	st.imm = map[*types.TypeName]bool{}
 	for tn := range st.ix.ImmTypes {
@@ -33,7 +35,7 @@ func (st *state) validateImm() {
 			if !ok {
 				continue
 			}
-			if msg := immShapeProblem(tn, cls); msg != "" {
+			if msg := immShapeProblem(tn, cls, st.ix.Guarded); msg != "" {
 				st.imm[tn] = false
 				problems[tn] = msg
 				changed = true
@@ -45,7 +47,7 @@ func (st *state) validateImm() {
 	}
 }
 
-func immShapeProblem(tn *types.TypeName, cls *kinds.Classifier) string {
+func immShapeProblem(tn *types.TypeName, cls *kinds.Classifier, guarded map[*types.Var]*types.Var) string {
 	if _, isNamed := tn.Type().(*types.Named); !isNamed {
 		return "it must be a defined struct type"
 	}
@@ -56,6 +58,9 @@ func immShapeProblem(tn *types.TypeName, cls *kinds.Classifier) string {
 	for f := range s.Fields() {
 		if f.Exported() {
 			return fmt.Sprintf("field %s is exported, so other packages could write it", f.Name())
+		}
+		if guarded[f.Origin()] != nil {
+			continue
 		}
 		if !cls.Shareable(f.Type()) {
 			return fmt.Sprintf("field %s has type %s, which can hold shared mutable memory (imm fields may be pointer-free values, strings, pointers to imm types, or shared-by-design types)", f.Name(), f.Type())
@@ -117,6 +122,9 @@ loop:
 	for {
 		switch a := x.(type) {
 		case *ssa.FieldAddr:
+			if _, guarded := st.guardedAt(a); guarded {
+				return // a guarded field is written under its mutex; SAFE009 checks it
+			}
 			if t := pointee(a.X.Type()); t != nil && st.isImmNamed(t) && immType == nil {
 				immType = t
 			}

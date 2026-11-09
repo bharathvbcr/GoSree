@@ -110,8 +110,24 @@ embedded mutex is named `Mutex`) or on a package variable (mu is a package varia
 `sync.Mutex` or `sync.RWMutex` held by value. Pointers to mutexes, `sync.Locker` values, exported
 fields and local variables are rejected as SAFE007. These are checked claims, like `imm` and `iso`,
 so they count toward neither the hatch ratio nor the override budget. SAFE009 enforces them, and a
-guarded package variable is exempt from SAFE006. Guarding a field does not yet let a struct cross
-goroutines: SAFE002/003 still treat it as ordinary memory until imm types may have guarded fields.
+guarded package variable is exempt from SAFE006.
+
+To share a struct between goroutines, make it `//safe:imm` and guard its mutable fields. An imm
+type's guarded fields may have any type, and SAFE005 leaves them to SAFE009. Every other field still
+never changes after the composite literal, so a `*Server` holding a guarded map can be captured by
+every handler:
+
+```go
+//safe:imm
+type Server struct {
+	name string
+	mu   sync.Mutex
+	hits map[string]int //safe:guarded_by mu
+}
+```
+
+Guarding a field of a type that is not imm does not make it shareable: moving it to another
+goroutine is still SAFE002/003.
 
 A `//safe:unsafe` on a transfer (a `go` statement, a send, a call to a `//safe:iso` parameter) covers
 everything that transfer causes: the SAFE002 and SAFE004 at the transfer, and the SAFE003 uses after
@@ -309,7 +325,7 @@ denominator. Goroutines started by a library function missing from the spawner t
   what they were given for good.
 - **Lock discipline is declared, not inferred.** SAFE009 checks memory annotated
   `//safe:guarded_by`. A local variable shared under a lock (the race corpus's mutex tests) cannot
-  be annotated yet, and moving a struct with guarded fields to another goroutine is still SAFE002/003.
+  be annotated yet. A struct with guarded fields crosses goroutines only if it is also `//safe:imm`.
 - **Only listed callback functions are goroutine boundaries.** A library function that runs its
   argument on another goroutine but is not in `spawn.go` (a worker pool, a scheduler) is an ordinary
   call to gocap. Its callback is checked only through the callee's summary, which treats it as
@@ -332,8 +348,9 @@ denominator. Goroutines started by a library function missing from the spawner t
   the package, does not. Initialisation is `init`, variable initialisers, and helpers every caller of
   which is initialisation and whose value is never taken. A variable reassigned only by tests (a
   test seam) is a finding; accept it with `//safe:unsafe` on the declaration.
-- **Imm types are minimal.** Only struct types with unexported, shareable fields qualify: no slices
-  or maps. Shared imm values must be built with `&T{...}`.
+- **Imm types are minimal.** Only struct types with unexported fields qualify. Each field must be
+  shareable or `//safe:guarded_by`, so an unguarded slice or map disqualifies the type. Shared imm
+  values must be built with `&T{...}`.
 - **Trailing directives attach forward.** A `//safe:unsafe` trailing the closing line of a
   multi-line statement attaches to the next statement; put it on the line before.
 - **Iterators lose ownership.** Range-over-func loops keep ownership only when the iterator function
@@ -366,7 +383,10 @@ Done:
 
      The design review predicted 3. Its third, `client_telemetry_test.go:335`, reads under
      `limiter.mu.Lock()`, so no finding is right.
-   - `//safe:imm` types may have guarded fields.
+   - **Done:** `//safe:imm` types may have guarded fields of any type. The same change closes a
+     hole: the address of a field or element of a shared value (`&cfg.port` on an imm `*Config`)
+     used to look owned and could be moved to a goroutine. It is now foreign (SAFE002). The race
+     corpus and the reference service did not move, as predicted.
    - Guarded local variables, and the corpus scored a second time on an annotated copy (predicted
      229 / 42).
 2. A function override table beside the type table; summaries that record a call linking two
