@@ -152,20 +152,6 @@ func sendAfterInspect(ch chan *Job) {
 	ch <- j
 }
 
-// Fork-join: the parent uses x after a WaitGroup.Wait. This is race-free, but the model cannot
-// express it yet, so it is reported in its own category.
-func forkJoin() int {
-	x := 0
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		x = 1
-	}()
-	wg.Wait()
-	return x // want `SAFE003: variable x is used after it was captured by a goroutine.*fork-join is not modelled yet`
-}
-
 // A pointer captured by a goroutine is moved with the goroutine.
 func capturedPointer() {
 	j := &Job{}

@@ -37,8 +37,9 @@ const (
 	Imm       = "SAFE005"
 	GlobalUse = "SAFE006"
 	// UseAfterSynced is reported for SAFE003 uses that every path reaches only after a
-	// synchronisation point (fork-join). The ownership model cannot express fork-join yet; the
-	// separate category keeps that known false-positive class measurable.
+	// synchronisation point that is not a join for the move (forkjoin.go): a receive from another
+	// channel, a select, a mutex or cond, or a join shape the rule does not accept. The separate
+	// category keeps that class measurable.
 	UseAfterSynced = "SAFE003-forkjoin"
 )
 
@@ -69,6 +70,21 @@ type state struct {
 	sums    map[*ssa.Function]*summary
 	stats   *Stats
 	reports map[reportKey]bool
+	// graphs caches the alias graph of each function once summaries are final; the fork-join rule
+	// reads a goroutine body's graph while checking its parent.
+	graphs    map[*ssa.Function]*graph
+	joinCache map[*ssa.Go]map[ssa.Instruction]bool
+}
+
+// graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the
+// summary fixpoint see provisional summaries.
+func (st *state) graphOf(fn *ssa.Function) *graph {
+	if g, ok := st.graphs[fn]; ok {
+		return g
+	}
+	g := st.buildGraph(fn)
+	st.graphs[fn] = g
+	return g
 }
 
 type reportKey struct {
@@ -84,6 +100,9 @@ func run(pass *analysis.Pass) (any, error) {
 		sums:    map[*ssa.Function]*summary{},
 		stats:   &Stats{},
 		reports: map[reportKey]bool{},
+
+		graphs:    map[*ssa.Function]*graph{},
+		joinCache: map[*ssa.Go]map[ssa.Instruction]bool{},
 	}
 	st.stats.UnsafeScope = st.ix.UnsafeScopes()
 	st.validateImm()
@@ -97,7 +116,7 @@ func run(pass *analysis.Pass) (any, error) {
 		if len(fn.Blocks) == 0 {
 			continue
 		}
-		g := st.buildGraph(fn)
+		g := st.graphOf(fn)
 		st.checkTransfers(g)
 		st.checkImmStores(fn)
 	}

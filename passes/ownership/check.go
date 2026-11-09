@@ -67,8 +67,9 @@ func (st *state) checkUseAfter(g *graph, t transfer, reg map[*node]bool) {
 		vals = append(vals, v)
 	}
 	sort.Slice(vals, func(i, j int) bool { return vals[i].Pos() < vals[j].Pos() })
+	joins := st.joins(g, t)
 	for _, w := range vals {
-		u, ok := useAfter(t.instr, w)
+		u, ok := useAfter(t.instr, w, joins)
 		if !ok {
 			continue
 		}
@@ -76,7 +77,7 @@ func (st *state) checkUseAfter(g *graph, t transfer, reg map[*node]bool) {
 		note := ""
 		if u.synced {
 			cat = UseAfterSynced
-			note = " (after a synchronisation point; fork-join is not modelled yet)"
+			note = " (after a synchronisation point, but not one that joins the goroutine it was moved to)"
 		}
 		st.report(u.pos, cat, fmt.Sprintf("%s is used after it was %s%s%s",
 			describe(w), t.what, st.at(t.pos), note))

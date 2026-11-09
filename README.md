@@ -27,7 +27,7 @@ itself does. Inside one goroutine, aliasing is left alone.
 |---|---|
 | SAFE001 | `unsafe.Pointer`/`Add`/`Slice`/`String*`, cgo, `//go:linkname`, `reflect.Value.Set*`/`UnsafeAddr`/`UnsafePointer`, `reflect.NewAt` |
 | SAFE002 | a value crossing to another goroutine is not owned: it may alias a parameter, a package variable, or a result the callee may still reference |
-| SAFE003 | a value is used after it was moved; `SAFE003-forkjoin` marks uses reached only after a channel receive, `select`, `WaitGroup.Wait` or `Lock` |
+| SAFE003 | a value is used after it was moved; `SAFE003-forkjoin` marks uses reached only after a channel receive, `select`, `WaitGroup.Wait` or `Lock` that is not a [join](#fork-join) for that move |
 | SAFE004 | a moved value also escapes elsewhere (stored in a package variable, kept by a callee, returned) |
 | SAFE005 | a `//safe:imm` type is malformed, or is written after its composite literal |
 | SAFE006 | a package variable written outside `init` is accessed by code that runs on a goroutine |
@@ -72,6 +72,72 @@ is the weakest one: it rests on the convention that errors are not mutated after
 
 The only dependency is `golang.org/x/tools` (plus its own `x/mod` and `x/sync`).
 
+## Fork-join
+
+A goroutine can hand back what it was given. A move made by `go F(...)` ends at a **join**: a
+parent instruction after which `F` provably no longer touches the moved memory. A use the parent
+reaches only through joins is not a use after the move (`passes/ownership/forkjoin.go`).
+
+```go
+x := 0
+var wg sync.WaitGroup
+wg.Add(1)
+go func() { x = 1; wg.Done() }()
+wg.Wait()
+use(x) // accepted: the goroutine joined at Wait
+```
+
+A join needs all of these:
+
+- **The goroutine is started once.** `F` is a function literal whose closure value only that `go`
+  statement uses, and the `go` statement is not inside a loop.
+- **The release follows the last use.** No instruction of `F` that touches the moved memory can run
+  after any of `F`'s releases. Deferred calls count as running at exit: after every plain release,
+  and after a deferred release when they were registered before it (defers run last-in, first-out).
+  "Touches" uses `F`'s own alias graph, so a closure over the memory built before the release and
+  called after it counts.
+- **Nothing else keeps it.** `F` does not move the memory on (no `go`, send or `//safe:iso`
+  argument) and does not let it escape. Escape comes from the callee summaries, so this is only as
+  precise as they are. A callback over the memory handed to `time.AfterFunc` or
+  `runtime.SetFinalizer` is caught because their summaries mark it as retained (a case covers
+  `AfterFunc`; `TestRaceFin` in the corpus covers `SetFinalizer`).
+- **The sync object is local and fully visible.** It is one of:
+  - **A channel the parent makes**, captured by `F`, whose only sends and closes anywhere are in `F`
+    (a send, a `select` send case, `close`, `defer close`). Everything else may only receive from it
+    or take `len`/`cap`. The join is a plain receive in the parent: `<-c`, `v, ok := <-c` or the exit
+    of `for range c`. By the Go memory model, a send or close is synchronised before the receive that
+    observes it, and `F` is the only sender.
+  - **A `sync.WaitGroup` local to the parent**, used only through `Add`, `Done` and `Wait`. Every
+    `Add` is in the parent, adds a positive constant, is not in a loop, and dominates every `go`
+    statement whose goroutine calls `Done`. Each such goroutine is started once and calls `Done` at
+    most once on any path. The `Add`s sum to the number of those goroutines. The join is `Wait` in
+    the parent. Under those conditions `Wait` returns only after every `Done`, `F`'s included.
+
+Accepted shapes (each has an `analysistest` case in `testdata/src/moves/forkjoin.go`): `Done` after
+the last write, `defer wg.Done()`, one `Add(2)` covering two goroutines, send handshake, `close` with a
+comma-ok receive, `for range c`, `x = <-c` with the goroutine doing `c <- x`, a `select` send
+as the release, and a pointer passed as a `go` argument rather than captured.
+
+Still reported as `SAFE003-forkjoin`. Every item has a case, except `sync.Cond` and channels or
+WaitGroups held in struct fields:
+
+- `Done` before the goroutine's last write, or a write in a defer registered before `defer wg.Done()`
+- `Wait` on a different WaitGroup, `Add` inside the goroutine, `Add` totals that do not match the
+  number of `Done` goroutines, and WaitGroup reuse across several `Add`/`Wait` rounds
+- several goroutines sending on one channel, or a parent that also sends on it
+- a channel that is a parameter or is passed to a function. Fields, conversions and any other use
+  of the channel or WaitGroup are rejected the same way: the rule accepts only the operations
+  listed above.
+- a goroutine that moves the memory on, calls a closure over it after its release, or hands such a
+  closure to a callback API (`time.AfterFunc`)
+- `go` statements in a loop and closure values started twice (these are also plain `SAFE003`)
+- `select` receive cases as joins, mutex and `sync.Cond` hand-offs, and `go f(x)` with a named
+  function
+
+Two assumptions remain. The memory-model facts above are taken from the Go specification, not
+re-derived. And a deferred use registered *before* a move is still reported even when every path
+joins, because a panic between the move and the join would run it early.
+
 ## Measured on the Go race detector's corpus
 
 `go run ./cmd/gocap-corpus -out build` copies `$GOROOT/src/runtime/race/testdata` into `build/` (never
@@ -81,11 +147,22 @@ flagged if gocap reports anything in it or in a same-package function it calls.
 go1.27.3, 22 of 24 files. Skipped: `cgo_test.go` imports `internal/testenv` and `synctest_test.go`
 imports `internal/synctest`; neither can build outside GOROOT.
 
-| | Result | Predicted before the run |
-|---|---|---|
-| `TestRace*` flagged | 228 / 234 (97.4%) | at least 85% |
-| `TestNoRace*` clean | 30 / 129 (23.3%) | 15 to 40% |
-| `TestNoRace*` flagged only for fork-join | 17 | expected to dominate the misses; **it did not** |
+| | With fork-join | Predicted before that run | MVP (`b42b26c`) | Predicted before the MVP run |
+|---|---|---|---|---|
+| `TestRace*` flagged | 228 / 234 (97.4%) | 228, unchanged | 228 / 234 (97.4%) | at least 85% |
+| `TestNoRace*` clean | 40 / 129 (31.0%) | 40 | 30 / 129 (23.3%) | 15 to 40% |
+| `TestNoRace*` flagged only for fork-join | 7 | 7 | 17 | expected to dominate the misses; **it did not** |
+
+The fork-join run cleared exactly the ten predicted tests: `TestNoRaceChanSync`, `ChanAsync`,
+`ChanAsyncCloseRecv2`/`3`, `ChanSyncCloseRecv2`/`3`, `ChanReadWriteAsync`, `Select3`, `WaitGroup2`
+and `WaitGroupTransitive`. No `TestRace*` test became unflagged. The nine `TestRace*` tests flagged
+only for fork-join stay flagged, each for the reason the rule gives. For example,
+`TestRaceChanWrongSend` has two senders on one channel, and `TestRaceChanReadWriteAsync` receives
+from a channel the parent itself sent on. `SAFE003-forkjoin` inside `TestRace*` fell from 17
+to 11 because of `TestRaceBlockCall1`-`6`. There the reads after `<-done` are race-free and are no
+longer reported, while the racing read before `<-done` is still plain `SAFE003`. The seven remaining
+fork-join-only `TestNoRace*` tests use `select` receives, mutexes, `sync.Cond`, or two goroutines
+taking turns on one channel (`TestNoRaceIntRWClosures`).
 
 Read these numbers with care:
 
@@ -101,7 +178,7 @@ Read these numbers with care:
   - different elements or fields of one object, which a field- and index-insensitive analysis
     cannot tell apart (`TestNoRaceSlice*`, `TestNoRaceStructField*`)
   - branches that never run (`TestNoRaceAnd`)
-  - fork-join
+  - fork-join shapes outside the [join rule](#fork-join) (`select` receives, mutex and cond hand-offs)
 
 **Six missed races**, each an unmodelled class:
 - callbacks that run on another goroutine: `TestRaceAfterFunc3` (`time.AfterFunc`)
@@ -112,7 +189,8 @@ Read these numbers with care:
 
 ## Known limits
 
-- **Fork-join is not modelled.** A goroutine keeps what it was given for good.
+- **Fork-join covers channel and WaitGroup joins only.** The [shapes](#fork-join) outside it keep
+  what they were given for good.
 - **Lock discipline is not modelled.** Mutex-guarded sharing needs `//safe:unsafe`.
 - **Callbacks are not treated as goroutine boundaries.** A closure passed to `time.AfterFunc`,
   `http.HandleFunc` and similar can run on another goroutine, and gocap does not check what it
@@ -129,10 +207,10 @@ Read these numbers with care:
 
 ## Next
 
-1. Fork-join, to cut the largest class of `TestNoRace*` false positives.
-2. A guarded-by rule: `//safe:guarded_by(mu)`.
-3. Callback functions as goroutine boundaries.
-4. Ownership of the channel's send end, so closes and sends are checked.
+1. A guarded-by rule: `//safe:guarded_by(mu)`.
+2. Callback functions as goroutine boundaries.
+3. Ownership of the channel's send end, so closes and sends are checked.
+4. Joins through `select` receive cases, with the receive tied to the branch that uses the memory.
 5. A differential test of the summaries against `-gcflags=-m`.
 
 The project should be abandoned if a `net/http` reference service needs `//safe:unsafe` on more than

@@ -82,8 +82,9 @@ type use struct {
 
 // useAfter finds a use of w that can execute after s without w being redefined first. It prefers a
 // path with no synchronisation (channel receive, select, WaitGroup.Wait, Lock) between s and the use;
-// if every such use is preceded by synchronisation, the returned use has synced set.
-func useAfter(s ssa.Instruction, w ssa.Value) (use, bool) {
+// if every such use is preceded by synchronisation, the returned use has synced set. A join (see
+// forkjoin.go) hands the moved memory back, so paths stop there like at a redefinition.
+func useAfter(s ssa.Instruction, w ssa.Value, joins map[ssa.Instruction]bool) (use, bool) {
 	def, _ := w.(ssa.Instruction)
 	type state struct {
 		b      *ssa.BasicBlock
@@ -120,6 +121,10 @@ func useAfter(s ssa.Instruction, w ssa.Value) (use, bool) {
 					killed = true
 					break
 				}
+			}
+			if joins[ins] {
+				killed = true
+				break
 			}
 			if isSync(ins) {
 				synced = true
