@@ -1,0 +1,4 @@
+# Generated corpus copies and reports. The race corpus is copied from GOROOT on every run and never committed.
+/build/
+/gocap
+/gocap-corpus
