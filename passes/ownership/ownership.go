@@ -54,11 +54,17 @@ var Analyzer = &analysis.Analyzer{
 	ResultType: reflect.TypeFor[*Stats](),
 }
 
-// Stats counts what the pass saw in one package.
+// Stats counts what the pass saw in one package. SuppressedTransfers / Transfers is how often the
+// escape hatch was needed where memory crosses goroutines.
 type Stats struct {
-	Transfers   int
-	Suppressed  int
-	UnsafeScope int
+	// Transfers counts places a value crosses to another goroutine or to an owned parameter.
+	Transfers int `json:"transfers"`
+	// SuppressedTransfers counts transfers inside a //safe:unsafe scope that had a finding to mute.
+	SuppressedTransfers int `json:"suppressed_transfers"`
+	// Suppressed counts distinct findings (position and rule) muted by //safe:unsafe, from any rule.
+	Suppressed int `json:"suppressed_findings"`
+	// UnsafeScope counts the //safe:unsafe directives in the package.
+	UnsafeScope int `json:"unsafe_directives"`
 }
 
 type state struct {
@@ -70,6 +76,12 @@ type state struct {
 	sums    map[*ssa.Function]*summary
 	stats   *Stats
 	reports map[reportKey]bool
+	// suppressed holds the findings muted by //safe:unsafe, so each counts once in Stats.
+	suppressed map[reportKey]bool
+	// muted is set while checking a transfer that lies in a //safe:unsafe scope: every finding it
+	// produces is muted, wherever it is. mutedFindings counts findings muted that way.
+	muted         bool
+	mutedFindings int
 	// graphs caches the alias graph of each function once summaries are final; the fork-join rule
 	// reads a goroutine body's graph while checking its parent.
 	graphs    map[*ssa.Function]*graph
@@ -100,6 +112,8 @@ func run(pass *analysis.Pass) (any, error) {
 		sums:    map[*ssa.Function]*summary{},
 		stats:   &Stats{},
 		reports: map[reportKey]bool{},
+
+		suppressed: map[reportKey]bool{},
 
 		graphs:    map[*ssa.Function]*graph{},
 		joinCache: map[*ssa.Go]map[ssa.Instruction]bool{},
@@ -166,11 +180,17 @@ func (st *state) exportFacts(fns []*ssa.Function) {
 }
 
 func (st *state) report(pos token.Pos, cat, msg string) {
-	if st.ix.Suppressed(pos) {
-		st.stats.Suppressed++
+	k := reportKey{pos, cat}
+	if st.muted || st.ix.Suppressed(pos) {
+		if st.muted {
+			st.mutedFindings++
+		}
+		if !st.suppressed[k] {
+			st.suppressed[k] = true
+			st.stats.Suppressed++
+		}
 		return
 	}
-	k := reportKey{pos, cat}
 	if st.reports[k] {
 		return
 	}

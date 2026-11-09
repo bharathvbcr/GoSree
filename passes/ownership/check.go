@@ -14,44 +14,57 @@ import (
 func (st *state) checkTransfers(g *graph) {
 	for _, t := range g.transfers {
 		st.stats.Transfers++
-		n := g.val(t.v)
-		if n == nil {
-			continue
+		// A //safe:unsafe on the transfer covers everything the transfer causes, including uses
+		// after it that lie outside the scope.
+		muted := st.ix.Suppressed(t.pos)
+		before := st.mutedFindings
+		st.muted = muted
+		st.checkTransfer(g, t)
+		st.muted = false
+		if muted && st.mutedFindings > before {
+			st.stats.SuppressedTransfers++
 		}
-		reg := g.region(n)
-		after := reachableAfter(t.instr)
-
-		var foreign, escape []event
-		for c := range reg {
-			for _, e := range c.events {
-				switch e.kind {
-				case evForeign:
-					foreign = append(foreign, e)
-				case evEscape:
-					// An escape after the move is itself a use after the move; SAFE003 reports it.
-					if e.instr != nil && after(e.instr) {
-						continue
-					}
-					escape = append(escape, e)
-				}
-			}
-		}
-		what := describe(t.v)
-		if len(foreign) > 0 {
-			e := earliest(foreign)
-			why := "it may alias " + e.desc + st.at(e.pos)
-			if e.desc == what {
-				why = "the caller still holds it (mark the parameter //safe:iso to take ownership)"
-			}
-			st.report(t.pos, NotOwned, fmt.Sprintf("%s is %s but is not owned here: %s", what, t.what, why))
-		}
-		if len(escape) > 0 {
-			e := earliest(escape)
-			st.report(t.pos, Escapes, fmt.Sprintf("%s is %s but also escapes: %s%s",
-				what, t.what, e.desc, st.at(e.pos)))
-		}
-		st.checkUseAfter(g, t, reg)
 	}
+}
+
+func (st *state) checkTransfer(g *graph, t transfer) {
+	n := g.val(t.v)
+	if n == nil {
+		return
+	}
+	reg := g.region(n)
+	after := reachableAfter(t.instr)
+
+	var foreign, escape []event
+	for c := range reg {
+		for _, e := range c.events {
+			switch e.kind {
+			case evForeign:
+				foreign = append(foreign, e)
+			case evEscape:
+				// An escape after the move is itself a use after the move; SAFE003 reports it.
+				if e.instr != nil && after(e.instr) {
+					continue
+				}
+				escape = append(escape, e)
+			}
+		}
+	}
+	what := describe(t.v)
+	if len(foreign) > 0 {
+		e := earliest(foreign)
+		why := "it may alias " + e.desc + st.at(e.pos)
+		if e.desc == what {
+			why = "the caller still holds it (mark the parameter //safe:iso to take ownership)"
+		}
+		st.report(t.pos, NotOwned, fmt.Sprintf("%s is %s but is not owned here: %s", what, t.what, why))
+	}
+	if len(escape) > 0 {
+		e := earliest(escape)
+		st.report(t.pos, Escapes, fmt.Sprintf("%s is %s but also escapes: %s%s",
+			what, t.what, e.desc, st.at(e.pos)))
+	}
+	st.checkUseAfter(g, t, reg)
 }
 
 func (st *state) checkUseAfter(g *graph, t transfer, reg map[*node]bool) {

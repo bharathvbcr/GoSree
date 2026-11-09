@@ -45,6 +45,10 @@ type Config struct{ name string; port int }
 //safe:unsafe <reason>  // exempts the next statement, or the whole function from its doc comment
 ```
 
+A `//safe:unsafe` on a transfer (a `go` statement, a send, a call to a `//safe:iso` parameter) covers
+everything that transfer causes: the SAFE002 and SAFE004 at the transfer, and the SAFE003 uses after
+it, wherever they are. One placed on a later use covers only that use.
+
 An owned value is one that starts as a fresh allocation (`&T{}`, `new`, `make`), a value received
 from a channel, a `//safe:iso` parameter, or the result of a function whose summary says it returns
 fresh memory. It stays owned while nothing outside its own object graph points into it.
@@ -187,6 +191,23 @@ Read these numbers with care:
 - reassigning a mutex variable: `TestRaceMutexOverwrite`
 - WaitGroup misuse: `TestRaceWaitGroupWrongAdd`
 
+## Measuring the escape hatch on a module
+
+```bash
+go run ./cmd/gocap-corpus -module ~/src/service [-tests] [packages]
+```
+
+This analyses any module (patterns default to `./...`) and prints, per package and in total, the
+transfers gocap checked, how many needed `//safe:unsafe` (a transfer counts once, and only if the
+directive actually muted a finding), the findings muted by any rule, and the findings that remain.
+The JSON goes to `build/module-report.json`. With `-tests`, each package is counted once through its
+test variant, so no file is counted twice. It reads `ownership.Stats`, which the analyzer returns for
+every package, so a driver never parses diagnostic text.
+
+The hatch ratio, suppressed transfers over transfers, is the measurand of the abandon criterion
+under [Next](#next). It undercounts until callbacks are goroutine boundaries: today a service whose
+goroutines are started by `net/http` has almost no transfers to count.
+
 ## Known limits
 
 - **Fork-join covers channel and WaitGroup joins only.** The [shapes](#fork-join) outside it keep
@@ -207,14 +228,27 @@ Read these numbers with care:
 
 ## Next
 
-1. A guarded-by rule: `//safe:guarded_by(mu)`.
-2. Callback functions as goroutine boundaries.
-3. Ownership of the channel's send end, so closes and sends are checked.
-4. Joins through `select` receive cases, with the receive tied to the branch that uses the memory.
-5. A differential test of the summaries against `-gcflags=-m`.
+This README is the design of record: gocap checks memory where it crosses goroutines, and leaves
+aliasing within one goroutine alone. In build order:
 
-The project should be abandoned if a `net/http` reference service needs `//safe:unsafe` on more than
-20% of its goroutine spawns and sends once the override table holds 100 entries.
+1. Callback functions (`wg.Go`, `time.AfterFunc`, `http.HandleFunc`, `errgroup.Go`) as goroutine
+   boundaries, and `import . "unsafe"` caught by SAFE001.
+2. A function override table beside the type table, and summaries that record a call linking two
+   arguments (`root.Add(child)`) instead of reporting an escape.
+3. The hatch ratio measured on the reference service: ScholarLM's
+   `backend/go_orchestrator`, pinned at ScholarLM commit `bb60b53`. Baseline before any triage
+   (2026-11-09, go1.27.3, `-tests`): 1,258 transfers, 0 `//safe:unsafe`, and 1,652 findings
+   (SAFE001 104, mostly generated protobuf code and tests; SAFE002 511; SAFE003 458;
+   SAFE003-forkjoin 193; SAFE004 263; SAFE006 123). The ratio is read after items 1 and 2, by
+   adding overrides until every remaining finding is a real race or a policy call.
+4. A guarded-by rule, `//safe:guarded_by(mu)`, with SAFE006 checked where the package variable is
+   declared.
+5. Ownership of the channel's send end; joins through `select`; a differential test of the summaries
+   against `-gcflags=-m`.
+
+The project should be abandoned if a `net/http` reference service has a hatch ratio above 20% (see
+[Measuring the escape hatch](#measuring-the-escape-hatch-on-a-module)) once the type and function
+override tables together hold 100 entries.
 
 ## Tests
 
@@ -224,4 +258,5 @@ go test ./...
 
 Each rule has `analysistest` cases with `// want` expectations, so a disabled rule fails its test.
 `passes/ownership/testdata/src/user` checks that summaries cross package boundaries, including from
-the standard library.
+the standard library. `passes/ownership/testdata/src/supp` checks the reach of `//safe:unsafe` and
+the exact `Stats` counts.

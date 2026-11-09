@@ -1,12 +1,19 @@
-// Command gocap-corpus runs gocap over the Go race detector's own test corpus
-// ($GOROOT/src/runtime/race/testdata) and reports how many TestRace* functions it flags and how many
-// TestNoRace* functions it leaves clean.
+// Command gocap-corpus measures gocap on a body of code.
 //
-// The corpus is copied into <out>/racecorpus on every run and never committed: it is GOROOT content,
-// and copying it fresh ties the numbers to the installed Go release. Files that cannot build outside
-// GOROOT (cgo, GOROOT-internal imports) are skipped and counted.
+// By default it runs gocap over the Go race detector's own test corpus
+// ($GOROOT/src/runtime/race/testdata) and reports how many TestRace* functions it flags and how many
+// TestNoRace* functions it leaves clean. The corpus is copied into <out>/racecorpus on every run and
+// never committed: it is GOROOT content, and copying it fresh ties the numbers to the installed Go
+// release. Files that cannot build outside GOROOT (cgo, GOROOT-internal imports) are skipped and
+// counted.
 //
 //	go run ./cmd/gocap-corpus -out build
+//
+// With -module it analyses the packages of any module instead and reports how often the
+// //safe:unsafe escape hatch was needed: suppressed transfers over all transfers, per package and in
+// total, with the findings that remain. The report goes to <out>/module-report.json.
+//
+//	go run ./cmd/gocap-corpus -module ~/src/service [-tests] [packages]
 package main
 
 import (
@@ -68,8 +75,17 @@ type Flag struct {
 
 func main() {
 	out := flag.String("out", "build", "directory for the corpus copy and the report")
+	module := flag.String("module", "", "analyse the module in this directory instead of the race corpus; remaining arguments are package patterns (default ./...)")
+	tests := flag.Bool("tests", false, "with -module: include each package's test files")
 	flag.Parse()
 	log.SetFlags(0)
+	if *module != "" {
+		runModule(*module, *tests, flag.Args(), *out)
+		return
+	}
+	if flag.NArg() > 0 {
+		log.Fatalf("package patterns need -module (got %q)", flag.Args())
+	}
 
 	goroot, err := exec.Command("go", "env", "GOROOT").Output()
 	if err != nil {
@@ -104,16 +120,8 @@ func main() {
 		log.Fatal("no external test package race_test was loaded")
 	}
 
-	analyzers := []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer}
-	graph, err := checker.Analyze(analyzers, []*packages.Package{test}, nil)
-	if err != nil {
-		log.Fatalf("analyze: %v", err)
-	}
 	var diags []analysis.Diagnostic
-	for _, act := range graph.Roots {
-		if act.Err != nil {
-			log.Fatalf("%s failed on %s: %v", act.Analyzer.Name, act.Package.ID, act.Err)
-		}
+	for _, act := range analyze([]*packages.Package{test}) {
 		diags = append(diags, act.Diagnostics...)
 	}
 
@@ -121,15 +129,44 @@ func main() {
 	rep.GoVersion = runtime.Version()
 	rep.Files = copied
 	rep.Skipped = skipped
-	data, err := json.Marshal(rep, jsontext.WithIndent("  "), json.Deterministic(true))
+	path := writeJSON(*out, "corpus-report.json", rep)
+	printSummary(rep, path)
+}
+
+// analyze runs every gocap analyzer on pkgs and returns the root actions, failing on any analyzer
+// error: a pass that could not run must not look like a pass that found nothing.
+func analyze(pkgs []*packages.Package) []*checker.Action {
+	analyzers := []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer}
+	graph, err := checker.Analyze(analyzers, pkgs, nil)
+	if err != nil {
+		log.Fatalf("analyze: %v", err)
+	}
+	for _, act := range graph.Roots {
+		if act.Err != nil {
+			log.Fatalf("%s failed on %s: %v", act.Analyzer.Name, act.Package.ID, act.Err)
+		}
+	}
+	return graph.Roots
+}
+
+func writeJSON(dir, name string, v any) string {
+	data, err := json.Marshal(v, jsontext.WithIndent("  "), json.Deterministic(true))
 	if err != nil {
 		log.Fatal(err)
 	}
-	path := filepath.Join(*out, "corpus-report.json")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Fatal(err)
+	}
+	// Absolute, so the printed path works from wherever the command was started (go -C changes the
+	// directory it resolves against).
+	path, err := filepath.Abs(filepath.Join(dir, name))
+	if err != nil {
+		log.Fatal(err)
+	}
 	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
 		log.Fatal(err)
 	}
-	printSummary(rep, path)
+	return path
 }
 
 func copyCorpus(src, dst string) (copied int, skipped []string, err error) {
