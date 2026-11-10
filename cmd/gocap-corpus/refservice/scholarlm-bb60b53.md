@@ -302,3 +302,218 @@ far above the 20% abandon line while the tables hold 42 entries, and more entrie
 no flagged transfer is blocked by a third-party type. The next checked claim has to be about the
 dependency containers themselves, an imm rule that accepts interface and func-typed fields whose
 values are set only during construction.
+
+## Item 4 (2026-11-10)
+
+The plan is the 2026-11-09 design ruling for README item 4: re-measure on the merged main, gate on a
+`-gcflags=-m` differential, then a census of what blocks each `IMM_BLOCKED` hatch, which decides
+whether the frozen-after-construction imm rule is worth building. Work is on branch `item4`, in a
+worktree off `3c9677c`, because another session was editing `passes/ownership` in the main checkout.
+
+### Step 1: re-measure on `3c9677c`
+
+Prediction (ruling): production 476 / 345 / 72.5%, `-tests` 1,798 / 450 / 25.0%, 0 stale, all 476 rows
+anchor; finding counts unchanged except message wording.
+
+Result: the ratios, flagged counts and stale count reproduce exactly. Finding counts do not:
+- **A merge bug.** `reportRelated` keyed de-duplication on the message, which names the transfer, so one
+  use was reported once per transfer reaching it: production SAFE003 without hatches went from 364 to
+  1,795 (up to 133 at one position, `router.go:563`), all at hatched positions. Fixed: SAFE003,
+  SAFE003-forkjoin and SAFE008 are keyed on position and rule again (a use site is one defect); other
+  findings keep the message, since two arguments moved at one call, or an address taken and a field
+  written, are distinct defects. Test `useAfterTwoMoves` (moves.go) fails on `3c9677c`.
+- After the fix, against item 3's binary (`074fd05`) with every hatch removed: no new flagged position
+  in either stratum. Removed: 5 production (4 test) uses after a send in `select`, which the merge's
+  per-case join excludes; these are the 5 fewer muted findings (972 to 967). Added at positions item 3
+  already flagged: distinct arguments moved by one call (+13 SAFE002, +6 SAFE004), now reported apart.
+
+Prediction missed: `-tests` remaining findings 1,879 against the predicted 1,702 ± 10, before the
+de-duplication was narrowed to the use-site rules.
+
+### Step 2: `-gcflags=-m` differential
+
+`TestEscapeOracleNoFreshOrWritesOracle` compares every exported function gocap summarises in `bytes`,
+`strings`, `strconv`, `sort`, `bufio`, `io`, `encoding/json` and `net/http` against `-gcflags=-m=2`:
+each parameter the compiler says leaks must be leaked, linked, or Unknown in the FuncFact.
+
+Prediction: 0 violations (ruling); under 5% of compared parameters (mine). Both wrong on the first run:
+75 of 480. After reading the compiler's flow for each:
+- excused by rule, counted not compared: 22 through a lock or atomic inside a sync or sync/atomic
+  function (the compiler cannot see past the runtime semaphore; gocap counts locks as synchronisation),
+  8 stores back into the parameter's own memory (`b.buf = append(b.buf, c)`), 21 string fields;
+  results of shareable types (`error`, `string`, `context.Context`) are skipped;
+- 15 reviewed by hand, callee source read (string data through `pathAddrs`, `findHandler`,
+  `serveFile`, `Cookie.String` and so on), listed in the test with reasons; an entry that stops
+  disagreeing fails the test;
+- 2 real: `http2ClientConn.RoundTrip` and `http2RoundTripper.RoundTrip` pass a bound interface method
+  to a function that calls it through a function value. gocap applied a closure body's retention of
+  its captures only where the closure is called statically; through any other call the retention was
+  lost. Reading `graph.call` showed the general hole (not in the ruling): a closure that stores a
+  capture in a package variable, handed to a function that calls it dynamically, left the capture
+  owned. Fixed (`closureRetains`): the retention is charged where the closure is made unless every use
+  is a static call, a defer, a go statement or a spawner or iso argument. Tests in `moves/dynamic.go`
+  fail on `3c9677c`.
+
+Narrowed when item 4 merged with main: a returned closure is no longer charged. It reaches the caller through
+the result, which main's fresh-result summaries link to the captures. Charging it made every closure
+factory (`http.StripPrefix`, `sync.OnceFunc`) leak its arguments: 14 false findings across main's
+stress fixtures, and `factoryResultIsOwned` in `moves/dynamic.go` fails without the narrowing. What a
+returned closure's body keeps when the caller calls it through a function value is still charged
+nowhere.
+
+Final: 409 compared, 0 unreviewed violations. Race corpus 229/36 and 229/42, unchanged. ScholarLM with
+the closure fix (the baseline for what follows): production 476 / 345 / 72.5% unchanged, 18 more muted
+findings at hatched transfers, no new remaining finding; `-tests` 1,798 / 1,020 flagged / 451 / 25.1%.
+
+### Step 3: census
+
+`gocap-corpus -census` resolves each production `IMM_BLOCKED` row's named value to a type and walks
+every module struct it reaches (fields, and the types stored into interface fields), classing what
+stops each from being imm under the frozen rule (classes in `census.go`; fixture test
+`TestCensusClasses`).
+
+Predictions: `*llm.Client` ends the chain of at least 188 hatches and at most 20 are interface, func or
+exported only (ruling); at least 50% reach a post-construction write (mine). Refuter (ruling): at least
+40% of hatches reach a post-construction write.
+
+Result, 324 hatches, 18 unresolved (`(caller's parameter)`, closures):
+
+| Worst class | Hatches | Share |
+|---|---|---|
+| W-lock: written under a lock, read in a function that takes none | 216 | 66.7% |
+| W: written after construction, no lock | 41 | 12.7% |
+| C: unguarded map or slice | 18 | 5.6% |
+| X: external type | 29 | 9.0% |
+| OK | 2 | 0.6% |
+| unresolved | 18 | 5.6% |
+
+257 hatches (79.3%) reach a post-construction write; 217 (67.0%) reach `*llm.Client`. All three
+predictions hold, and the refuter fires. The 79.3% is an upper bound: W counts builder setters
+(`UnifiedResearchRuntime.WithClaimStore`) that a `//safe:init` claim could clear. Read by hand,
+`llm.Client.ensureClient` dials lazily and writes `c.client` once, nil-checked, under `c.mu` at the
+first gRPC call, and `EmbedBatch` reads it without the lock after calling `ensureClient` on the same
+goroutine. `SetClient` replaces it, but has no production caller (82 test files call it). So in
+production this is a one-time publication under a lock, race-free, but after construction: no
+construction-time claim covers it.
+
+Correction (re-plan ruling, verified): the worst class is not the lever. Allowing classes cumulatively
+over the 306 resolved hatches, OK and G clear 2; adding W-lock and W still 2; adding X 37; only adding C
+reaches 306. 215 closures carry C, G, OK, W, W-lock and X together, so no single claim moves them. C is
+added for any unguarded map or slice field whether or not it is written after construction
+(`census.go`), so it is an upper bound, and its slack is what decides. The frozen rule as designed
+clears 2 of 324 (72.5% to 72.1%); the 62-68% prediction is withdrawn.
+
+Committed separately: the step 1-2 checker fixes (`741e714`).
+
+### Step 3b: census v2
+
+Re-plan ruling: split C by whether the collection's contents are written after construction, and
+follow module interfaces to their implementations instead of calling them external. `mutates` follows
+each post-construction load of an unguarded collection field (and each `Field` of a struct held by
+value): map updates, element stores, `append`, `copy` into it, `delete`, `clear`, storing it, returning
+it, boxing it, or passing it to a call whose gocap summary writes or keeps it are writes; unexported
+module callees are followed into their bodies three levels deep. A collection whose every load and
+reassignment holds a lock is guardable (G), like a field. Fixture cases for each, every one failing on
+the first version; the summary path and the lock propagation were each checked by breaking them.
+
+Pre-registered (ruling): if C-written is in at least 50% of the big closures, the service fails the
+thesis at this pin whatever claims are added; refuter: closures whose collections are only frozen make
+up at least 60% of those with any. Mine: C-written in at least 90% of the big closures; after the
+guardable split, still at least 50%.
+
+Result (306 resolved hatches; 219 big closures, six or more classes):
+- C-written in 215 of 219 big closures, 212 on content writes alone (map update, append, delete,
+  element store, copy, clear, reassignment). Frozen-only: 20 of 239 hatches with any collection (8%).
+  The ruling's failure condition fires; the refuter does not. Both of my predictions hold.
+- Waterfall, allowing classes cumulatively: OK 2, G 12, C-frozen 15, E 15, X 45, W 73, W-lock 87; only
+  C-written reaches 306.
+
+Read by hand, the content writes in the big closures come from two types:
+- `wisdev.ADKRuntime.toolToPlug` (196 hatches reach it): filled by `registerPlugins`, which
+  `loadADKRuntime` calls on the runtime it has just built, before returning it (`adk_runtime.go:258-264`).
+  Construction in practice; a `//safe:init` claim would cover it.
+- `wisdev.endpointBreaker.failures` (192): updated by `record` after each webhook delivery
+  (`downstream_events.go:184-197`), on the one worker goroutine `DownstreamEventSink` starts (line 262).
+  Runtime state, but confined to that goroutine; no gocap claim says so.
+
+Without those two, 16 of the 219 big closures keep a content write. As bounds on the production ratio,
+assuming every other claim (guarded_by rows, frozen collections, init, published-once, overrides for
+every external type):
+- with both left as they are: at most 92 of 306 hatches clear, ratio at least 53.2%; the service fails
+  at this pin;
+- with both covered (an init claim and a goroutine-confinement claim): at most 290 clear, ratio at
+  least 11.6%, under the 20% line.
+
+Both readings checked: `registerPlugins` has one caller, `loadADKRuntime`; every use of the breaker
+(`allow` at line 444, `record` at 474, 498, 537) is in `deliverTo`, which only the worker's `run` and
+`drain` reach (lines 405-439), so the confinement is real and the breaker is race-free.
+
+The 11.6% bound also assumes something the list above does not name: that a collection returned from a
+method, or stored into another struct, is not written through that alias. Counting those as writes
+too, the bound is at least 53.6% whether or not the two types are covered (90 of 306 clear). What
+carries it: `BeliefState.Beliefs`, stored into a proposal by `AutonomousLoop.buildStateResearchProposal`
+(199 hatches reach it), and three `*int` limits of the ADK config copied by `decodeADKConfigStrict`
+while the config is decoded (198; construction in practice). `Beliefs` looks like per-session state
+reached through the type graph, not something the long-lived containers hold; not verified.
+
+Limits of the census, all leaning towards clearing more than a checker could prove: it walks types,
+not instances, so per-request state whose type a long-lived field mentions counts as part of the
+container (the case above); a struct held by value (`ServerConfig`) and changed through a local copy
+is seen as construction; a field with no recorded load counts as all-locked. The fixture covers pointer
+receivers only.
+
+Against the pre-registration: the refuter did not fire (20 of 239 frozen-only), so the re-plan's branch
+is to record the failure at this pin and close item 4 with B9. The case for deviating is that the
+content writes the condition counts come from an init-time map and a goroutine-confined one, both
+race-free, and that covering them could bring the bound under 20%; it holds only if aliased
+collections such as `Beliefs` are request state, which the census cannot tell because it does not see
+instances. That is the owner's gate (step 3 of the re-plan).
+
+### Decision: record the failure at `bb60b53` (owner, 2026-11-10)
+
+The owner took the pre-registered branch. Recorded: **ScholarLM's `go_orchestrator` at `bb60b53` fails
+the thesis.** Its production hatch ratio is 72.5% with 42 of 100 override entries, and census v2's
+bound on what any set of construction-time claims could reach is 53.2% (at least 53.6% if aliased
+collections count as written): above the 20% line. The two types behind that bound are an init-time
+map and a goroutine-confined one, both race-free; whether claims for them would bring the bound under
+20% depends on instance-level facts the census cannot see (above). Item 4 builds no new claim. A later
+pin of ScholarLM may be measured only as a labelled second row beside this one.
+
+### B9: guarded_by on the mutex-protected package variables
+
+The 51 package variables item 3 sorted as mutex-protected get `//safe:guarded_by` rows: 40 generated
+from item 3's triage (each anchored at the declaration position the triage recorded and checked to
+name the variable; each guard checked to be a package `sync.Mutex` or `sync.RWMutex`), 10 by hand (4
+declarations whose text repeats as a reset inside a function, anchored after their mutex; 6 struct
+variables guarded by their own `mu` or embedded mutex, a row per field, 8 rows), plus `//safe:holds`
+on two `*Locked` helpers. The 51st, `globalSteeringBus`, is left unclaimed (below). Dropped: a `holds` on the test hook `MockProjectIDForTest`, whose callers take no
+lock, and the 3 rows for `steeringBus`'s fields (below).
+
+Predictions and results (production). In all three runs the ratio is unchanged at 72.5%, with `-tests`
+at 25.1%. Every row applied, because an anchor that matches nothing stops the run, and no directive
+muted nothing.
+
+| Batch | SAFE006 predicted | SAFE006 | SAFE009 predicted | SAFE009 |
+|---|---|---|---|---|
+| 40 generated rows | about 33 | 33 | 10-25 | **35 (missed)** |
+| + 15 hand rows (12 kept) | 22 (or about 29 if field guards do not clear the variable) | 22 | not predicted | 49 |
+| - steeringBus rows, + one holds | 23 | 23 | 36 | 36 |
+
+The 28 new SAFE009, read one by one:
+- 23 values read under the mutex leave it (a singleton pointer, an `io.Writer`, an observer func, a
+  map or struct returned or stored): the publish pattern, reported by design. Whether each value is
+  safe to share is its own type's question.
+- 3 false: a write inside a `sync.Once.Do` closure while the caller holds the lock
+  (`shared_engine.go:39-48`); the lockset does not carry a held lock into a closure run synchronously.
+- 1 false: a slice swapped out under the lock and ranged over afterwards (`startup_diagnostics.go:91-99`).
+- 1 false: an `int` boxed into a variadic `slog` argument counts as a value leaving the lock;
+  `checkLeaves` tests the boxed interface's type, not the int (`lockset.go`).
+
+Left out, also false: with rows on `steeringBus`'s fields, 11 SAFE009 fire on accesses made while
+`globalSteeringBus.mu` is held; without the rows, one SAFE006 stays. The likely cause, handed over and
+not confirmed in `lockset.go`: every access reloads the package pointer `globalSteeringBus`, so the
+held mutex and the guarded field are not tied to the same base.
+
+SAFE006 left: 23 = 13 test seams, 7 `sync.Once`, 2 generated, 1 `globalSteeringBus`. The `sync.Once`
+exemption and the four lockset false-positive classes are in files another session is changing
+(`lockset.go`, `globals.go`); they were handed to it instead of fixed here.

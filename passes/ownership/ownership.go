@@ -263,15 +263,18 @@ func (st *state) report(pos token.Pos, cat, msg string) {
 }
 
 // reportRelated reports a finding with related positions (the writes behind a declaration-site
-// SAFE006, say). Suppression goes by the finding's own position and rule. De-duplication does too for
-// a finding a transfer causes away from itself (a use after it, a handler's write): a use that several
-// transfers reach is one finding, reported for the first; the message names the transfer, so keying
-// on it would repeat the finding once per transfer. Any other finding is keyed on its message as
-// well, since distinct messages at one position are distinct defects (two borrows one go statement
-// captures; an address taken and a field written).
+// SAFE006, say). Suppression goes by the finding's own position and rule. So does de-duplication of a
+// use after a transfer (SAFE003) and a handler's write (SAFE008): a use site is one defect however
+// many transfers or captured variables reach it, reported for the first, while their messages name
+// the transfer and the variable, so keying on the message would repeat it once per transfer (a go
+// statement in a loop reaches itself on the next iteration once per captured variable). Any other
+// finding is keyed on its message as well, since distinct messages at one position are distinct
+// defects (two arguments moved by one call; two borrows one go statement captures; an address taken
+// and a field written).
 func (st *state) reportRelated(pos token.Pos, cat, msg string, related []analysis.RelatedInformation) {
 	k := reportKey{pos, cat, msg}
-	if st.transferAt.IsValid() && pos != st.transferAt {
+	switch cat {
+	case UseAfter, UseAfterSynced, HandlerWrite:
 		k.extra = ""
 	}
 	st.findings++

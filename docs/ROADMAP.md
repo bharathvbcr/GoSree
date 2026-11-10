@@ -7,7 +7,8 @@ Done:
 - callback functions as goroutine boundaries;
 - SAFE001 for dot imports of `unsafe` and functions without a Go body;
 - SAFE008 for handlers that write shared memory;
-- items 1, 2 and 3 below.
+- items 1, 2 and 3 below;
+- item 4, closed with the reference service failing the thesis at its pin.
 
 1. **Done:** a guarded-by rule. It came before item 2, since recording writes in summaries turns calls like
    `h.cache.Set(...)` into SAFE008 findings that need it. The guarded SAFE008 findings on the
@@ -145,21 +146,54 @@ Done:
      `AgentGateway`, a handler struct) whose type has interface, func-typed or exported fields.
 
    Of the 73 production SAFE006, a reading of the source sorts 51 as mutex-protected, 13 as test
-   seams, 7 as `sync.Once` and 2 as generated. They are not annotated.
+   seams, 7 as `sync.Once` and 2 as generated. Item 4 annotated the mutex-protected ones (B9).
 
    The abandon criterion applies at 100 table entries, and this item ends at 42. So the measurement
    does not decide abandonment, but the diagnosis says more entries would not help: no flagged
    transfer is blocked by a third-party type. The ratio is set by dependency containers that are
    mutable in type and frozen in practice. gocap needs a checked claim for them: an imm rule that
    accepts interface and func-typed fields set only during construction.
-4. Ownership of the channel's send end; joins through `select`; a differential test of the summaries
-   against `-gcflags=-m`. From item 3:
-   - an imm rule for dependency containers frozen after construction;
+4. **Closed: the reference service fails the thesis at `bb60b53`.** The 2026-11-09 design ruling
+   planned three steps: a re-measure, a differential test against `-gcflags=-m`, and a census of what
+   blocks each `IMM_BLOCKED` hatch. The census was to decide whether to build the
+   frozen-after-construction imm rule. Each step's prediction and result is in
+   [the triage log](../cmd/gocap-corpus/refservice/scholarlm-bb60b53.md#item-4-2026-11-10).
+   - **Re-measure** on `3c9677c`: both ratios reproduce. It found a merge bug: de-duplication was
+     keyed on the message, which names the transfer, so one use was reported once per transfer
+     reaching it. Production SAFE003 went from 364 to 1,795, all at hatched positions. Fixed in
+     `741e714`.
+   - **Differential test** (`TestEscapeOracleNoFreshOrWritesOracle`). It compares 409 parameters
+     from eight standard-library packages with `-gcflags=-m=2`. 0 violations are left unreviewed; 15
+     were reviewed by hand. It found one real hole: a closure's retention of its captures was lost
+     when the closure was called through a function value. Fixed in `741e714`. After the fix, the
+     race corpus is unchanged, production is unchanged and `-tests` is 25.1%.
+   - **Census** (`gocap-corpus -census`). The frozen rule as designed clears 2 of 324 hatches (72.5%
+     → 72.1%), so it was not built. Census v2 splits collections by whether their contents are
+     written after construction. Collections written that way are in 215 of 219 big closures: the
+     pre-registered failure condition. Its refuter, that at least 60% of hatches with a collection
+     have only frozen ones, did not fire (20 of 239). Granting every other claim, the production ratio
+     stays at or above 53.2%.
+
+     Two race-free types carry the content writes: a map filled during initialisation and a
+     goroutine-confined circuit breaker. Claims covering both would bound the ratio at 11.6%, but
+     only if collections reached through aliases are per-request state. A census that walks types,
+     not instances, cannot tell. The owner took the pre-registered branch: record the failure. A
+     later ScholarLM pin may be measured only as a labelled second row.
+   - **B9:** `guarded_by` on 50 of the 51 mutex-protected package variables. SAFE006 went from 73 to
+     23 and SAFE009 from 8 to 36, with the ratio unchanged at 72.5%. Of the 28 new SAFE009, 23 are
+     values read under a lock that leave it, reported by design, and 5 are lockset false positives.
+     `globalSteeringBus` stays unclaimed, because claiming its fields gives 11 false SAFE009.
+5. Open:
+   - ownership of the channel's send end; joins through `select`;
    - `SafeGoWG`'s join (43 SAFE003-forkjoin findings);
    - the writes bit's two over-counts (75 SAFE008);
-   - SAFE006 for `sync.Once`-published variables.
+   - SAFE006 for `sync.Once`-published variables, and B9's five lockset false positives;
+   - claims for initialisation-time and goroutine-confined state. Item 4 showed these are what a
+     later pin would need.
 
 The project should be abandoned if a `net/http` reference service has a hatch ratio above 20% (see
 [Measuring the escape hatch](../README.md#measuring-the-escape-hatch-on-a-module)) once the type and function
-override tables together hold 100 entries.
+override tables together hold 100 entries. Item 4 applied a sharper test to the reference service: it
+fails if census v2's fully annotated bound cannot reach 20% in production. At `bb60b53` the bound is
+53.2%, so it fails at that pin with 42 of the 100 entries used.
 

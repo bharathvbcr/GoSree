@@ -45,6 +45,7 @@ type moduleOpts struct {
 	patterns []string
 	out      string
 	list     bool
+	census   bool
 }
 
 type gitSource struct{ repo, rev, subdir string }
@@ -122,9 +123,11 @@ func runModule(o moduleOpts) {
 	if len(pkgs) == 0 {
 		log.Fatalf("no packages matched %q in %s", patterns, abs)
 	}
-
 	byID := map[string]*PackageStats{}
 	acts := analyze(pkgs)
+	if o.census {
+		runCensus(pkgs, acts, o.table.rows, abs, out)
+	}
 	for _, act := range acts {
 		ps := byID[act.Package.ID]
 		if ps == nil {
