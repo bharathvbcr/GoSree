@@ -46,6 +46,7 @@ var overrides = []Override{
 	{"regexp.Regexp", true, "documented safe for concurrent use"},
 	{"log.Logger", true, "documented safe for concurrent use"},
 	{"log/slog.Logger", true, "documented safe for concurrent use"},
+	{"net.Listener", false, "documented: multiple goroutines may invoke methods on a Listener simultaneously"},
 }
 
 // Overrides returns the override table, sorted by name.

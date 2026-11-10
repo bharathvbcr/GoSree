@@ -29,7 +29,7 @@ func TestCallbacks(t *testing.T) {
 // TestHandlerWrites checks SAFE008: writes through memory a handler shares with its other
 // invocations, directly or in functions of this package it calls, and what is not one.
 func TestHandlerWrites(t *testing.T) {
-	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "handlers")
+	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "handlers", "store", "store/inner")
 }
 
 // TestGuarded checks SAFE009: guarded memory is accessed only under its mutex, //safe:holds helpers

@@ -26,10 +26,11 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 			continue
 		}
 		forEachInstr(fn, func(ins ssa.Instruction) {
-			addr, ok := writtenAddr(ins)
-			if !ok {
-				return
+			w, ok := writeOf(ins)
+			if !ok || w.grows {
+				return // append changes a package variable only through the store of its result
 			}
+			addr := w.addr
 			g, ok := globalRoot(addr)
 			if !ok || g.Pkg != st.ssa.Pkg {
 				return
@@ -159,25 +160,6 @@ func globalRoot(v ssa.Value) (*ssa.Global, bool) {
 			v = x.X
 		default:
 			return nil, false
-		}
-	}
-	return nil, false
-}
-
-// writtenAddr returns what ins writes into, for the writes SAFE006 counts: stores, map updates, and
-// copy, delete and clear. (append is not one: it writes a backing array only its result can see.)
-func writtenAddr(ins ssa.Instruction) (ssa.Value, bool) {
-	switch ins := ins.(type) {
-	case *ssa.Store:
-		return ins.Addr, true
-	case *ssa.MapUpdate:
-		return ins.Map, true
-	case *ssa.Call:
-		if b, ok := ins.Call.Value.(*ssa.Builtin); ok && len(ins.Call.Args) > 0 {
-			switch b.Name() {
-			case "copy", "delete", "clear":
-				return ins.Call.Args[0], true
-			}
 		}
 	}
 	return nil, false

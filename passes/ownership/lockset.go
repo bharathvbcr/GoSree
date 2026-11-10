@@ -1,6 +1,7 @@
 package ownership
 
 import (
+	"cmp"
 	"fmt"
 	"go/token"
 	"go/types"
@@ -317,6 +318,7 @@ type release struct {
 // guardState holds the per-package results the lock analysis shares between functions.
 type guardState struct {
 	releases map[*ssa.Function][]release
+	acquires map[*ssa.Function][]acquire
 	before   map[*ssa.Function]map[ssa.Instruction]lockset
 	initOnly map[*ssa.Function]bool
 	visiting map[*ssa.Function]bool
@@ -333,6 +335,7 @@ func (st *state) checkGuarded(fns []*ssa.Function) {
 		initOnly: st.initFuncs(fns),
 		visiting: map[*ssa.Function]bool{},
 	}
+	st.acquireSummaries(gs, fns)
 	for _, fn := range fns {
 		if len(fn.Blocks) > 0 {
 			st.locksOf(gs, fn)
@@ -442,19 +445,23 @@ func (st *state) holdsPaths(fn *ssa.Function, recv ssa.Value) []guardPath {
 	return out
 }
 
+// holdsEntry is the lockset of fn's //safe:holds mutexes.
+func (st *state) holdsEntry(fn *ssa.Function) lockset {
+	var recv ssa.Value
+	if len(fn.Params) > 0 {
+		recv = fn.Params[0]
+	}
+	entry := lockset{}
+	for _, p := range st.holdsPaths(fn, recv) {
+		entry[p] = lockWrite
+	}
+	return entry
+}
+
 // entryLocks is what fn may assume held on entry: its //safe:holds mutexes, and for a closure called
 // in place, what its caller holds at every such call.
 func (st *state) entryLocks(gs *guardState, fn *ssa.Function) lockset {
-	entry := lockset{}
-	if len(fn.Params) > 0 {
-		for _, p := range st.holdsPaths(fn, fn.Params[0]) {
-			entry[p] = lockWrite
-		}
-	} else {
-		for _, p := range st.holdsPaths(fn, nil) {
-			entry[p] = lockWrite
-		}
-	}
+	entry := st.holdsEntry(fn)
 	parent := fn.Parent()
 	if parent == nil || len(parent.Blocks) == 0 {
 		return entry
@@ -519,9 +526,16 @@ func (st *state) locksOf(gs *guardState, fn *ssa.Function) map[ssa.Instruction]l
 	}
 	gs.visiting[fn] = true
 	defer delete(gs.visiting, fn)
+	before := st.flow(gs, fn, st.entryLocks(gs, fn))
+	gs.before[fn] = before
+	return before
+}
 
+// flow runs the must-hold analysis on fn from the given entry locks and returns the held guards
+// before each reachable instruction.
+func (st *state) flow(gs *guardState, fn *ssa.Function, entry lockset) map[ssa.Instruction]lockset {
 	in := make([]lockset, len(fn.Blocks))
-	in[0] = st.entryLocks(gs, fn)
+	in[0] = entry
 	for changed, rounds := true, 0; changed && rounds < 64; rounds++ {
 		changed = false
 		for _, b := range fn.Blocks {
@@ -556,8 +570,93 @@ func (st *state) locksOf(gs *guardState, fn *ssa.Function) map[ssa.Instruction]l
 			st.lockStep(gs, cur, ins)
 		}
 	}
-	gs.before[fn] = before
 	return before
+}
+
+// acquire is a mutex a function returns holding, as a path from one of its parameters (param >= 0)
+// or free variables (free >= 0).
+type acquire struct {
+	param, free int
+	steps       string
+	mode        lockMode
+}
+
+// acquireSummaries computes, for each function of the package, the parameter and captured mutexes it
+// holds at every return, after its deferred calls have run: a helper that locks for its caller. It is
+// a must property, so a function that locks on one path only acquires nothing. The summaries start
+// empty and grow, so every intermediate answer under-approximates what a call acquires, which can
+// only over-report.
+func (st *state) acquireSummaries(gs *guardState, fns []*ssa.Function) map[*ssa.Function][]acquire {
+	gs.acquires = map[*ssa.Function][]acquire{}
+	for changed, rounds := true, 0; changed && rounds < 16; rounds++ {
+		changed = false
+		for _, fn := range fns {
+			if len(fn.Blocks) == 0 {
+				continue
+			}
+			next := st.acquiresOf(gs, fn)
+			if !slices.Equal(next, gs.acquires[fn]) {
+				gs.acquires[fn] = next
+				changed = true
+			}
+		}
+	}
+	return gs.acquires
+}
+
+// acquiresOf computes fn's acquires from the current summaries of its callees.
+func (st *state) acquiresOf(gs *guardState, fn *ssa.Function) []acquire {
+	entry := st.holdsEntry(fn)
+	before := st.flow(gs, fn, entry.clone())
+	var defers []*ssa.Defer
+	forEachInstr(fn, func(ins ssa.Instruction) {
+		if d, ok := ins.(*ssa.Defer); ok {
+			defers = append(defers, d)
+		}
+	})
+	var held lockset
+	returns := 0
+	forEachInstr(fn, func(ins ssa.Instruction) {
+		ret, ok := ins.(*ssa.Return)
+		if !ok {
+			return
+		}
+		at, reached := before[ret]
+		if !reached {
+			return
+		}
+		returns++
+		at = at.clone()
+		// Deferred calls run at return, last first; one that may not have been registered on this
+		// path can only release, so running it anyway under-approximates.
+		for i := len(defers) - 1; i >= 0; i-- {
+			st.callStep(gs, at, defers[i], defers[i].Common(), false)
+		}
+		held = meet(held, at)
+	})
+	if returns == 0 {
+		return nil
+	}
+	var out []acquire
+	for p, m := range held {
+		if _, ok := entry[p]; ok {
+			continue
+		}
+		a := acquire{param: -1, free: -1, steps: p.steps, mode: m}
+		switch r := p.root.(type) {
+		case *ssa.Parameter:
+			a.param = slices.Index(fn.Params, r)
+		case *ssa.FreeVar:
+			a.free = slices.Index(fn.FreeVars, r)
+		}
+		if a.param >= 0 || a.free >= 0 {
+			out = append(out, a)
+		}
+	}
+	slices.SortFunc(out, func(x, y acquire) int {
+		return cmp.Or(cmp.Compare(x.param, y.param), cmp.Compare(x.free, y.free), strings.Compare(x.steps, y.steps))
+	})
+	return out
 }
 
 // tryEdge adds the lock a TryLock took on the branch where it succeeded.
@@ -600,21 +699,26 @@ func (st *state) lockStep(gs *guardState, s lockset, ins ssa.Instruction) {
 	if !ok {
 		return
 	}
-	cc := c.Common()
 	if _, deferred := ins.(*ssa.Defer); deferred {
 		return // a deferred call runs at return
 	}
+	st.callStep(gs, s, ins, c.Common(), true)
+}
+
+// callStep applies a call to the held set. With take unset it only releases: a deferred call run at
+// return is applied that way, since it may not have been registered on every path.
+func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ssa.CallCommon, take bool) {
 	if k, recv := lockOp(cc); k != 0 {
 		p, ok := pathOf(recv)
 		if !ok {
 			return
 		}
-		switch k {
-		case opLock:
+		switch {
+		case k == opLock && take:
 			s[p] = lockWrite
-		case opRLock:
+		case k == opRLock && take:
 			s[p] = max(s[p], lockRead)
-		case opUnlock:
+		case k == opUnlock:
 			delete(s, p)
 		}
 		return
@@ -635,6 +739,26 @@ func (st *state) lockStep(gs *guardState, s lockset, ins ssa.Instruction) {
 				if p, ok := pathOf(cc.Args[r.param]); ok {
 					delete(s, guardPath{p.root, p.steps + r.steps})
 				}
+			}
+		}
+		if !take {
+			return
+		}
+		// What the callee returns holding, translated through the arguments, or for a closure built
+		// in place, through its bindings (as translate does for entry locks).
+		for _, a := range gs.acquires[callee] {
+			var base ssa.Value
+			switch mc, closure := cc.Value.(*ssa.MakeClosure); {
+			case a.param >= 0 && a.param < len(cc.Args):
+				base = cc.Args[a.param]
+			case a.free >= 0 && closure && a.free < len(mc.Bindings):
+				base = mc.Bindings[a.free]
+			default:
+				continue
+			}
+			if p, ok := pathOf(base); ok {
+				k := guardPath{p.root, p.steps + a.steps}
+				s[k] = max(s[k], a.mode)
 			}
 		}
 		return
@@ -746,8 +870,8 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 			}
 		}
 		// Accesses.
-		if addr, ok := writeTarget(ins); ok {
-			if s, ok := st.slotOf(addr); ok && !st.guardExempt(gs, fn, ins, s) && !held(ins, s, lockWrite) {
+		if w, ok := writeOf(ins); ok {
+			if s, ok := st.slotOf(w.addr); ok && !st.guardExempt(gs, fn, ins, s) && !held(ins, s, lockWrite) {
 				note(ins, s, true)
 			}
 		}

@@ -132,6 +132,9 @@ func run(pass *analysis.Pass) (any, error) {
 		graphs:    map[*ssa.Function]*graph{},
 		joinCache: map[ssa.Instruction]map[ssa.Instruction]bool{},
 	}
+	if err := checkCallTables(pass.Pkg); err != nil {
+		return nil, err
+	}
 	st.stats.UnsafeScope = st.ix.UnsafeScopes()
 	st.stats.Guarded = len(st.ix.Guarded)
 	st.stats.Holds = st.ix.HoldsDirectives()
@@ -180,12 +183,17 @@ func (st *state) exportFacts(fns []*ssa.Function) {
 			f.Iso[i] = st.isIsoParam(p)
 		}
 		if s.pessimistic {
+			f.Unknown = true
 			f.Leaks = make([]bool, len(fn.Params))
+			f.Writes = make([]bool, len(fn.Params))
 			for i := range f.Leaks {
 				f.Leaks[i] = true
+				f.Writes[i] = true
 			}
 		} else {
 			f.Leaks = append([]bool(nil), s.leakParam...)
+			f.Writes = append([]bool(nil), s.writeParam...)
+			f.Links = append([]Link(nil), s.links...)
 			f.Fresh = s.fresh
 		}
 		st.pass.ExportObjectFact(obj, f)

@@ -1,22 +1,36 @@
 package ownership
 
 import (
+	"cmp"
 	"go/types"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/bharathvbcr/gocap/internal/kinds"
 )
 
 // FuncFact summarises how a function treats its arguments, so callers in other packages can check
 // moves across the call. Index i follows SSA parameter order: the receiver, when there is one, is 0.
 type FuncFact struct {
-	// Leaks[i]: the function may retain, share, return or move argument i, or mix it with memory
-	// the caller does not own.
+	// Leaks[i]: the function may retain, share or move argument i, or mix it with memory the caller
+	// does not own, other than by linking it to another argument or a result (Links).
 	Leaks []bool
 	// Iso[i]: parameter i is //safe:iso, so passing an argument to it moves the argument.
 	Iso []bool
-	// Fresh: every pointer-bearing result is a fresh allocation that nothing else references.
+	// Fresh: every pointer-bearing result is a fresh allocation that nothing else references, or
+	// memory of the arguments it is linked to (Links).
 	Fresh bool
+	// Writes[i]: the function may write memory reachable from argument i (through its pointers, map
+	// or slice), itself or through functions it calls.
+	Writes []bool
+	// Links are the parameters and results whose memory the function joins, as root.Add(child) or
+	// root.First() do (see Link).
+	Links []Link
+	// Unknown: gocap could not analyse the function (it has no body, or depends on one that could
+	// not be), so Leaks and Writes are all set by assumption, not because it was seen to do either.
+	Unknown bool
 }
 
 // AFact marks FuncFact as an analysis fact.
@@ -36,7 +50,13 @@ type summary struct {
 	leakParam []bool
 	isoParam  []bool
 	leakFree  []bool
-	fresh     bool
+	// writeParam[i] / writeFree[j]: the function may write memory reachable from parameter i or free
+	// variable j.
+	writeParam []bool
+	writeFree  []bool
+	fresh      bool
+	// links are the parameters and results the function joins (FuncFact.Links).
+	links []Link
 	// pessimistic marks a summary for a function gocap could not analyse.
 	pessimistic bool
 }
@@ -57,6 +77,30 @@ func (s *summary) freeLeaks(j int) bool {
 	return s.leakFree[j]
 }
 
+// writes reports whether calling the function may write memory reachable from argument i.
+func (s *summary) writes(i int) bool {
+	if s.pessimistic || i >= len(s.writeParam) {
+		return true
+	}
+	return s.writeParam[i]
+}
+
+func (s *summary) writesFree(j int) bool {
+	if s.pessimistic || j >= len(s.writeFree) {
+		return true
+	}
+	return s.writeFree[j]
+}
+
+// unavailable is the note diagnostics add when a callee's behaviour is assumed rather than known, so
+// a reader can tell a callee gocap could not analyse from one it saw retain or write.
+func (s *summary) unavailable() string {
+	if s.pessimistic {
+		return " (summary unavailable)"
+	}
+	return ""
+}
+
 var pessimistic = &summary{pessimistic: true}
 
 func optimistic(fn *ssa.Function, st *state) *summary {
@@ -64,7 +108,10 @@ func optimistic(fn *ssa.Function, st *state) *summary {
 		leakParam: make([]bool, len(fn.Params)),
 		isoParam:  make([]bool, len(fn.Params)),
 		leakFree:  make([]bool, len(fn.FreeVars)),
-		fresh:     true,
+
+		writeParam: make([]bool, len(fn.Params)),
+		writeFree:  make([]bool, len(fn.FreeVars)),
+		fresh:      true,
 	}
 	for i, p := range fn.Params {
 		s.isoParam[i] = st.isIsoParam(p)
@@ -90,11 +137,35 @@ func (st *state) summary(fn *ssa.Function) *summary {
 	if obj.Pkg() == st.pass.Pkg {
 		return pessimistic
 	}
+	if o, ok := kinds.FuncOverrideFor(obj.FullName()); ok {
+		// An assumption replaces the computed summary (internal/kinds/funcs.go).
+		return &summary{leakParam: o.Leaks, writeParam: o.Writes, fresh: o.Fresh}
+	}
 	var f FuncFact
-	if !st.pass.ImportObjectFact(obj, &f) {
+	if !st.pass.ImportObjectFact(obj, &f) || f.Unknown {
+		if obj.Pkg().Path() == atomicPkg {
+			return atomicSummary(kinds.Params(obj))
+		}
 		return pessimistic
 	}
-	return &summary{leakParam: f.Leaks, isoParam: f.Iso, fresh: f.Fresh}
+	s := &summary{leakParam: f.Leaks, isoParam: f.Iso, writeParam: f.Writes, fresh: f.Fresh, links: f.Links}
+	if obj.Pkg().Path() == atomicPkg {
+		s.writeParam = make([]bool, len(f.Writes))
+	}
+	return s
+}
+
+// atomicSummary is the summary of a sync/atomic function with n parameters and no summary (a
+// function without a Go body has none; see tables.go): it may keep
+// what it is given and its result is not fresh, as for any function gocap cannot see, but it writes
+// nothing a race check counts. A sync/atomic function with a summary keeps it, with its writes
+// cleared.
+func atomicSummary(n int) *summary {
+	leaks := make([]bool, n)
+	for i := range leaks {
+		leaks[i] = true
+	}
+	return &summary{leakParam: leaks, writeParam: make([]bool, n)}
 }
 
 func (st *state) isIsoParam(p *ssa.Parameter) bool {
@@ -103,16 +174,72 @@ func (st *state) isIsoParam(p *ssa.Parameter) bool {
 }
 
 // summarise computes a function's summary from its graph.
+//
+// A parameter whose region holds another parameter's foreign event is linked to it, not leaked: the
+// function joined their memory (root.Add(child) stores child into root). A result whose region holds
+// a parameter's foreign event is linked to that parameter (root.First() returns memory of root). A
+// link records the depth at which the two values' pointee chains meet in the callee's graph, so the
+// caller joins the same memory and no more (graph.link): a copy `cp := *c; return &cp` shares *c's
+// pointees, not c itself. Two owned arguments then stay owned, as one region, and a foreign one makes
+// the other foreign. Anything else in a parameter's region is a leak, and anything else in a result's
+// region makes it not fresh.
+//
+// A write is a write event on the forward pointee chain (fwdHas), not the region: storing a pointer
+// to a parameter somewhere does not write it.
 func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 	s := optimistic(fn, st)
+	np := len(fn.Params)
+	var links []Link
+	// linkTo records that the value at pos (with class n) holds memory of a parameter, and reports
+	// whether that is explained: a parameter's own memory, or a link at the depth where the two meet.
+	// Chains that do not meet cannot be linked exactly, so that stays a leak (or a result that is not
+	// fresh), never a dropped fact.
+	linkTo := func(pos int, n *node, param int) bool {
+		if pos == param {
+			return true
+		}
+		pn := g.val(fn.Params[param])
+		if pn == nil {
+			return false
+		}
+		d, e, ok := g.meetDepth(n, pn)
+		if ok {
+			links = append(links, newLink(pos, d, param, e))
+		}
+		return ok
+	}
+	isWrite := func(e event) bool { return e.kind == evWrite }
 	for i, p := range fn.Params {
 		if n := g.val(p); n != nil {
-			s.leakParam[i] = regionHas(g, n, func(e event) bool { return e.kind != evForeign || e.param != i })
+			s.leakParam[i] = regionScan(g, n, func(e event) bool {
+				switch {
+				case e.kind == evWrite:
+					return false
+				case e.kind == evForeign && e.param >= 0:
+					return !linkTo(i, n, e.param)
+				case e.kind == evReturn:
+					// Returned memory of the parameter links it to the result (the result's region
+					// holds the parameter's foreign event). An owned parameter has no foreign event to
+					// link by, so returning it stays a leak.
+					return s.isoParam[i]
+				}
+				return true
+			})
+			s.writeParam[i] = fwdHas(g, n, isWrite)
 		}
 	}
 	for j, fv := range fn.FreeVars {
 		if n := g.val(fv); n != nil {
-			s.leakFree[j] = regionHas(g, n, func(e event) bool { return e.kind != evForeign || e.free != j })
+			s.leakFree[j] = regionHas(g, n, func(e event) bool {
+				switch e.kind {
+				case evWrite:
+					return false
+				case evForeign:
+					return e.free != j
+				}
+				return true
+			})
+			s.writeFree[j] = fwdHas(g, n, isWrite)
 		}
 	}
 	for _, b := range fn.Blocks {
@@ -120,13 +247,64 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 		if !ok {
 			continue
 		}
-		for _, r := range ret.Results {
-			if n := g.val(r); n != nil && regionHas(g, n, func(e event) bool { return e.kind != evReturn }) {
+		for k, r := range ret.Results {
+			n := g.val(r)
+			if n == nil {
+				continue
+			}
+			if regionScan(g, n, func(e event) bool {
+				switch {
+				case e.kind == evReturn || e.kind == evWrite:
+					return false
+				case e.kind == evForeign && e.param >= 0:
+					return !linkTo(np+k, n, e.param)
+				}
+				return true
+			}) {
 				s.fresh = false
 			}
 		}
 	}
+	s.links = mergeLinks(nil, links)
 	return s
+}
+
+// Link says a function joins the memory of two of its parameters or results: positions index the
+// parameters followed by the results, and the memory DepthA pointers below A is the memory DepthB
+// pointers below B. A is the smaller position.
+type Link struct {
+	A, DepthA, B, DepthB int
+}
+
+func newLink(a, da, b, db int) Link {
+	if a > b {
+		a, da, b, db = b, db, a, da
+	}
+	return Link{a, da, b, db}
+}
+
+// mergeLinks returns the links of a and b, sorted and without duplicates.
+func mergeLinks(a, b []Link) []Link {
+	out := slices.Concat(a, b)
+	slices.SortFunc(out, func(x, y Link) int {
+		return cmp.Or(cmp.Compare(x.A, y.A), cmp.Compare(x.B, y.B), cmp.Compare(x.DepthA, y.DepthA), cmp.Compare(x.DepthB, y.DepthB))
+	})
+	return slices.Compact(out)
+}
+
+// regionScan applies f to every event in n's region and reports whether f returned true for any.
+// Unlike regionHas it never stops early: f records links as it goes, and the region is a map, so
+// stopping at the first bad event would record a different subset of links on every run.
+func regionScan(g *graph, n *node, f func(event) bool) bool {
+	found := false
+	for c := range g.region(n) {
+		for _, e := range c.events {
+			if f(e) {
+				found = true
+			}
+		}
+	}
+	return found
 }
 
 func regionHas(g *graph, n *node, bad func(event) bool) bool {
@@ -140,21 +318,30 @@ func regionHas(g *graph, n *node, bad func(event) bool) bool {
 	return false
 }
 
+// fwdHas reports whether an event bad lies on n's forward pointee chain (pointsTo).
+func fwdHas(g *graph, n *node, bad func(event) bool) bool {
+	for _, c := range g.pointsTo(n) {
+		for _, e := range c.events {
+			if bad(e) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func sameSummary(a, b *summary) bool {
-	if a.fresh != b.fresh || len(a.leakParam) != len(b.leakParam) || len(a.leakFree) != len(b.leakFree) {
-		return false
+	return a.fresh == b.fresh && slices.Equal(a.leakParam, b.leakParam) && slices.Equal(a.leakFree, b.leakFree) &&
+		slices.Equal(a.writeParam, b.writeParam) && slices.Equal(a.writeFree, b.writeFree) && slices.Equal(a.links, b.links)
+}
+
+// orInto returns next with every flag prev set also set.
+func orInto(prev, next []bool) []bool {
+	out := append([]bool(nil), next...)
+	for i := range out {
+		out[i] = out[i] || prev[i]
 	}
-	for i := range a.leakParam {
-		if a.leakParam[i] != b.leakParam[i] {
-			return false
-		}
-	}
-	for i := range a.leakFree {
-		if a.leakFree[i] != b.leakFree[i] {
-			return false
-		}
-	}
-	return true
+	return out
 }
 
 // computeSummaries iterates to the greatest fixpoint: every function starts optimistic and only
@@ -189,13 +376,10 @@ func mergePessimistic(prev, next *summary) *summary {
 	}
 	out := *next
 	out.fresh = prev.fresh && next.fresh
-	out.leakParam = append([]bool(nil), next.leakParam...)
-	for i := range out.leakParam {
-		out.leakParam[i] = out.leakParam[i] || prev.leakParam[i]
-	}
-	out.leakFree = append([]bool(nil), next.leakFree...)
-	for i := range out.leakFree {
-		out.leakFree[i] = out.leakFree[i] || prev.leakFree[i]
-	}
+	out.leakParam = orInto(prev.leakParam, next.leakParam)
+	out.leakFree = orInto(prev.leakFree, next.leakFree)
+	out.writeParam = orInto(prev.writeParam, next.writeParam)
+	out.writeFree = orInto(prev.writeFree, next.writeFree)
+	out.links = mergeLinks(prev.links, next.links)
 	return &out
 }

@@ -14,11 +14,12 @@ import (
 // the handler cannot see it, so the transfer rules do not catch it.
 //
 // The check starts from the handler body's shared roots and follows them through derivations and
-// loads to any store, map update, or delete/clear/copy/append into them. It follows the roots into
-// static calls of this package and into closures the body calls directly, and stops at spawn sites
-// (the transfer rules own a goroutine the handler starts), interface and dynamic calls, and calls
-// into other packages: those are stated gaps. It runs inside the registration's transfer check, so a
-// //safe:unsafe on the registration mutes every write it finds.
+// loads to any write (writeOf) into them. It follows the roots into static calls of this package and
+// into closures the body calls directly. At a static call into another package (or to a function
+// with no body) it reads the callee's summary instead: passing shared memory to a parameter the
+// callee may write is a write. It stops at spawn sites (the transfer rules own a goroutine the handler
+// starts) and at interface and dynamic calls, which are a stated gap. It runs inside the
+// registration's transfer check, so a //safe:unsafe on the registration mutes every write it finds.
 
 // checkHandlerWrites reports SAFE008 for the handler registered at sp.
 func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
@@ -44,6 +45,14 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 		line int
 	}
 	reported := map[line]bool{}
+	once := func(ins ssa.Instruction) bool {
+		p := st.pass.Fset.Position(posOf(ins, ins))
+		if reported[line{p.Filename, p.Line}] {
+			return false
+		}
+		reported[line{p.Filename, p.Line}] = true
+		return true
+	}
 	for steps := 0; len(queue) > 0 && steps < 10000; steps++ {
 		fn := queue[0]
 		queue = queue[1:]
@@ -52,18 +61,12 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 			if _, ok := spawnOf(ins); ok {
 				return
 			}
-			if addr, ok := writeTarget(ins); ok {
-				if _, guarded := st.slotOf(addr); guarded {
+			if w, ok := writeOf(ins); ok {
+				if _, guarded := st.slotOf(w.addr); guarded {
 					return // SAFE009 checks guarded memory at every access
 				}
-				if root, ok := sharedRoot(addr, r); ok {
-					pos := posOf(ins, ins)
-					p := st.pass.Fset.Position(pos)
-					if reported[line{p.Filename, p.Line}] {
-						return
-					}
-					reported[line{p.Filename, p.Line}] = true
-					st.report(pos, HandlerWrite, fmt.Sprintf(
+				if root, ok := sharedRoot(w.addr, r); ok && once(ins) {
+					st.report(posOf(ins, ins), HandlerWrite, fmt.Sprintf(
 						"%s is written here by a handler registered with %s%s, which shares it with every concurrent request",
 						r[root], sp.via, st.at(regPos)))
 				}
@@ -78,7 +81,11 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 				return
 			}
 			callee, bindings := directCallee(cc.Value)
-			if callee == nil || len(callee.Blocks) == 0 || !st.followable(callee) {
+			if callee == nil {
+				return
+			}
+			if len(callee.Blocks) == 0 || !st.followable(callee) {
+				st.checkCalleeWrites(ins, cc, callee, r, sp, regPos, once)
 				return
 			}
 			for i, a := range cc.Args {
@@ -95,6 +102,24 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 				}
 			}
 		})
+	}
+}
+
+// checkCalleeWrites reports SAFE008 at a call the write check does not follow into (a function of
+// another package, or one with no body): an argument that leads back to shared memory is written when
+// the callee's summary says it may write that parameter. Shareable arguments (a mutex, an atomic, an
+// imm value) are exempt: their methods synchronise or never write.
+func (st *state) checkCalleeWrites(ins ssa.Instruction, cc *ssa.CallCommon, callee *ssa.Function, r map[ssa.Value]string, sp spawnSite, regPos token.Pos, once func(ssa.Instruction) bool) {
+	sum := st.summary(callee)
+	for i, a := range cc.Args {
+		root, ok := sharedRoot(a, r)
+		if !ok || !sum.writes(i) || st.cls.Shareable(a.Type()) || !once(ins) {
+			continue
+		}
+		st.report(posOf(ins, ins), HandlerWrite, fmt.Sprintf(
+			"%s is passed to %s, which may write it%s, by a handler registered with %s%s, which shares it with every concurrent request",
+			r[root], calleeName(callee), sum.unavailable(), sp.via, st.at(regPos)))
+		return
 	}
 }
 
@@ -178,22 +203,35 @@ func directCallee(v ssa.Value) (*ssa.Function, []ssa.Value) {
 	return nil, nil
 }
 
-// writeTarget returns the memory an instruction writes into, if it writes.
-func writeTarget(ins ssa.Instruction) (ssa.Value, bool) {
+// write is one instruction writing memory: what it writes through (a pointer, map or slice).
+type write struct {
+	addr ssa.Value
+	// grows marks append: it writes the backing array of its first argument only when that slice has
+	// room, and the new length is visible only through its result.
+	grows bool
+}
+
+// writeOf is the one definition of "a write" that every rule shares: a store, a map update, and the
+// builtins delete, clear, copy and append on their first argument. SAFE006 leaves out append (a
+// package variable is only changed by storing the result back); SAFE008 and the summaries' writes
+// bit count it, because it writes the shared backing array.
+func writeOf(ins ssa.Instruction) (write, bool) {
 	switch ins := ins.(type) {
 	case *ssa.Store:
-		return ins.Addr, true
+		return write{addr: ins.Addr}, true
 	case *ssa.MapUpdate:
-		return ins.Map, true
+		return write{addr: ins.Map}, true
 	case *ssa.Call:
 		if b, ok := ins.Call.Value.(*ssa.Builtin); ok && len(ins.Call.Args) > 0 {
 			switch b.Name() {
-			case "delete", "clear", "copy", "append":
-				return ins.Call.Args[0], true
+			case "delete", "clear", "copy":
+				return write{addr: ins.Call.Args[0]}, true
+			case "append":
+				return write{addr: ins.Call.Args[0], grows: true}, true
 			}
 		}
 	}
-	return nil, false
+	return write{}, false
 }
 
 // sharedRoot follows v back through derivations and loads to one of roots.

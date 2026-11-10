@@ -25,6 +25,9 @@ const (
 	evReturn
 	// evTransfer: the class is moved to another goroutine or to an owned parameter.
 	evTransfer
+	// evWrite: memory is written through a value of the class (writeOf), here or in a callee. It is
+	// not a leak; summaries read it along the forward pointee chain only (pointsTo).
+	evWrite
 )
 
 type event struct {
@@ -186,7 +189,29 @@ func ev(kind eventKind, ins ssa.Instruction, desc string) event {
 	return event{kind: kind, instr: ins, pos: pos, desc: desc, param: -1, free: -1}
 }
 
+// written records that ins writes through v. Guarded memory is left out: SAFE009 checks every access
+// to it, and a write under its mutex is not a race.
+func (g *graph) written(ins ssa.Instruction, v ssa.Value, desc string) {
+	if _, guarded := g.st.slotOf(v); guarded {
+		return
+	}
+	g.add(g.val(v), ev(evWrite, ins, desc))
+}
+
+// writtenCaptures records a write through every value closure v captured: a function value whose
+// body runs where gocap cannot see it may write all of them.
+func (g *graph) writtenCaptures(ins ssa.Instruction, v ssa.Value, desc string) {
+	if mc, ok := v.(*ssa.MakeClosure); ok {
+		for _, b := range mc.Bindings {
+			g.written(ins, b, desc)
+		}
+	}
+}
+
 func (g *graph) instr(ins ssa.Instruction) {
+	if w, ok := writeOf(ins); ok {
+		g.written(ins, w.addr, "written here")
+	}
 	switch ins := ins.(type) {
 	case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap:
 		g.val(ins.(ssa.Value))
@@ -338,15 +363,20 @@ func (g *graph) goStmt(ins *ssa.Go) {
 	}
 	for _, a := range cc.Args {
 		g.transfer(ins, a, "passed to a goroutine")
+		g.written(ins, a, "passed to a goroutine, which may write it")
 	}
+	g.writtenCaptures(ins, cc.Value, "captured by a goroutine, which may write it")
 }
 
 func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) {
 	if cc.IsInvoke() {
 		desc := "passed to interface method " + cc.Method.Name() + " (dynamic dispatch may retain it)"
+		wdesc := "passed to interface method " + cc.Method.Name() + ", which may write it"
 		g.add(g.val(cc.Value), ev(evEscape, ins, desc))
+		g.written(ins, cc.Value, wdesc)
 		for _, a := range cc.Args {
 			g.add(g.val(a), ev(evEscape, ins, desc))
+			g.written(ins, a, wdesc)
 		}
 		if result != nil {
 			g.add(g.val(result), ev(evForeign, ins, "result of interface method "+cc.Method.Name()))
@@ -361,7 +391,9 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 	if fn == nil {
 		for _, a := range cc.Args {
 			g.add(g.val(a), ev(evEscape, ins, "passed to a dynamic function call"))
+			g.written(ins, a, "passed to a dynamic function call, which may write it")
 		}
+		g.written(ins, cc.Value, "called dynamically; its captures may be written")
 		if result != nil {
 			g.add(g.val(result), ev(evForeign, ins, "result of a dynamic function call"))
 		}
@@ -373,9 +405,12 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 	if sp, ok := spawnOf(ins); ok && sp.via != "" {
 		spawned = sp.arg
 		g.transfer(ins, sp.fn, sp.what(sp.fn))
+		g.writtenCaptures(ins, sp.fn, "captured by a callback started by "+sp.via+", which may write it")
 	}
 	sum := g.st.summary(fn)
 	name := calleeName(fn)
+	note := sum.unavailable()
+	g.link(cc, sum, result, spawned)
 	for i, a := range cc.Args {
 		an := g.val(a)
 		if an == nil || i == spawned {
@@ -385,7 +420,10 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		case sum.isIso(i):
 			g.transfer(ins, a, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
 		case sum.leaks(i):
-			g.add(an, ev(evEscape, ins, "passed to "+name+", which may retain or share it"))
+			g.add(an, ev(evEscape, ins, "passed to "+name+", which may retain or share it"+note))
+		}
+		if sum.writes(i) {
+			g.written(ins, a, "passed to "+name+", which may write it"+note)
 		}
 	}
 	if mc, ok := cc.Value.(*ssa.MakeClosure); ok {
@@ -393,11 +431,65 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 			if sum.freeLeaks(j) {
 				g.add(g.val(b), ev(evEscape, ins, "captured by a closure that may retain or share it"))
 			}
+			if sum.writesFree(j) {
+				g.written(ins, b, "captured by a closure that may write it")
+			}
 		}
 	}
 	if result != nil && !sum.fresh {
-		g.add(g.val(result), ev(evForeign, ins, "result of "+name+" (not known to return a fresh value)"))
+		g.add(g.val(result), ev(evForeign, ins, "result of "+name+" (not known to return a fresh value)"+note))
 	}
+}
+
+// link joins the memory of the arguments and the result that the callee links (summary.links): the
+// callee stored one into another, or returns memory of one. Each link joins the classes at the depths
+// where the callee's own graph joined them. A tuple result has one class, so a link to any of its
+// results joins all of them, which over-reports, never under-reports. A callback the callee runs on
+// another goroutine (argument skip) is a transfer, not memory joined to the others: a spawner that
+// keeps its callback (a ServeMux storing a handler) owns that link.
+func (g *graph) link(cc *ssa.CallCommon, sum *summary, result ssa.Value, skip int) {
+	n := len(cc.Args) + cc.Signature().Results().Len()
+	at := func(pos, depth int) *node {
+		var v ssa.Value
+		switch {
+		case pos == skip || pos >= n:
+			return nil
+		case pos < len(cc.Args):
+			v = cc.Args[pos]
+		default:
+			v = result
+		}
+		if v == nil {
+			return nil
+		}
+		c := g.val(v)
+		for i := 0; c != nil && i < depth; i++ {
+			c = g.pointee(c)
+		}
+		return c
+	}
+	for _, l := range sum.links {
+		a, b := at(l.A, l.DepthA), at(l.B, l.DepthB)
+		if a != nil && b != nil {
+			g.union(a, b)
+		}
+	}
+}
+
+// meetDepth returns how many pointers below a and below b their pointee chains first meet, if they
+// do. Two classes whose regions hold each other's events always meet: one reaches the other's
+// memory, or a container of it.
+func (g *graph) meetDepth(a, b *node) (int, int, bool) {
+	at := map[*node]int{}
+	for i, c := range g.pointsTo(a) {
+		at[c] = i
+	}
+	for j, c := range g.pointsTo(b) {
+		if i, ok := at[c]; ok {
+			return i, j, true
+		}
+	}
+	return 0, 0, false
 }
 
 func (g *graph) builtin(ins ssa.Instruction, b *ssa.Builtin, args []ssa.Value, result ssa.Value) {
@@ -449,23 +541,30 @@ func calleeName(fn *ssa.Function) string {
 	return fn.String()
 }
 
-// region returns every class reachable from n through pointees, plus every class that can reach one
-// of those (a container holding a pointer into the region).
-func (g *graph) region(n *node) map[*node]bool {
-	g.buildRev()
-	fwd := map[*node]bool{}
-	for c := n.find(); c != nil && !fwd[c]; {
-		fwd[c] = true
+// pointsTo returns n's class and every class reachable from it through pointees: the memory a value
+// of n can reach, and so write. It is region without the containers: because Steensgaard unification
+// joins a stored pointer with the cell it is stored into, region would count a struct or variadic
+// slice holding a pointer to p as part of p, and writing that container is not writing p.
+func (g *graph) pointsTo(n *node) []*node {
+	var out []*node
+	seen := map[*node]bool{}
+	for c := n.find(); c != nil && !seen[c]; {
+		seen[c] = true
+		out = append(out, c)
 		if c.pointee == nil {
 			break
 		}
 		c = c.pointee.find()
 	}
+	return out
+}
+
+// region returns every class reachable from n through pointees, plus every class that can reach one
+// of those (a container holding a pointer into the region).
+func (g *graph) region(n *node) map[*node]bool {
+	g.buildRev()
 	out := map[*node]bool{}
-	stack := make([]*node, 0, len(fwd))
-	for c := range fwd {
-		stack = append(stack, c)
-	}
+	stack := g.pointsTo(n)
 	for len(stack) > 0 {
 		c := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]

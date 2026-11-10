@@ -51,13 +51,19 @@ race, so the transfer rules do not catch it. SAFE008 starts from what every invo
 closure's captured variables, a method value's receiver, a `Handler` value's `ServeHTTP` receiver)
 and follows it through field, index, slice, conversion and load steps to any store, map update, or
 `delete`/`clear`/`copy`/`append` into it. It follows the shared memory into functions of this
-package the handler calls and into closures it calls directly. It stops at:
+package the handler calls and into closures it calls directly. At a static call into another package
+it reads the callee's summary instead: passing shared memory to a parameter the callee may write
+(`h.cache.Set(k, v)`, `sort.Ints(s)`) is a finding, worded "passed to `F`, which may write it". When
+gocap has no summary for the callee (no Go body), the finding says "(summary unavailable)". It stops
+at:
 - goroutines the handler starts, which the transfer rules check;
-- interface and dynamic calls, and calls into other packages (stated gaps);
+- interface and dynamic calls (a stated gap);
 - handler values it cannot resolve to a body.
 
-There is no exemption by type: `s.count++` on an `int` races. Atomic and mutex methods are calls,
-not stores, so they are never reported. A write under a lock is reported unless the memory is
+There is no exemption by type for a direct write: `s.count++` on an `int` races. An argument of a
+shareable type (a mutex, an atomic, an imm value) is exempt at a call, so `h.mu.Lock()` and
+`h.count.Add(1)` are never reported, and neither are the functions of `sync/atomic`: atomic accesses
+are synchronised, not writes. A write under a lock is reported unless the memory is
 `//safe:guarded_by`; then SAFE009 checks it instead. A `//safe:unsafe` on the registration mutes
 every SAFE008 of that handler and counts as a suppressed transfer. One on a write mutes that line
 only. One finding is reported per source line.
@@ -76,9 +82,12 @@ function whose summary says it may keep it.
   step only from a variable assigned once before the load.
 - **Lock operations:** `Lock`/`RLock` add a path and `Unlock`/`RUnlock` remove it. A `TryLock`
   adds it on the branch where it succeeded. A deferred `Unlock` changes nothing until return.
-- **Calls:** a function of this package releases the parameter mutexes it unlocks (summarised).
-  Any call into another package, interface method or dynamic call releases every mutex in what it
-  receives, including through `fmt.Println(c)`'s variadic slice.
+- **Calls:** a function of this package releases the parameter mutexes it unlocks, and acquires
+  the parameter and captured mutexes it holds at every return after its deferred calls have run
+  (both summarised). A helper that locks for its caller, `func lock(mu *sync.Mutex) { mu.Lock() }`,
+  leaves `mu` held after the call; one that locks on some paths only acquires nothing. Any call
+  into another package, interface method or dynamic call releases every mutex in what it receives,
+  including through `fmt.Println(c)`'s variadic slice.
 - **Closures:** a closure called in place starts with its caller's locks. Any other function starts
   with none, plus its `//safe:holds`.
 - **Locals:** a guarded local is a cell: its `Alloc` in the declaring function and, in each closure
@@ -156,20 +165,45 @@ fresh memory. It stays owned while nothing outside its own object graph points i
 
 Shareable without ownership: pointer-free values, strings, channels, verified imm types and pointers
 to them, and a curated override table (`sync` and `sync/atomic` types, `*testing.T`,
-`context.Context`, `error`, `time.Time`, `*regexp.Regexp`, `*log.Logger`, `*slog.Logger`, ...). Each
-override is an **assumption, not a proof**; see `internal/kinds/kinds.go`. The `error` entry
-is the weakest one: it rests on the convention that errors are not mutated after creation.
+`context.Context`, `error`, `time.Time`, `*regexp.Regexp`, `*log.Logger`, `*slog.Logger`,
+`net.Listener`, ...). Each override is an **assumption, not a proof**; see `internal/kinds/kinds.go`.
+The `error` entry is the weakest one: it rests on the convention that errors are not mutated after
+creation.
+
+A second table, `internal/kinds/funcs.go`, replaces the summary of a function of another package
+with an assumption, keyed by `types.Func.FullName`. It holds four entries, each saying its result is
+fresh: `context.WithCancel` and `context.WithTimeout` (a `CancelFunc` is documented safe to call
+from any goroutine), `io.ReadAll` and `encoding/json.Marshal`. An entry states every flag and asserts
+only what its reason supports, so these keep their arguments leaked and written. The call tables
+(spawners, lock operations, function overrides) are checked by one resolver: when gocap analyses
+the package an entry belongs to, the entry must name a function of it with matching arity, or the
+analysis fails. `TestCallTablesResolve` runs the same check on the current toolchain for every
+package but `golang.org/x/sync/errgroup`, which this module does not depend on; its entries are
+checked only when gocap analyses a program that imports it.
+`TestOverrideBudget` fails once type overrides, function overrides and spawners together exceed 100
+entries; today they hold 41 (28 + 4 + 9). Lock operations and `sync/atomic` define what a lock or a
+synchronised write is, rather than vouching for a callee, so they are not counted.
 
 ## How it works
 
 - **Alias analysis:** per-function Steensgaard unification over SSA (`golang.org/x/tools/go/ssa`).
   It is flow-insensitive and field-insensitive on purpose: it reports too much and never too little.
   Only the move-kill (a use after a move unless the value is redefined first) is flow-sensitive.
-- **Summaries:** each function gets a summary saying which arguments it may retain or share, and
-  whether it returns fresh memory. Summaries are computed to a greatest fixpoint within a package and
-  exported as analysis facts for exported functions, so they cross package boundaries. That includes
-  the standard library: `(*bytes.Buffer).WriteString` is shown not to retain its receiver. Functions
-  without bodies, interface calls, dynamic calls and wrappers are treated as retaining everything.
+- **Summaries:** each function gets a summary saying which arguments it may retain or share, which
+  it may write, which arguments and results it links, and whether it returns fresh memory.
+  Summaries are computed to a greatest fixpoint within a package and exported as analysis facts for
+  exported functions, so they cross package boundaries. That includes the standard library:
+  `(*bytes.Buffer).WriteString` is shown not to retain its receiver. Functions without bodies,
+  interface calls, dynamic calls and wrappers are treated as retaining and writing everything.
+  - **Writes:** an argument is written when a write lies on its forward pointee chain: the memory
+    it points to, and what that points to. Containers that point into it do not count, so
+    `fmt.Println(p)`, which puts `p` in a variadic slice, does not write `p`. A write to guarded
+    memory is left to SAFE009.
+  - **Links:** a function that joins two arguments' memory (`root.Add(child)`) or returns memory of
+    one (`root.First()`) links them instead of leaking them. The caller joins the same memory, at
+    the pointer depth where the callee joined it, so two owned arguments stay owned as one region,
+    and a foreign one makes the other foreign. A copy (`cp := *c; return &cp`) is linked one pointer
+    down, so writing the copy is not writing `c`.
 - **Change from the design advice:** the original plan took standard-library escape information from
   the compiler (`go build -gcflags=-m`). The MVP uses the same summary facts for every package
   instead, which gives one mechanism and no parsing of compiler output. The compiler's escape
@@ -268,11 +302,23 @@ writes make the variable mutable.
 go1.27.3, 22 of 24 files. Skipped: `cgo_test.go` imports `internal/testenv` and `synctest_test.go`
 imports `internal/synctest`; neither can build outside GOROOT.
 
-| | SAFE006 at the declaration | Predicted before that run | With callbacks | Predicted before that run | With fork-join | Predicted before that run | MVP (`b42b26c`) | Predicted before the MVP run |
-|---|---|---|---|---|---|---|---|---|
-| `TestRace*` flagged | 229 / 234 (97.9%) | 229 (needs related positions) | 229 / 234 (97.9%) | 229 | 228 / 234 (97.4%) | 228, unchanged | 228 / 234 (97.4%) | at least 85% |
-| `TestNoRace*` clean | 36 / 129 (27.9%) | at most 38; the design review said 38 | 38 / 129 (29.5%) | 38 | 40 / 129 (31.0%) | 40 | 30 / 129 (23.3%) | 15 to 40% |
-| `TestNoRace*` flagged only for fork-join | 7 | 7 | 7 | 7 | 7 | 7 | 17 | expected to dominate the misses; **it did not** |
+| | Writes, overrides, links | Predicted before that run | SAFE006 at the declaration | Predicted before that run | With callbacks | Predicted before that run | With fork-join | Predicted before that run | MVP (`b42b26c`) | Predicted before the MVP run |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `TestRace*` flagged | 229 / 234 (97.9%) | 229, unchanged | 229 / 234 (97.9%) | 229 (needs related positions) | 229 / 234 (97.9%) | 229 | 228 / 234 (97.4%) | 228, unchanged | 228 / 234 (97.4%) | at least 85% |
+| `TestNoRace*` clean | 36 / 129 (27.9%) | 36, unchanged | 36 / 129 (27.9%) | at most 38; the design review said 38 | 38 / 129 (29.5%) | 38 | 40 / 129 (31.0%) | 40 | 30 / 129 (23.3%) | 15 to 40% |
+| `TestNoRace*` flagged only for fork-join | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 17 | expected to dominate the misses; **it did not** |
+
+The writes bit, the function overrides and argument linking left the counts where they were, as
+predicted, but six tests changed categories, which the prediction (unchanged) did not foresee:
+- `net.Listener` became a type override, so `TestNoRaceIOHttp` lost its SAFE002, SAFE003 and SAFE004.
+  It stays flagged by SAFE006.
+- Linking ties `reflect.ValueOf`'s result to its argument, so `TestRaceReflectRW`, `ReflectWW` and
+  `ReflectCopyWW` lost a SAFE002.
+- `TestRaceIssue5567` and `TestRaceIssue51618` gained SAFE002 and SAFE004 through a link
+  Steensgaard unification makes inside the race build of `internal/poll` (see
+  [Known limits](#known-limits)).
+
+All five race tests were already flagged by SAFE003.
 
 Moving SAFE006 to the declaration would have dropped five races caught only by it
 (`TestRaceIssue12664`…`_4`, `TestRaceIntRWGlobalFuncs`): the finding left the test functions. Scoring
@@ -331,24 +377,24 @@ corpus test whose sharing is a lock discipline is annotated, together with the r
 same shape, so the run also shows whether an annotation hides a race. Each directive anchors on one
 exact line inside one function or declaration, and the run fails if any anchor does not match.
 
-| | Annotated (11 directives) | Predicted before that run | Unannotated, same run |
-|---|---|---|---|
-| `TestRace*` flagged | 229 / 234 (97.9%) | 229 | 229 / 234 (97.9%) |
-| `TestNoRace*` clean | 40 / 129 (31.0%) | 40 (the design review said 42: its base of 38 plus Mutex, RWMutex, RWMutexMultipleReaders and RWMutexTransitive) | 36 / 129 (27.9%) |
-| `TestNoRace*` flagged only for fork-join | 6 | not predicted | 7 |
+| | With lock-acquire summaries | Predicted before that run | Annotated (11 directives) | Predicted before that run | Unannotated, same run |
+|---|---|---|---|---|---|
+| `TestRace*` flagged | 229 / 234 (97.9%) | 229 | 229 / 234 (97.9%) | 229 | 229 / 234 (97.9%) |
+| `TestNoRace*` clean | 42 / 129 (32.6%) | 42 (`FuncUnlock` and `AsFunc4` clear, `AsFunc3` stays flagged) | 40 / 129 (31.0%) | 40 (the design review said 42: its base of 38 plus Mutex, RWMutex, RWMutexMultipleReaders and RWMutexTransitive) | 36 / 129 (27.9%) |
+| `TestNoRace*` flagged only for fork-join | 6 | not predicted | 6 | not predicted | 7 |
 
 Per annotated test, the categories without the directives and with them, as predicted:
 
-| Test | Without | With |
-|---|---|---|
-| `TestNoRaceMutex` | SAFE003 | clean |
-| `TestNoRaceRWMutexMultipleReaders` | SAFE003 | clean |
-| `TestNoRaceRWMutexTransitive` | SAFE003, SAFE003-forkjoin | clean |
-| `TestNoRaceFinGlobal` | SAFE006 | clean |
-| `TestNoRaceFuncUnlock` | SAFE003 | SAFE009 |
-| `TestNoRaceAsFunc4` | SAFE003-forkjoin | SAFE009 |
-| `TestRaceMutex`, `TestRaceMutex2`, `TestRaceMutexRWMutex`, `TestRaceAsFunc3` | SAFE003 or SAFE003-forkjoin | SAFE009 |
-| `TestRaceRWMutexMultipleReaders` | SAFE003, SAFE003-forkjoin | SAFE009 |
+| Test | Without | With | With lock-acquire summaries |
+|---|---|---|---|
+| `TestNoRaceMutex` | SAFE003 | clean | clean |
+| `TestNoRaceRWMutexMultipleReaders` | SAFE003 | clean | clean |
+| `TestNoRaceRWMutexTransitive` | SAFE003, SAFE003-forkjoin | clean | clean |
+| `TestNoRaceFinGlobal` | SAFE006 | clean | clean |
+| `TestNoRaceFuncUnlock` | SAFE003 | SAFE009 | clean |
+| `TestNoRaceAsFunc4` | SAFE003-forkjoin | SAFE009 | clean |
+| `TestRaceMutex`, `TestRaceMutex2`, `TestRaceMutexRWMutex`, `TestRaceAsFunc3` | SAFE003 or SAFE003-forkjoin | SAFE009 | SAFE009 |
+| `TestRaceRWMutexMultipleReaders` | SAFE003, SAFE003-forkjoin | SAFE009 | SAFE009 |
 
 - **No race was hidden.** Every annotated race test is still flagged, now by SAFE009, not by a move.
   The scorer records categories only, so the lines were checked separately (`go vet -vettool` on
@@ -358,9 +404,10 @@ Per annotated test, the categories without the directives and with them, as pred
   - the writes of `y` under `RLock` in `TestRaceRWMutexMultipleReaders`, plus its final `_ = y`, which
     is unlocked;
   - the argument read outside the lock in `TestRaceAsFunc3`.
-- **Two race-free tests stay flagged, by SAFE009.** `TestNoRaceFuncUnlock` and `TestNoRaceAsFunc4`
-  take the lock inside a function they call and release it in the caller. The lock analysis models
-  releases inside callees, not acquisitions.
+- **Locks taken in a callee.** `TestNoRaceFuncUnlock` and `TestNoRaceAsFunc4` take the lock inside
+  a function they call and release it in the caller. Before lock-acquire summaries they stayed
+  flagged by SAFE009; with them both are clean. `TestRaceAsFunc3` is still flagged: its argument is
+  read before the call that locks.
 - **`TestNoRaceRWMutex` is not annotated.** It declares `var x, y int64 = 0, 1` and writes `y` under
   `RLock`. A directive on that line guards both names, so guarding `x` alone would take a code change.
   This is where the design review's prediction differs from the result. It counted `TestNoRaceRWMutex`
@@ -386,6 +433,10 @@ The hatch ratio, suppressed transfers over transfers, is the measurand of the ab
 under [Next](#next). Callbacks count as transfers, so a `net/http` service's handlers are in the
 denominator. Goroutines started by a library function missing from the spawner table are not.
 
+To compare two builds of gocap with `go vet -vettool`, build two binaries at different paths. `go
+vet` caches results per tool binary, so one binary run twice with a different environment variable
+returns the first run's diagnostics.
+
 ## Known limits
 
 - **Fork-join covers channel and WaitGroup joins only.** The [shapes](#fork-join) outside it keep
@@ -393,16 +444,23 @@ denominator. Goroutines started by a library function missing from the spawner t
 - **Lock discipline is declared, not inferred.** SAFE009 checks memory annotated
   `//safe:guarded_by`. A struct with guarded fields crosses goroutines only if it is also
   `//safe:imm`. A directive guards every name its declaration introduces.
-- **SAFE009 does not see a lock taken inside a callee.** A function that locks a mutex and returns
-  with it held leaves the caller believing it is not held (`TestNoRaceFuncUnlock`). A closure that
-  does not capture the mutex cannot hold it, even when it is called in place under the lock.
+- **SAFE009 sees locks taken inside callees of this package only.** A function of another package
+  that returns holding a mutex leaves the caller believing it is not held. A closure that does not
+  capture the mutex cannot hold it, even when it is called in place under the lock.
 - **Only listed callback functions are goroutine boundaries.** A library function that runs its
   argument on another goroutine but is not in `spawn.go` (a worker pool, a scheduler) is an ordinary
   call to gocap. Its callback is checked only through the callee's summary, which treats it as
   retained.
-- **SAFE008 follows in-package calls only.** A handler that hands shared memory to another
-  package's function that writes it (`sort.Ints(s)`, `json.Unmarshal(b, &cfg)`), or to an interface
-  method, is not reported: summaries record retention, not writes.
+- **SAFE008 does not follow interface or dynamic calls.** A handler that hands shared memory to an
+  interface method (`h.store.Put(...)` through an interface) is not reported. Static calls into
+  other packages are checked through the callee's writes bit, which is coarse in the same way as the
+  alias analysis: a callee that reaches its argument through reflection or an interface call
+  (`json.Marshal(cfg)`) counts as writing it, and so does `t.Fatalf` on a `*testing.T` (the method
+  belongs to the unexported `testing.common`, which is not in the override table).
+- **Links are coarse in the same way.** A tuple result is one class, so a link to one result joins
+  all of them. Steensgaard unification inside a callee can link memory that never aliases: under the
+  race build, `(*internal/poll.FD).Pread` links its receiver and buffer, so a buffer read with
+  `(*os.File).ReadAt` looks like part of the file (`TestRaceIssue5567`, `TestRaceIssue51618`).
 - **SAFE009 identifies a mutex by its path.** The same mutex reached another way (an alias, or
   through a load of a pointer field) is a different path, which over-reports and never
   under-reports. A `TryLock` counts only when its result is the branch condition, or that
@@ -435,9 +493,10 @@ aliasing within one goroutine alone. In build order:
 Done:
 - callback functions as goroutine boundaries;
 - SAFE001 for dot imports of `unsafe` and functions without a Go body;
-- SAFE008 for handlers that write shared memory.
+- SAFE008 for handlers that write shared memory;
+- items 1 and 2 below.
 
-1. A guarded-by rule. It comes before item 2, since recording writes in summaries turns calls like
+1. **Done:** a guarded-by rule. It came before item 2, since recording writes in summaries turns calls like
    `h.cache.Set(...)` into SAFE008 findings that need it. The guarded SAFE008 findings on the
    reference service are its acceptance cases. Five steps, from the 2026-11-09 design ruling:
    - **Done:** parse `//safe:guarded_by mu` and `//safe:holds mu`.
@@ -461,15 +520,62 @@ Done:
      229 / 40, as predicted before the run ([the annotated copy](#the-annotated-copy)). The design
      review predicted 229 / 42 from the earlier base of 38. A write to a guarded field of a package
      variable is no longer SAFE006. The reference service did not move (no annotations).
-2. A function override table beside the type table; summaries that record a call linking two
-   arguments (`root.Add(child)`) instead of reporting an escape; and a writes bit in summaries, so
-   SAFE008 follows calls into other packages.
+2. **Done:** summaries that record writes, a function override table, and summaries that link
+   arguments and results, plus summaries of the locks a function returns holding. Four steps, from
+   the 2026-11-09 design ruling, each measured against a prediction made before its run:
+   - **Writes bit.** SAFE008 follows static calls into other packages through the callee's summary.
+     Reference service: SAFE008 13 → 101, as predicted, and no other category moved. 88 of the 101
+     are calls: handlers in `internal/api` passing a captured singleton
+     (`*wisdev.IdempotencyStore`, `*RuntimeStateStore`, `*RuntimeJournal`, `*AgentGateway`,
+     `*llm.Client`) to a method that writes it under a mutex nothing declares guards it. Three
+     callees are outside the module, one finding each: `websocket.Upgrader.Upgrade`,
+     `require.NotEmpty` and `t.Fatalf`. The corpus did not move.
+   - **Function overrides** (`internal/kinds/funcs.go`) and `net.Listener` as a type override.
+     SAFE002 784 → 736. The prediction was a drop of 30 to 43, so it **missed**. The 48 break down
+     as follows:
+     - 37 from the entries' own causes: `context.WithCancel` 27, `context.WithTimeout` 8,
+       `io.ReadAll` and `json.Marshal` one each;
+     - 5 from `net.Listen`: 7 findings, of which 2 now name their next cause, `grpc.NewServer`;
+     - 5 from three in-module functions that return a `WithCancel` or `json.Marshal` result, which
+       became fresh too;
+     - 1 whose cause was a parameter merged with a listener.
+
+     The prediction left two effects out. Freshness is transitive. And as a type override,
+     `net.Listener` also stopped `ln.Close()` after a goroutine took the listener from counting as
+     a use or an escape (SAFE003 −12, SAFE004 −6).
+   - **Links.** The prediction was SAFE004 −24 to −30, with SAFE002 falling and SAFE003 rising. It
+     **missed on SAFE004**, which rose. Two corrections to the ruling's design came first:
+     - **Pointer depth.** A link records the pointer depth where the two values meet, not only that
+       they meet. Joining them at the top made `(*llm.Client).WithTimeout`, which writes a copy of
+       its receiver, a writer of the receiver: 4 false SAFE008 findings.
+     - **Every event.** The summary records links from every event in a region, not only the events
+       before the first leak. Stopping early made the recorded links depend on map order, and
+       could drop the link of a result that is also not fresh.
+
+     Measured with both: SAFE002 736 → 644, SAFE003 673 → 811, SAFE003-forkjoin 202 → 286 and
+     SAFE004 341 → 414. Transfers with a SAFE002 or SAFE004 fell from 784 to 695: 95 cleared and 6
+     newly flagged. 113 of the 114 new SAFE004 positions are on transfers that were already flagged.
+     A constructor's result that used to be foreign is now joined to its argument (a handler built
+     from `cfg`), and that argument's own escape (`cfg` passed to `ensureAgentGateway`) is now
+     visible on the handler. The SAFE003 rise is the second and later captures of one linked struct,
+     as predicted. Two corpus race tests changed categories ([above](#measured-on-the-go-race-detectors-corpus)).
+   - **Lock-acquire summaries.** Annotated corpus 229 / 40 → 229 / 42, as predicted. Reference
+     service unchanged (no annotations).
+
+   gocap has no summary for `sync/atomic`'s functions (they have no Go body), so the writes bit
+   counted `atomic.AddInt64(&h.n, 1)` in a handler as a write. That contradicts the rule above that
+   atomic calls are not stores, so `sync/atomic` functions write nothing. Like `lockOps`, this is
+   vocabulary, not a budget entry. Only SAFE008 reads writes, and it stayed at 101 with and without
+   the rule.
 3. The hatch ratio measured on the reference service: ScholarLM's `backend/go_orchestrator`, pinned
    at ScholarLM commit `bb60b53`, measured with `-tests` on go1.27.3. Untriaged baselines, each
    with 0 `//safe:unsafe`:
 
    | | Transfers | SAFE001 | SAFE002 | SAFE003 | SAFE003-forkjoin | SAFE004 | SAFE006 | SAFE008 | Findings |
    |---|---|---|---|---|---|---|---|---|---|
+   | Links and lock-acquire summaries | 1,642 | 104 | 644 | 811 | 286 | 414 | 238 | 101 | 2,598 |
+   | Function overrides | 1,642 | 104 | 736 | 673 | 202 | 341 | 238 | 101 | 2,395 |
+   | Writes bit | 1,642 | 104 | 784 | 685 | 202 | 347 | 238 | 101 | 2,461 |
    | SAFE006 at the declaration | 1,642 | 104 | 784 | 685 | 202 | 347 | 238 | 13 | 2,373 |
    | With SAFE008 (`8add3ad`) | 1,642 | 104 | 784 | 685 | 202 | 347 | 130 | 13 | 2,265 |
    | With callbacks (`b56b798`) | 1,642 | 104 | 784 | 685 | 202 | 347 | 130 | - | 2,252 |
@@ -484,9 +590,11 @@ Done:
 
    Every non-test write is under a mutex: checked line by line in the 2026-11-09 design review, plus
    `client_telemetry.go:119`, which that review's prototype missed. The ratio is read against this
-   denominator,
-   after items 1 and 2, by adding overrides until every remaining finding is a real race or a
-   policy call.
+   denominator, now that items 1 and 2 are done, by triaging until every remaining finding is a real
+   race or a policy call. SAFE008 findings are triaged with `//safe:guarded_by` or `//safe:imm`
+   first, and `//safe:unsafe` only for real policy calls: a `//safe:unsafe` on a handler
+   registration mutes every SAFE008 of that handler and counts as a suppressed transfer. Record the
+   `guarded_by` and `holds` count (`Stats.Guarded`, `Stats.Holds`) beside the ratio.
 4. Ownership of the channel's send end; joins through `select`; a differential test of the summaries
    against `-gcflags=-m`.
 
@@ -502,12 +610,16 @@ go test ./...
 
 Each rule has `analysistest` cases with `// want` expectations, so a disabled rule fails its test.
 `passes/ownership/testdata/src/user` checks that summaries cross package boundaries, including from
-the standard library. `passes/ownership/testdata/src/supp` checks the reach of `//safe:unsafe` and
-the exact `Stats` counts. `passes/ownership/testdata/src/callbacks` covers each callback function,
-the `Wait` join, handlers, and `sync.Once.Do` as a non-spawn. `testdata/src/handlers` covers
-SAFE008: each kind of write, aliases and loads, bound methods, `ServeHTTP`, calls followed within the
-package, and what is not a finding (per-request memory, atomics and locks, reads, interface and
-cross-package calls, a goroutine the handler starts). `testdata/src/guarded` covers SAFE009:
+the standard library, and that function overrides apply. `passes/ownership/testdata/src/supp` checks
+the reach of `//safe:unsafe` and the exact `Stats` counts. `passes/ownership/testdata/src/callbacks`
+covers each callback function, the `Wait` join, handlers, and `sync.Once.Do` as a non-spawn.
+`testdata/src/handlers` covers SAFE008: each kind of write, aliases and loads, bound methods,
+`ServeHTTP`, calls followed within the package, writes through another package's functions
+(`testdata/src/store`, including one two packages away and two with no Go body), and what is not a
+finding (per-request memory, atomics and locks, reads, a guarded write in the callee, formatting, a
+copy, interface calls, a goroutine the handler starts). `testdata/src/moves/links.go` covers
+argument and result links. `testdata/src/guardedlocal` covers lock acquisition in callees: the two
+race-free corpus shapes, the racing one, a conditional lock and a deferred unlock. `testdata/src/guarded` covers SAFE009:
 locked, `RLock`, `TryLock` (both branch forms), `defer Unlock`, `//safe:holds` helpers, closures
 called in place, embedded mutexes, guarded package variables and `init`, and constructors. It also
 covers unlocked writes, writes under `RLock`, reads after `Unlock`, the wrong mutex, an unlock by

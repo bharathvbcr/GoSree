@@ -1,7 +1,10 @@
 package user
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"io"
 	"lib"
 )
 
@@ -34,6 +37,22 @@ func stdlibBuffer(ch chan *bytes.Buffer) {
 	b := new(bytes.Buffer)
 	b.WriteString("hello")
 	ch <- b
+}
+
+// Function overrides (internal/kinds/funcs.go) replace a summary with a documented assumption:
+// io.ReadAll returns a slice it allocated, and a CancelFunc may be called from any goroutine.
+func overriddenFresh(ch chan []byte, done chan context.CancelFunc, r io.Reader) {
+	b, _ := io.ReadAll(r)
+	ch <- b
+	_, cancel := context.WithCancel(context.Background())
+	done <- cancel
+}
+
+// Peek returns memory of its receiver: the result is linked to r, a parameter, so it is not owned,
+// and it shares r's buffer, which Peek hands to the underlying Reader.
+func peekAliases(ch chan []byte, r *bufio.Reader) {
+	b, _ := r.Peek(1)
+	ch <- b // want `SAFE002: this value is sent on a channel but is not owned here: it may alias parameter r` `SAFE004: this value is sent on a channel but also escapes: passed to \(\*bufio\.Reader\)\.Peek`
 }
 
 func seq(yield func(int) bool) {

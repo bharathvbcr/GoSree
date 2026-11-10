@@ -173,6 +173,94 @@ func byPackageMutex() {
 	gmu.Unlock()
 }
 
+// funcUnlock is TestNoRaceFuncUnlock: a function locks the mutex it is given and returns holding it,
+// so the store of its result is under the lock.
+func funcUnlock() {
+	ch := make(chan bool, 1)
+	var mu sync.Mutex
+	x := 0 //safe:guarded_by mu
+	_ = x
+	go func() {
+		mu.Lock()
+		x = 42
+		mu.Unlock()
+		ch <- true
+	}()
+	x = func(mu *sync.Mutex) int {
+		mu.Lock()
+		return 43
+	}(&mu)
+	mu.Unlock()
+	<-ch
+}
+
+// asFunc4 is TestNoRaceAsFunc4: the closure locks the mutex it captured and returns holding it.
+func asFunc4() {
+	c := make(chan bool, 1)
+	var mu sync.Mutex
+	x := 0 //safe:guarded_by mu
+	_ = x
+	go func() {
+		x = func() int {
+			mu.Lock()
+			return 42
+		}()
+		mu.Unlock()
+		c <- true
+	}()
+	mu.Lock()
+	x = 42
+	mu.Unlock()
+	<-c
+}
+
+// asFunc3 is TestRaceAsFunc3: the argument is read before the call that locks.
+func asFunc3() {
+	c := make(chan bool, 1)
+	var mu sync.Mutex
+	x := 0 //safe:guarded_by mu
+	go func() {
+		func(x int) {
+			_ = x
+			mu.Lock()
+		}(x) // want `SAFE009: local variable x is guarded by mu but is read here without holding it`
+		mu.Unlock()
+		c <- true
+	}()
+	mu.Lock()
+	x = 42
+	mu.Unlock()
+	<-c
+}
+
+func lockIf(mu *sync.Mutex, ok bool) int {
+	if ok {
+		mu.Lock()
+		return 1
+	}
+	return 0
+}
+
+func lockAndRelease(mu *sync.Mutex) int {
+	mu.Lock()
+	defer mu.Unlock()
+	return 1
+}
+
+// A function that locks on some paths only, or releases before returning, acquires nothing.
+func notAcquired() {
+	var mu sync.Mutex
+	x := 0 //safe:guarded_by mu
+	go func() {
+		mu.Lock()
+		x++
+		mu.Unlock()
+	}()
+	x = lockIf(&mu, true) // want `SAFE009: local variable x is guarded by mu but is written here without holding it`
+	mu.Unlock()
+	x = lockAndRelease(&mu) // want `SAFE009: local variable x is guarded by mu but is written here without holding it`
+}
+
 // inner: a closure's own guarded local, guarded by its parent's mutex.
 func inner() {
 	var mu sync.Mutex
