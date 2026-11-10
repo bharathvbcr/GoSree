@@ -1,7 +1,13 @@
 package e2e_test
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"golang.org/x/tools/go/analysis/analysistest"
 )
 
 // =========================================================================
@@ -45,10 +51,59 @@ func TestTier1_ImmDeepImmutability(t *testing.T) {
 
 // AC6: Stack-Scoped Borrow Goroutine & Channel Escape Ban (CAP003)
 func TestTier1_StackBorrowEscape(t *testing.T) {
-	RunTierTest(t, borrowAnalyzer, "t1_escape", "Milestone 2")
+	RunTierTest(t, escapeAnalyzer, "t1_escape", "Milestone 2")
 }
 
 // AC7: Zero-Cost Comment Directives & Toolchain Compatibility
 func TestTier1_DirectivesErasure(t *testing.T) {
 	RunTierTest(t, annotAnalyzer, "t1_erasure", "Milestone 3")
+
+	t.Run("ZeroCostAssemblyEquivalence", func(t *testing.T) {
+		testdataDir := analysistest.TestData()
+		srcPath := filepath.Join(testdataDir, "src", "t1_erasure", "erasure.go")
+		content, err := os.ReadFile(srcPath)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", srcPath, err)
+		}
+
+		tmpDir := t.TempDir()
+		origFile := filepath.Join(tmpDir, "orig.go")
+		strippedFile := filepath.Join(tmpDir, "stripped.go")
+
+		if err := os.WriteFile(origFile, content, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		// Strip directive comments by replacing directive lines with blank lines
+		// to maintain line numbers for bit-for-bit identical opcode and DWARF alignment
+		var strippedLines []string
+		for _, line := range strings.Split(string(content), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//gocap:") || strings.HasPrefix(trimmed, "//safe:") {
+				strippedLines = append(strippedLines, "")
+				continue
+			}
+			strippedLines = append(strippedLines, line)
+		}
+		if err := os.WriteFile(strippedFile, []byte(strings.Join(strippedLines, "\n")), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		asmOrig, err := exec.Command("go", "tool", "compile", "-S", "-o", filepath.Join(tmpDir, "orig.o"), origFile).CombinedOutput()
+		if err != nil {
+			t.Fatalf("compile orig failed: %v", err)
+		}
+		asmStripped, err := exec.Command("go", "tool", "compile", "-S", "-o", filepath.Join(tmpDir, "stripped.o"), strippedFile).CombinedOutput()
+		if err != nil {
+			t.Fatalf("compile stripped failed: %v", err)
+		}
+
+		// Normalize file paths from assembly output
+		normOrig := strings.ReplaceAll(string(asmOrig), origFile, "FILE.go")
+		normStripped := strings.ReplaceAll(string(asmStripped), strippedFile, "FILE.go")
+
+		if normOrig != normStripped {
+			t.Errorf("zero-cost directive erasure violated: compiled assembly diff detected")
+		}
+	})
 }

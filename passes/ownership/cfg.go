@@ -40,6 +40,26 @@ func reachableAfter(s ssa.Instruction) func(ssa.Instruction) bool {
 	}
 }
 
+func reachableAfterTransfer(t transfer) func(ssa.Instruction) bool {
+	if t.caseBlock != nil {
+		seen := map[*ssa.BasicBlock]bool{t.caseBlock: true}
+		stack := append([]*ssa.BasicBlock(nil), t.caseBlock.Succs...)
+		for len(stack) > 0 {
+			b := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if seen[b] {
+				continue
+			}
+			seen[b] = true
+			stack = append(stack, b.Succs...)
+		}
+		return func(target ssa.Instruction) bool {
+			return seen[target.Block()]
+		}
+	}
+	return reachableAfter(t.instr)
+}
+
 func usesValue(ins ssa.Instruction, w ssa.Value) bool {
 	for _, op := range ins.Operands(nil) {
 		if op != nil && *op == w {
@@ -84,7 +104,7 @@ type use struct {
 // path with no synchronisation (channel receive, select, WaitGroup.Wait, Lock) between s and the use;
 // if every such use is preceded by synchronisation, the returned use has synced set. A join (see
 // forkjoin.go) hands the moved memory back, so paths stop there like at a redefinition.
-func useAfter(s ssa.Instruction, w ssa.Value, joins map[ssa.Instruction]bool) (use, bool) {
+func useAfter(s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Value, joins map[ssa.Instruction]bool) (use, bool) {
 	def, _ := w.(ssa.Instruction)
 	type state struct {
 		b      *ssa.BasicBlock
@@ -97,7 +117,12 @@ func useAfter(s ssa.Instruction, w ssa.Value, joins map[ssa.Instruction]bool) (u
 		from   int
 		synced bool
 	}
-	queue := []item{{s.Block(), indexIn(s) + 1, false}}
+	var queue []item
+	if cb != nil {
+		queue = []item{{cb, 0, false}}
+	} else {
+		queue = []item{{s.Block(), indexIn(s) + 1, false}}
+	}
 	for len(queue) > 0 {
 		it := queue[0]
 		queue = queue[1:]

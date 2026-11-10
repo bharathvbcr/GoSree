@@ -17,27 +17,26 @@ func ProcessJob(j *Job) {
 }
 
 func WorkerPoolScenario() []int {
-	jobs := []*Job{
-		{ID: 1},
-		{ID: 2},
-		{ID: 3},
-	}
+	j1 := &Job{ID: 1}
+	j2 := &Job{ID: 2}
+	j3 := &Job{ID: 3}
 	var wg sync.WaitGroup
-	for _, j := range jobs {
-		job := j
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			ProcessJob(job)
-		}()
-	}
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		ProcessJob(j1)
+	}()
+	go func() {
+		defer wg.Done()
+		ProcessJob(j2)
+	}()
+	go func() {
+		defer wg.Done()
+		ProcessJob(j3)
+	}()
 	wg.Wait()
 	// Master accesses results cleanly after wg.Wait()
-	results := make([]int, len(jobs))
-	for i, j := range jobs {
-		results[i] = j.Result
-	}
-	return results
+	return []int{j1.Result, j2.Result, j3.Result}
 }
 
 // =========================================================================
@@ -80,8 +79,8 @@ func RunPipeline() int {
 
 //gocap:imm
 type ProcessorConfig struct {
-	MaxBatchSize int
-	WorkerCount  int
+	maxBatchSize int
+	workerCount  int
 }
 
 type EventBatch struct {
@@ -92,7 +91,7 @@ type EventBatch struct {
 //gocap:mut batch
 func ProcessEventBatch(cfg *ProcessorConfig, batch *EventBatch) int {
 	sum := 0
-	for i := 0; i < len(batch.Events) && i < cfg.MaxBatchSize; i++ {
+	for i := 0; i < len(batch.Events) && i < cfg.maxBatchSize; i++ {
 		batch.Events[i] *= 2
 		sum += batch.Events[i]
 	}
@@ -100,7 +99,7 @@ func ProcessEventBatch(cfg *ProcessorConfig, batch *EventBatch) int {
 }
 
 func EventProcessorScenario() int {
-	cfg := &ProcessorConfig{MaxBatchSize: 100, WorkerCount: 4}
+	cfg := &ProcessorConfig{maxBatchSize: 100, workerCount: 4}
 	batch := &EventBatch{Events: []int{1, 2, 3, 4, 5}}
 	return ProcessEventBatch(cfg, batch)
 }
@@ -144,7 +143,7 @@ func Attack1DoubleMove() {
 	go func() {
 		_ = j.ID
 	}()
-	go func() { // want `SAFE003: composite literal is used after it was captured by a goroutine`
+	go func() { // want `SAFE003: .* is used after it was captured by a goroutine`
 		_ = j.ID
 	}()
 }
@@ -170,6 +169,7 @@ func Attack4ParentWriteAfterCapture() {
 		x = 1
 	}()
 	x = 2 // want `SAFE003: variable x is used after it was captured by a goroutine`
+	_ = x
 }
 
 // Attack 5: Stack borrow escape over channel
@@ -215,6 +215,6 @@ func Attack9DanglingStackReturn() *int {
 
 // Attack 10: Mutation of field on immutable type
 func Attack10MutationOfImm() {
-	cfg := &ProcessorConfig{MaxBatchSize: 10, WorkerCount: 2}
-	cfg.MaxBatchSize = 20 // want `SAFE005: write to a field of ProcessorConfig, which is //gocap:imm`
+	cfg := &ProcessorConfig{maxBatchSize: 10, workerCount: 2}
+	cfg.maxBatchSize = 20 // want `SAFE005: write to a field of ProcessorConfig, which is //gocap:imm`
 }

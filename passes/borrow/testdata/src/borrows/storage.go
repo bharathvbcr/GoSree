@@ -60,6 +60,28 @@ func localStackStructClean() {
 	*t.p = 20
 }
 
+// Clean transient stack tuple with primitive return value -> CLEAN PASS
+func localStackStructReturnPrimitive() int {
+	x := 10
+	//gocap:mut
+	b := &x
+	t := StackTuple{p: b}
+	*t.p = 20
+	return *t.p
+}
+
+func localStackStructFieldUpdateReturnPrimitive() int {
+	x := 10
+	y := 20
+	//gocap:mut
+	b := &x
+	t := StackTuple{p: b}
+	//gocap:mut
+	b2 := &y
+	t.p = b2
+	return *t.p
+}
+
 // ============================================================================
 // 4. Escaping Stack Struct Holding Borrows (BORROW001)
 // ============================================================================
@@ -111,3 +133,55 @@ type UnsafeStruct struct {
 	//gocap:mut
 	p *int
 }
+
+// ============================================================================
+// 6. Adversarial Storage Escapes (Map Keys, Composite Literals, Interface Boxing, Heap Fields)
+// ============================================================================
+
+func escapeMapKey() {
+	x := 10
+	//gocap:mut
+	b := &x
+	t := StackTuple{p: b}
+	m := make(map[StackTuple]int)
+	m[t] = 1 // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
+}
+
+func escapeMapLit() {
+	x := 10
+	//gocap:mut
+	b := &x
+	_ = map[int]*int{0: b} // want `BORROW001: map cannot store second-class borrow`
+}
+
+func escapeSliceLit() {
+	x := 10
+	//gocap:mut
+	b := &x
+	_ = []*int{b} // want `BORROW001: slice cannot store second-class borrow`
+}
+
+func boxArgHelper(v any) {}
+
+func escapeInterfaceArg() {
+	x := 10
+	//gocap:mut
+	b := &x
+	boxArgHelper(b) // want `BORROW001: struct field or interface cannot box second-class borrow`
+}
+
+func escapeInterfaceRet() any {
+	x := 10
+	//gocap:mut
+	b := &x
+	return b // want `BORROW001: struct field or interface cannot box second-class borrow`
+}
+
+func escapeHeapField() {
+	x := 10
+	//gocap:mut
+	b := &x
+	h := new(StackTuple)
+	h.p = b // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
+}
+

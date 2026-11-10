@@ -25,7 +25,7 @@ func IsoTransferDuringActiveBorrow(ch chan *Item) {
 	//gocap:mut
 	b := &it.Val
 	ch <- it // want `BORROW003: cannot move 'it' because it is borrowed`
-	*b = 30
+	*b = 30  // want `SAFE003: composite literal is used after it was sent on a channel`
 }
 
 // =========================================================================
@@ -34,17 +34,17 @@ func IsoTransferDuringActiveBorrow(ch chan *Item) {
 
 //gocap:imm
 type AppConfig struct {
-	TimeoutMs int
+	timeoutMs int
 }
 
 //gocap:rob c
 func (c *AppConfig) GetTimeout() int {
-	return c.TimeoutMs
+	return c.timeoutMs
 }
 
 // Sub-test 2A: Calling read-only method on \imm via read-only borrow (Clean Pass)
 func ValidImmReadBorrow() int {
-	cfg := &AppConfig{TimeoutMs: 5000}
+	cfg := &AppConfig{timeoutMs: 5000}
 	//gocap:rob
 	r := cfg
 	return r.GetTimeout()
@@ -52,10 +52,10 @@ func ValidImmReadBorrow() int {
 
 // Sub-test 2B: Attempting mutable borrow on \imm struct (SAFE005 / BORROW002)
 func RejectMutBorrowOnImm() {
-	cfg := &AppConfig{TimeoutMs: 5000}
+	cfg := &AppConfig{timeoutMs: 5000}
 	//gocap:mut
-	m := &cfg.TimeoutMs // want `SAFE005: cannot borrow field of immutable type AppConfig as mutable`
-	*m = 1000
+	m := &cfg.timeoutMs // want `SAFE005: cannot borrow field of immutable type AppConfig as mutable`
+	*m = 1000           // want `SAFE005: write to a field of AppConfig, which is //gocap:imm`
 }
 
 // =========================================================================
@@ -107,19 +107,25 @@ func TransientTupleWithBorrowParams() int {
 // Pair 5: Multiple Goroutines Sharing \imm While Transferring Disjoint \iso Tokens
 // =========================================================================
 
-func SharedImmWithDisjointIso(cfg *AppConfig, jobs []*Item, out chan *Item) {
+//gocap:iso item1
+//gocap:iso item2
+func SharedImmWithDisjointIso(cfg *AppConfig, item1 *Item, item2 *Item, out chan *Item) {
 	var wg sync.WaitGroup
-	for _, job := range jobs {
-		j := job
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if cfg.TimeoutMs > 0 {
-				j.Val += 1
-			}
-			out <- j
-		}()
-	}
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if cfg.timeoutMs > 0 {
+			item1.Val += 1
+		}
+		out <- item1
+	}()
+	go func() {
+		defer wg.Done()
+		if cfg.timeoutMs > 0 {
+			item2.Val += 1
+		}
+		out <- item2
+	}()
 	wg.Wait()
 }
 

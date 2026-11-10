@@ -330,3 +330,98 @@ func ParamBorrowToHeap(b *int) {
 	*h = b // want `BORROW001`
 }
 
+// ============================================================================
+// Objective 8: Remediated Storage Escape Holes (Challenger 1 Verifications)
+// ============================================================================
+
+// 8.1: Stack tuple holding borrow as map key -> Expected: BORROW001
+//gocap:mut b
+func EscapeMapKeyTuple(b *int) {
+	t := StackTuple{p: b}
+	m := make(map[StackTuple]int)
+	m[t] = 1 // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
+}
+
+// 8.2: Direct borrow as map key -> Expected: BORROW001
+//gocap:mut b
+func EscapeMapKeyBorrow(b *int) {
+	m := make(map[*int]int)
+	m[b] = 1 // want `BORROW001: map cannot store second-class borrow`
+}
+
+// 8.3: Map composite literal holding borrow in value -> Expected: BORROW001
+//gocap:mut b
+func EscapeMapLitValue(b *int) {
+	_ = map[int]*int{0: b} // want `BORROW001: map cannot store second-class borrow`
+}
+
+// 8.4: Map composite literal holding borrow in key -> Expected: BORROW001
+//gocap:mut b
+func EscapeMapLitKey(b *int) {
+	_ = map[*int]int{b: 0} // want `BORROW001: map cannot store second-class borrow`
+}
+
+// 8.5: Slice composite literal holding borrow -> Expected: BORROW001
+//gocap:mut b
+func EscapeSliceLitBorrow(b *int) {
+	_ = []*int{b} // want `BORROW001: slice cannot store second-class borrow`
+}
+
+// 8.6: Slice composite literal holding stack tuple -> Expected: BORROW001
+//gocap:mut b
+func EscapeSliceLitTuple(b *int) {
+	t := StackTuple{p: b}
+	_ = []StackTuple{t} // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
+}
+
+// 8.7: Passing borrow to function taking interface -> Expected: BORROW001
+func interfaceSink(val any) {}
+
+//gocap:mut b
+func EscapeInterfaceCallArgBorrow(b *int) {
+	interfaceSink(b) // want `BORROW001: struct field or interface cannot box second-class borrow`
+}
+
+// 8.8: Passing stack tuple to function taking interface -> Expected: BORROW001
+//gocap:mut b
+func EscapeInterfaceCallArgTuple(b *int) {
+	t := StackTuple{p: b}
+	interfaceSink(t) // want `BORROW001: struct field or interface cannot box second-class borrow`
+}
+
+// 8.9: Returning borrow directly as interface -> Expected: BORROW001
+//gocap:mut b
+func EscapeInterfaceReturnBorrow(b *int) any {
+	return b // want `BORROW001: struct field or interface cannot box second-class borrow`
+}
+
+// 8.10: Returning stack tuple directly as interface -> Expected: BORROW001
+//gocap:mut b
+func EscapeInterfaceReturnTuple(b *int) any {
+	t := StackTuple{p: b}
+	return t // want `BORROW001: struct field or interface cannot box second-class borrow`
+}
+
+// 8.11: Storing borrow into heap struct field via new() -> Expected: BORROW001
+//gocap:mut b
+func EscapeHeapFieldNew(b *int) {
+	h := new(StackTuple)
+	h.p = b // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
+}
+
+// 8.12: Storing borrow into pointer parameter field -> Expected: BORROW001
+//gocap:mut b
+func EscapeHeapFieldParam(h *StackTuple, b *int) {
+	h.p = b // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
+}
+
+// 8.13: Address-taken borrow variable stored into heap struct field -> Expected: BORROW001
+func EscapeAddressTakenAllocHeapField() {
+	x := 42
+	//gocap:mut
+	b := &x
+	h := new(StackTuple)
+	h.p = b // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
+}
+
+

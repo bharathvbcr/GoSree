@@ -40,3 +40,12 @@ func ValidStackTuple() int {
 	t := StackTuple{P: &x}
 	return *t.P
 }
+
+func ValidStackTupleWithBorrow() int {
+	x := 100
+	//gocap:mut
+	b := &x
+	t := StackTuple{P: b}
+	*t.P = 200
+	return *t.P
+}

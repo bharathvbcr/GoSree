@@ -36,7 +36,7 @@ func NilPointerBorrow() {
 func UnbufferedChanIsoSend(ch chan *EmptyStruct) {
 	e := &EmptyStruct{}
 	ch <- e
-	_ = e // want `SAFE003: composite literal is used after it was sent on a channel`
+	_ = *e // want `SAFE003: composite literal is used after it was sent on a channel`
 }
 
 // TC-T2-1.5: Empty sync.WaitGroup with Add(0) and Wait()
@@ -117,8 +117,8 @@ func LoopBreakContinueBorrow() int {
 // =========================================================================
 
 // TC-T2-3.1: defer extending borrow lifetime across entire function
+//gocap:mut p
 func DeferExtendsBorrow(p *int) {
-	//gocap:mut p
 	*p = 100
 }
 
@@ -232,7 +232,7 @@ func SelectIsoSend(ch chan *EmptyStruct) {
 	e := &EmptyStruct{}
 	select {
 	case ch <- e:
-		_ = e // want `SAFE003: composite literal is used after it was sent on a channel`
+		_ = *e // want `SAFE003: composite literal is used after it was sent on a channel`
 	default:
 	}
 }

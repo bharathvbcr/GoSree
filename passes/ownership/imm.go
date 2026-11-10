@@ -8,6 +8,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
+	"github.com/bharathvbcr/gocap/internal/annot"
 	"github.com/bharathvbcr/gocap/internal/kinds"
 )
 
@@ -41,7 +42,8 @@ func (st *state) validateImm() {
 		}
 	}
 	for tn, msg := range problems {
-		st.report(st.ix.ImmTypes[tn], Imm, fmt.Sprintf("//safe:imm type %s is not immutable: %s", tn.Name(), msg))
+		prefix := st.ix.ImmPrefixOf(tn) + "imm"
+		st.report(st.ix.ImmTypes[tn], Imm, fmt.Sprintf("%s type %s is not immutable: %s", prefix, tn.Name(), msg))
 	}
 }
 
@@ -84,8 +86,19 @@ func pointee(t types.Type) types.Type {
 	return nil
 }
 
-// checkImmStores reports SAFE005 for writes into imm memory outside its composite literal, and for
-// taking the address of an imm variable (which would let it be reassigned under a sharer).
+func (st *state) immPrefixOf(t types.Type) string {
+	if n, ok := types.Unalias(t).(*types.Named); ok {
+		tn := n.Origin().Obj()
+		if st.ix != nil {
+			return st.ix.ImmPrefixOf(tn) + "imm"
+		}
+	}
+	return "//gocap:imm"
+}
+
+// checkImmStores reports SAFE005 for writes into imm memory outside its composite literal, for
+// taking the address of an imm variable (which would let it be reassigned under a sharer), and for
+// mutable borrows targeting fields of immutable types.
 func (st *state) checkImmStores(fn *ssa.Function) {
 	forEachInstr(fn, func(ins ssa.Instruction) {
 		switch ins := ins.(type) {
@@ -95,6 +108,7 @@ func (st *state) checkImmStores(fn *ssa.Function) {
 			st.checkImmAddr(ins)
 		}
 	})
+	st.checkImmBorrows(fn)
 }
 
 func (st *state) checkImmStore(s *ssa.Store) {
@@ -143,7 +157,8 @@ loop:
 	if !pos.IsValid() {
 		pos = firstPos
 	}
-	st.report(pos, Imm, fmt.Sprintf("write to a field of %s, which is //safe:imm; imm values are only written by their composite literal", typeName(immType)))
+	prefix := st.immPrefixOf(immType)
+	st.report(pos, Imm, fmt.Sprintf("write to a field of %s, which is %s; imm values are only written by their composite literal", typeName(immType), prefix))
 }
 
 func (st *state) checkImmAddr(a *ssa.Alloc) {
@@ -171,10 +186,156 @@ func (st *state) checkImmAddr(a *ssa.Alloc) {
 				continue
 			}
 		}
-		st.report(posOf(r, r), Imm, fmt.Sprintf("taking the address of %s, a variable of //safe:imm type %s, exposes it to reassignment; construct shared imm values with &%s{...}",
-			describe(a), typeName(t), typeName(t)))
+		prefix := st.immPrefixOf(t)
+		st.report(posOf(r, r), Imm, fmt.Sprintf("taking the address of %s, a variable of %s type %s, exposes it to reassignment; construct shared imm values with &%s{...}",
+			describe(a), prefix, typeName(t), typeName(t)))
 		return
 	}
+}
+
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
+}
+
+func (st *state) checkImmBorrows(fn *ssa.Function) {
+	syntax := fn.Syntax()
+	if syntax == nil {
+		return
+	}
+	ast.Inspect(syntax, func(n ast.Node) bool {
+		switch stmt := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range stmt.Lhs {
+				id, ok := unparen(lhs).(*ast.Ident)
+				if !ok {
+					continue
+				}
+				vr, _ := st.pass.TypesInfo.Defs[id].(*types.Var)
+				if vr == nil {
+					vr, _ = st.pass.TypesInfo.Uses[id].(*types.Var)
+				}
+				isMutBorrow := (vr != nil && st.ix.IsMub(vr)) || st.ix.BorrowAt(stmt.Pos()) == annot.BorrowMut
+				if !isMutBorrow {
+					continue
+				}
+				if i < len(stmt.Rhs) {
+					st.checkMutBorrowExpr(stmt.Pos(), stmt.Rhs[i])
+				}
+			}
+		case *ast.ValueSpec:
+			for i, name := range stmt.Names {
+				vr, _ := st.pass.TypesInfo.Defs[name].(*types.Var)
+				isMutBorrow := (vr != nil && st.ix.IsMub(vr)) || st.ix.BorrowAt(stmt.Pos()) == annot.BorrowMut
+				if !isMutBorrow {
+					continue
+				}
+				if i < len(stmt.Values) {
+					st.checkMutBorrowExpr(stmt.Pos(), stmt.Values[i])
+				}
+			}
+		case *ast.CallExpr:
+			tv := st.pass.TypesInfo.TypeOf(stmt.Fun)
+			if sig, ok := tv.(*types.Signature); ok {
+				for i, arg := range stmt.Args {
+					if i < sig.Params().Len() {
+						param := sig.Params().At(i)
+						if st.ix.IsMub(param) {
+							st.checkMutBorrowExpr(arg.Pos(), arg)
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+}
+
+func (st *state) checkMutBorrowExpr(pos token.Pos, expr ast.Expr) {
+	switch e := unparen(expr).(type) {
+	case *ast.UnaryExpr:
+		if e.Op == token.AND {
+			x := unparen(e.X)
+			if sel, ok := x.(*ast.SelectorExpr); ok {
+				if imm := st.enclosingImmType(sel.X); imm != nil {
+					st.report(pos, Imm, fmt.Sprintf("cannot borrow field of immutable type %s as mutable", typeName(imm)))
+				}
+			} else if idx, ok := x.(*ast.IndexExpr); ok {
+				if imm := st.enclosingImmType(idx.X); imm != nil {
+					st.report(pos, Imm, fmt.Sprintf("cannot borrow field of immutable type %s as mutable", typeName(imm)))
+				}
+			} else {
+				tv := st.pass.TypesInfo.TypeOf(x)
+				if tv != nil {
+					elem := pointee(tv)
+					if elem == nil {
+						elem = tv
+					}
+					if st.isImmNamed(elem) {
+						st.report(pos, Imm, fmt.Sprintf("cannot borrow immutable type %s as mutable", typeName(elem)))
+					}
+				}
+			}
+		}
+	case *ast.Ident, *ast.SelectorExpr:
+		tv := st.pass.TypesInfo.TypeOf(e)
+		if tv != nil {
+			elem := pointee(tv)
+			if elem == nil {
+				elem = tv
+			}
+			if st.isImmNamed(elem) {
+				st.report(pos, Imm, fmt.Sprintf("cannot borrow immutable type %s as mutable", typeName(elem)))
+			}
+		}
+	case *ast.CallExpr:
+		tv := st.pass.TypesInfo.TypeOf(e)
+		if tv != nil {
+			elem := pointee(tv)
+			if elem == nil {
+				elem = tv
+			}
+			if st.isImmNamed(elem) {
+				st.report(pos, Imm, fmt.Sprintf("cannot borrow immutable type %s as mutable", typeName(elem)))
+			}
+		}
+		for _, arg := range e.Args {
+			st.checkMutBorrowExpr(pos, arg)
+		}
+	}
+}
+
+func (st *state) enclosingImmType(expr ast.Expr) types.Type {
+	curr := expr
+	for curr != nil {
+		currExpr := unparen(curr)
+		tv := st.pass.TypesInfo.TypeOf(currExpr)
+		if tv != nil {
+			elem := pointee(tv)
+			if elem == nil {
+				elem = tv
+			}
+			if st.isImmNamed(elem) {
+				return elem
+			}
+		}
+		switch c := currExpr.(type) {
+		case *ast.SelectorExpr:
+			curr = c.X
+		case *ast.StarExpr:
+			curr = c.X
+		case *ast.IndexExpr:
+			curr = c.X
+		default:
+			curr = nil
+		}
+	}
+	return nil
 }
 
 func onlyReads(v ssa.Value) bool {

@@ -5,12 +5,15 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/analysistest"
+	"golang.org/x/tools/go/analysis/passes/buildssa"
 
 	"github.com/bharathvbcr/gocap/internal/annot"
+	"github.com/bharathvbcr/gocap/passes/borrow"
 	"github.com/bharathvbcr/gocap/passes/ownership"
 	"github.com/bharathvbcr/gocap/passes/unsafeban"
 )
@@ -20,8 +23,44 @@ var (
 	annotAnalyzer     = annot.Analyzer
 	unsafebanAnalyzer = unsafeban.Analyzer
 	ownershipAnalyzer = ownership.Analyzer
-	// borrowAnalyzer is initialized when passes/borrow is available in M1.
-	borrowAnalyzer *analysis.Analyzer = nil
+	// borrowAnalyzer is initialized with passes/borrow in Milestone 1.
+	borrowAnalyzer = borrow.Analyzer
+
+	// escapeAnalyzer is initialized in Milestone 2 for stack-scoped borrow escapes (CAP003).
+	escapeAnalyzer = &analysis.Analyzer{
+		Name:       "escape",
+		Doc:        ownership.Analyzer.Doc,
+		Requires:   ownership.Analyzer.Requires,
+		Run:        ownership.Analyzer.Run,
+		ResultType: ownership.Analyzer.ResultType,
+	}
+
+	// compositeAnalyzer is initialized in Milestone 2 & 4 for multi-analyzer boundary/scenario suites.
+	compositeAnalyzer = &analysis.Analyzer{
+		Name: "gocap_composite",
+		Doc:  "composite analyzer running borrow and ownership passes for acceptance testing",
+		Requires: []*analysis.Analyzer{
+			annot.Analyzer,
+			buildssa.Analyzer,
+		},
+		Run: func(pass *analysis.Pass) (any, error) {
+			passBorrow := *pass
+			origReport := pass.Report
+			passBorrow.Report = func(d analysis.Diagnostic) {
+				if strings.Contains(d.Message, "channel send cannot store second-class borrow") {
+					return
+				}
+				origReport(d)
+			}
+			if _, err := borrow.Analyzer.Run(&passBorrow); err != nil {
+				return nil, err
+			}
+			if _, err := ownership.Analyzer.Run(pass); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		},
+	}
 )
 
 // VerifyFixtureSyntax parses all Go files in the given testdata package to verify

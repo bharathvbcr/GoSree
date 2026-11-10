@@ -15,5 +15,5 @@ import (
 // - Scenario 4: In-Memory Key-Value Cache with Partitioned Read/Write Borrows
 // - Scenario 5: Adversarial Multi-Goroutine Penetration Suite (10 negative security attacks)
 func TestTier4_RealWorldScenarios(t *testing.T) {
-	RunTierTest(t, borrowAnalyzer, "t4_scenarios", "Milestone 1 & 2")
+	RunTierTest(t, compositeAnalyzer, "t4_scenarios", "Milestone 2")
 }

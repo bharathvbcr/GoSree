@@ -31,11 +31,12 @@ import (
 
 // Rule categories.
 const (
-	NotOwned  = "SAFE002"
-	UseAfter  = "SAFE003"
-	Escapes   = "SAFE004"
-	Imm       = "SAFE005"
-	GlobalUse = "SAFE006"
+	NotOwned     = "SAFE002"
+	UseAfter     = "SAFE003"
+	Escapes      = "SAFE004"
+	Imm          = "SAFE005"
+	GlobalUse    = "SAFE006"
+	BorrowEscape = "CAP003"
 	// UseAfterSynced is reported for SAFE003 uses that every path reaches only after a
 	// synchronisation point that is not a join for the move (forkjoin.go): a receive from another
 	// channel, a select, a mutex or cond, or a join shape the rule does not accept. The separate
@@ -90,6 +91,7 @@ func (st *state) graphOf(fn *ssa.Function) *graph {
 type reportKey struct {
 	pos token.Pos
 	cat string
+	msg string
 }
 
 func run(pass *analysis.Pass) (any, error) {
@@ -135,6 +137,9 @@ func (st *state) newClassifier() *kinds.Classifier {
 }
 
 func (st *state) exportFacts(fns []*ssa.Function) {
+	if len(st.pass.Analyzer.FactTypes) == 0 {
+		return
+	}
 	for _, fn := range fns {
 		obj, ok := fn.Object().(*types.Func)
 		// Only exported functions can be called statically from another package; calls that reach an
@@ -170,7 +175,7 @@ func (st *state) report(pos token.Pos, cat, msg string) {
 		st.stats.Suppressed++
 		return
 	}
-	k := reportKey{pos, cat}
+	k := reportKey{pos, cat, msg}
 	if st.reports[k] {
 		return
 	}

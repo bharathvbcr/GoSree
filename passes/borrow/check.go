@@ -140,6 +140,7 @@ type Borrow struct {
 	Kind      annot.BorrowKind
 	OwnerNode *node
 	OwnerName string
+	OwnerVar  *types.Var
 	OwnerVal  ssa.Value
 	Pos       token.Pos
 	Line      int
@@ -223,6 +224,7 @@ func (bc *borrowChecker) findBorrows() {
 					Kind:      kind,
 					OwnerNode: bc.graph.val(p),
 					OwnerName: vr.Name(),
+					OwnerVar:  vr,
 					OwnerVal:  p,
 					Pos:       p.Pos(),
 					Line:      bc.pass.Fset.Position(p.Pos()).Line,
@@ -265,7 +267,7 @@ func (bc *borrowChecker) findBorrows() {
 		}
 
 		for i, lhs := range assign.Lhs {
-			lhsIdent, ok := lhs.(*ast.Ident)
+			lhsIdent, ok := unparen(lhs).(*ast.Ident)
 			if !ok {
 				continue
 			}
@@ -288,6 +290,10 @@ func (bc *borrowChecker) findBorrows() {
 			} else if i < len(assign.Rhs) && bc.ix.BorrowAt(assign.Rhs[i].Pos()) != annot.BorrowNone {
 				kind = bc.ix.BorrowAt(assign.Rhs[i].Pos())
 			} else if i < len(assign.Rhs) {
+				unwrapped := unparen(assign.Rhs[i])
+				if ue, ok := unwrapped.(*ast.UnaryExpr); ok && bc.ix.BorrowAt(ue.OpPos) != annot.BorrowNone {
+					kind = bc.ix.BorrowAt(ue.OpPos)
+				}
 				if ue, ok := assign.Rhs[i].(*ast.UnaryExpr); ok && bc.ix.BorrowAt(ue.OpPos) != annot.BorrowNone {
 					kind = bc.ix.BorrowAt(ue.OpPos)
 				}
@@ -299,9 +305,10 @@ func (bc *borrowChecker) findBorrows() {
 
 			// Determine owner
 			ownerName := "x"
+			var ownerVar *types.Var
 			var ownerVal ssa.Value
 			if i < len(assign.Rhs) {
-				ownerName, ownerVal = bc.resolveOwner(assign.Rhs[i])
+				ownerName, ownerVar, ownerVal = bc.resolveOwner(assign.Rhs[i])
 			}
 
 			var ownerNode *node
@@ -327,6 +334,7 @@ func (bc *borrowChecker) findBorrows() {
 				Kind:      kind,
 				OwnerNode: ownerNode,
 				OwnerName: ownerName,
+				OwnerVar:  ownerVar,
 				OwnerVal:  ownerVal,
 				Pos:       pos,
 				Line:      line,
@@ -341,30 +349,63 @@ func (bc *borrowChecker) findBorrows() {
 	})
 }
 
-func (bc *borrowChecker) resolveOwner(rhs ast.Expr) (string, ssa.Value) {
+func (bc *borrowChecker) resolveOwner(rhs ast.Expr) (string, *types.Var, ssa.Value) {
 	switch e := rhs.(type) {
+	case *ast.ParenExpr:
+		return bc.resolveOwner(e.X)
 	case *ast.UnaryExpr:
 		if e.Op == token.AND {
 			return bc.resolveOwner(e.X)
 		}
 	case *ast.Ident:
 		name := e.Name
+		var vr *types.Var
+		if v, ok := bc.pass.TypesInfo.Uses[e].(*types.Var); ok {
+			vr = v
+		} else if v, ok := bc.pass.TypesInfo.Defs[e].(*types.Var); ok {
+			vr = v
+		}
+
 		for _, prev := range bc.borrows {
-			if prev.Var != nil && prev.Var.Name() == name {
-				return prev.OwnerName, prev.OwnerVal
+			if prev.Var != nil {
+				if vr != nil {
+					if prev.Var == vr {
+						return prev.OwnerName, prev.OwnerVar, prev.OwnerVal
+					}
+				} else if prev.Var.Name() == name {
+					return prev.OwnerName, prev.OwnerVar, prev.OwnerVal
+				}
 			}
 		}
 		// Also trace earlier pointer alias assignments in AST: e.g. p := &x; b1 := p
 		if syntax := bc.fn.Syntax(); syntax != nil {
 			var origName string
+			var origVar *types.Var
 			ast.Inspect(syntax, func(n ast.Node) bool {
 				if asgn, ok := n.(*ast.AssignStmt); ok {
 					for idx, lhs := range asgn.Lhs {
-						if id, ok := lhs.(*ast.Ident); ok && id.Name == name {
-							if idx < len(asgn.Rhs) {
-								if ue, ok := asgn.Rhs[idx].(*ast.UnaryExpr); ok && ue.Op == token.AND {
-									if baseId, ok := ue.X.(*ast.Ident); ok {
+						if id, ok := unparen(lhs).(*ast.Ident); ok {
+							var idVar *types.Var
+							if v, ok := bc.pass.TypesInfo.Defs[id].(*types.Var); ok {
+								idVar = v
+							} else if v, ok := bc.pass.TypesInfo.Uses[id].(*types.Var); ok {
+								idVar = v
+							}
+							isTarget := false
+							if vr != nil && idVar != nil {
+								isTarget = (vr == idVar)
+							} else if id.Name == name {
+								isTarget = true
+							}
+							if isTarget && idx < len(asgn.Rhs) {
+								if ue, ok := unparen(asgn.Rhs[idx]).(*ast.UnaryExpr); ok && ue.Op == token.AND {
+									if baseId, ok := unparen(ue.X).(*ast.Ident); ok {
 										origName = baseId.Name
+										if v, ok := bc.pass.TypesInfo.Uses[baseId].(*types.Var); ok {
+											origVar = v
+										} else if v, ok := bc.pass.TypesInfo.Defs[baseId].(*types.Var); ok {
+											origVar = v
+										}
 										return false
 									}
 								}
@@ -376,27 +417,57 @@ func (bc *borrowChecker) resolveOwner(rhs ast.Expr) (string, ssa.Value) {
 			})
 			if origName != "" {
 				name = origName
+				if origVar != nil {
+					vr = origVar
+				}
+			}
+		}
+		// 1. If variable identity is known, prefer address-taken allocation in basic blocks
+		if vr != nil {
+			for _, b := range bc.fn.Blocks {
+				for _, ins := range b.Instrs {
+					if alloc, ok := ins.(*ssa.Alloc); ok && alloc.Pos() == vr.Pos() {
+						return name, vr, alloc
+					}
+				}
+			}
+			for _, l := range bc.fn.Locals {
+				if l.Pos() == vr.Pos() {
+					return name, vr, l
+				}
+			}
+			for _, p := range bc.fn.Params {
+				if p.Pos() == vr.Pos() || (p.Object() != nil && p.Object() == vr) {
+					return name, vr, p
+				}
+			}
+		}
+
+		// 2. Fallback to lexical name matching only when vr is nil
+		for _, b := range bc.fn.Blocks {
+			for _, ins := range b.Instrs {
+				if alloc, ok := ins.(*ssa.Alloc); ok && alloc.Comment == name {
+					return name, vr, alloc
+				}
 			}
 		}
 		for _, l := range bc.fn.Locals {
 			if l.Comment == name {
-				return name, l
+				return name, vr, l
 			}
 		}
 		for _, p := range bc.fn.Params {
 			if p.Name() == name {
-				return name, p
+				return name, vr, p
 			}
 		}
-		return name, nil
+		return name, vr, nil
 	case *ast.SelectorExpr:
-		baseName, baseVal := bc.resolveOwner(e.X)
-		return baseName, baseVal
+		return bc.resolveOwner(e.X)
 	case *ast.IndexExpr:
-		baseName, baseVal := bc.resolveOwner(e.X)
-		return baseName, baseVal
+		return bc.resolveOwner(e.X)
 	}
-	return "x", nil
+	return "x", nil, nil
 }
 
 func (bc *borrowChecker) findInstructionAtOrAfter(pos token.Pos) ssa.Instruction {
@@ -545,7 +616,9 @@ func (bc *borrowChecker) checkConflictingBorrows() {
 
 			// Check if both borrows target the same owner
 			sameOwner := false
-			if b1.OwnerNode != nil && b2.OwnerNode != nil && b1.OwnerNode.find() == b2.OwnerNode.find() {
+			if b1.OwnerVar != nil && b2.OwnerVar != nil {
+				sameOwner = (b1.OwnerVar == b2.OwnerVar)
+			} else if b1.OwnerNode != nil && b2.OwnerNode != nil && b1.OwnerNode.find() == b2.OwnerNode.find() {
 				sameOwner = true
 			} else if b1.OwnerVal != nil && b2.OwnerVal != nil && b1.OwnerVal == b2.OwnerVal {
 				sameOwner = true
@@ -587,46 +660,112 @@ func (bc *borrowChecker) checkOwnerMutation() {
 		return
 	}
 
-	// 1. Direct Owner Assignment in AST: x = 20, x++, x += 1
+	// 1. Direct Owner Assignment in AST: x = 20, x++, x += 1, pt.X = 20, arr[0] = 20
 	ast.Inspect(syntax, func(n ast.Node) bool {
 		switch stmt := n.(type) {
 		case *ast.AssignStmt:
 			for _, lhs := range stmt.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok {
-					name := id.Name
-					line := bc.pass.Fset.Position(id.Pos()).Line
-					ins := bc.findInstructionAtOrAfter(id.Pos())
-					for _, brw := range bc.borrows {
-						if brw.OwnerName == name && line > brw.Line && bc.isBorrowActiveAt(brw, ins) {
-							bc.report(id.Pos(), OwnerInvalidation, fmt.Sprintf(
-								"cannot assign to '%s' because it is borrowed at line %d",
-								name, brw.Line))
-						}
-					}
+				id := rootIdent(lhs)
+				if id == nil {
+					continue
 				}
-			}
-		case *ast.IncDecStmt:
-			if id, ok := stmt.X.(*ast.Ident); ok {
+				var assignedVar *types.Var
+				if v, ok := bc.pass.TypesInfo.Defs[id].(*types.Var); ok {
+					assignedVar = v
+				} else if v, ok := bc.pass.TypesInfo.Uses[id].(*types.Var); ok {
+					assignedVar = v
+				}
 				name := id.Name
 				line := bc.pass.Fset.Position(id.Pos()).Line
 				ins := bc.findInstructionAtOrAfter(id.Pos())
 				for _, brw := range bc.borrows {
-					if brw.OwnerName == name && line > brw.Line && bc.isBorrowActiveAt(brw, ins) {
+					if assignedVar != nil && brw.Var == assignedVar && brw.Kind == annot.BorrowMut {
+						continue
+					}
+					isOwner := false
+					if brw.OwnerVar != nil && assignedVar != nil {
+						isOwner = (brw.OwnerVar == assignedVar)
+					} else if brw.OwnerName == name {
+						isOwner = true
+					}
+					if isOwner && (line > brw.Line || (line == brw.Line && id.Pos() > brw.Pos)) && bc.isBorrowActiveAt(brw, ins) {
 						bc.report(id.Pos(), OwnerInvalidation, fmt.Sprintf(
 							"cannot assign to '%s' because it is borrowed at line %d",
-							name, brw.Line))
+							brw.OwnerName, brw.Line))
 					}
+				}
+			}
+		case *ast.IncDecStmt:
+			id := rootIdent(stmt.X)
+			if id == nil {
+				break
+			}
+			var assignedVar *types.Var
+			if v, ok := bc.pass.TypesInfo.Defs[id].(*types.Var); ok {
+				assignedVar = v
+			} else if v, ok := bc.pass.TypesInfo.Uses[id].(*types.Var); ok {
+				assignedVar = v
+			}
+			name := id.Name
+			line := bc.pass.Fset.Position(id.Pos()).Line
+			ins := bc.findInstructionAtOrAfter(id.Pos())
+			for _, brw := range bc.borrows {
+				if assignedVar != nil && brw.Var == assignedVar && brw.Kind == annot.BorrowMut {
+					continue
+				}
+				isOwner := false
+				if brw.OwnerVar != nil && assignedVar != nil {
+					isOwner = (brw.OwnerVar == assignedVar)
+				} else if brw.OwnerName == name {
+					isOwner = true
+				}
+				if isOwner && (line > brw.Line || (line == brw.Line && id.Pos() > brw.Pos)) && bc.isBorrowActiveAt(brw, ins) {
+					bc.report(id.Pos(), OwnerInvalidation, fmt.Sprintf(
+						"cannot assign to '%s' because it is borrowed at line %d",
+						brw.OwnerName, brw.Line))
 				}
 			}
 		}
 		return true
 	})
 
-	// 2. Channel Send of Owner Allocation: ch <- x
+	// 2. Channel Send of Owner Allocation: ch <- x, ch <- pt.X, ch <- arr[0]
 	for _, b := range bc.fn.Blocks {
 		for _, ins := range b.Instrs {
 			send, ok := ins.(*ssa.Send)
 			if !ok {
+				continue
+			}
+			// If what is being sent is a borrow variable, skip (handled as BORROW001 storage violation)
+			line := bc.pass.Fset.Position(send.Pos()).Line
+			isBorrowSend := false
+			for _, brw := range bc.borrows {
+				if brw.Val != nil && send.X == brw.Val {
+					isBorrowSend = true
+					break
+				}
+				if brw.Var != nil && syntax != nil {
+					ast.Inspect(syntax, func(n ast.Node) bool {
+						if snd, ok := n.(*ast.SendStmt); ok && bc.pass.Fset.Position(snd.Pos()).Line == line {
+							if id := rootIdent(snd.Value); id != nil {
+								if v, ok := bc.pass.TypesInfo.Uses[id].(*types.Var); ok && v == brw.Var {
+									isBorrowSend = true
+									return false
+								}
+								if v, ok := bc.pass.TypesInfo.Defs[id].(*types.Var); ok && v == brw.Var {
+									isBorrowSend = true
+									return false
+								}
+							}
+						}
+						return true
+					})
+				}
+				if isBorrowSend {
+					break
+				}
+			}
+			if isBorrowSend {
 				continue
 			}
 			for _, brw := range bc.borrows {
@@ -635,15 +774,36 @@ func (bc *borrowChecker) checkOwnerMutation() {
 					isOwnerSend = true
 				}
 				if !isOwnerSend {
-					if alloc, ok := send.X.(*ssa.Alloc); ok && alloc.Comment == brw.OwnerName {
-						isOwnerSend = true
-					} else if un, ok := send.X.(*ssa.UnOp); ok {
-						if alloc, ok := un.X.(*ssa.Alloc); ok && alloc.Comment == brw.OwnerName {
+					if alloc := baseAlloc(send.X); alloc != nil {
+						if brw.OwnerVal != nil {
+							if alloc == brw.OwnerVal {
+								isOwnerSend = true
+							}
+						} else if brw.OwnerVar == nil && alloc.Comment == brw.OwnerName {
 							isOwnerSend = true
 						}
 					}
 				}
-				if isOwnerSend && bc.isBorrowActiveAt(brw, send) {
+				if !isOwnerSend && syntax != nil {
+					ast.Inspect(syntax, func(n ast.Node) bool {
+						if snd, ok := n.(*ast.SendStmt); ok && bc.pass.Fset.Position(snd.Pos()).Line == line {
+							if id := rootIdent(snd.Value); id != nil {
+								if brw.OwnerVar != nil {
+									if v, ok := bc.pass.TypesInfo.Uses[id].(*types.Var); ok && v == brw.OwnerVar {
+										isOwnerSend = true
+										return false
+									}
+									if v, ok := bc.pass.TypesInfo.Defs[id].(*types.Var); ok && v == brw.OwnerVar {
+										isOwnerSend = true
+										return false
+									}
+								}
+							}
+						}
+						return true
+					})
+				}
+				if isOwnerSend && (line > brw.Line || (line == brw.Line && send.Pos() > brw.Pos)) && bc.isBorrowActiveAt(brw, ins) {
 					bc.report(send.Pos(), OwnerInvalidation, fmt.Sprintf(
 						"cannot move '%s' because it is borrowed at line %d",
 						brw.OwnerName, brw.Line))
@@ -739,36 +899,97 @@ func (bc *borrowChecker) checkLoopEscapes() {
 	}
 
 	ast.Inspect(syntax, func(n ast.Node) bool {
-		forStmt, ok := n.(*ast.ForStmt)
-		if !ok {
+		var loopPos token.Pos
+		var loopBody *ast.BlockStmt
+
+		switch loop := n.(type) {
+		case *ast.ForStmt:
+			loopPos = loop.Pos()
+			loopBody = loop.Body
+		case *ast.RangeStmt:
+			loopPos = loop.Pos()
+			loopBody = loop.Body
+		default:
 			return true
 		}
 
-		ast.Inspect(forStmt.Body, func(inner ast.Node) bool {
+		if loopBody == nil {
+			return true
+		}
+
+		ast.Inspect(loopBody, func(inner ast.Node) bool {
 			assign, ok := inner.(*ast.AssignStmt)
 			if !ok {
 				return true
 			}
-			for _, lhs := range assign.Lhs {
-				id, ok := lhs.(*ast.Ident)
-				if !ok {
+			for i, lhs := range assign.Lhs {
+				id := rootIdent(lhs)
+				if id == nil {
 					continue
 				}
 				v, _ := bc.pass.TypesInfo.Uses[id].(*types.Var)
 				if v == nil {
+					v, _ = bc.pass.TypesInfo.Defs[id].(*types.Var)
+				}
+				if v == nil {
 					continue
 				}
-				// Check if v was defined before the for statement
-				if v.Pos() < forStmt.Pos() {
-					for _, rhs := range assign.Rhs {
-						if rhsId, ok := rhs.(*ast.Ident); ok {
+				// Check if v was defined before the loop statement
+				if v.Pos() < loopPos {
+					if i >= len(assign.Rhs) {
+						continue
+					}
+					rhs := assign.Rhs[i]
+					unwrapped := unparen(rhs)
+
+					// Case 1: RHS is an identifier referencing an active mutable borrow
+					if rhsId, ok := unwrapped.(*ast.Ident); ok {
+						var rhsVar *types.Var
+						if v, ok := bc.pass.TypesInfo.Uses[rhsId].(*types.Var); ok {
+							rhsVar = v
+						} else if v, ok := bc.pass.TypesInfo.Defs[rhsId].(*types.Var); ok {
+							rhsVar = v
+						}
+						for _, brw := range bc.borrows {
+							isBorrowVar := false
+							if brw.Var != nil && rhsVar != nil {
+								isBorrowVar = (brw.Var == rhsVar)
+							} else if brw.Var != nil && brw.Var.Name() == rhsId.Name {
+								isBorrowVar = true
+							}
+							if brw.Kind == annot.BorrowMut && isBorrowVar {
+								bc.report(assign.Pos(), ConflictingBorrow, fmt.Sprintf(
+									"cannot borrow '%s' as mutable: loop-carried borrow escapes to outer scope",
+									brw.OwnerName))
+							}
+						}
+					}
+
+					// Case 2: RHS is a direct borrow expression (&x /*gocap:mut*/)
+					if ue, ok := unwrapped.(*ast.UnaryExpr); ok && ue.Op == token.AND {
+						isMut := false
+						if bc.ix.IsMub(v) {
+							isMut = true
+						} else if bc.ix.BorrowAt(assign.Pos()) == annot.BorrowMut {
+							isMut = true
+						} else if bc.ix.BorrowAt(rhs.Pos()) == annot.BorrowMut {
+							isMut = true
+						} else if bc.ix.BorrowAt(ue.OpPos) == annot.BorrowMut {
+							isMut = true
+						} else {
+							line := bc.pass.Fset.Position(assign.Pos()).Line
 							for _, brw := range bc.borrows {
-								if brw.Var != nil && brw.Var.Name() == rhsId.Name {
-									bc.report(assign.Pos(), ConflictingBorrow, fmt.Sprintf(
-										"cannot borrow '%s' as mutable: loop-carried borrow escapes to outer scope",
-										brw.OwnerName))
+								if brw.Line == line && brw.Kind == annot.BorrowMut {
+									isMut = true
+									break
 								}
 							}
+						}
+						if isMut {
+							ownerName, _, _ := bc.resolveOwner(rhs)
+							bc.report(assign.Pos(), ConflictingBorrow, fmt.Sprintf(
+								"cannot borrow '%s' as mutable: loop-carried borrow escapes to outer scope",
+								ownerName))
 						}
 					}
 				}
@@ -777,6 +998,33 @@ func (bc *borrowChecker) checkLoopEscapes() {
 		})
 		return true
 	})
+}
+
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
+}
+
+func rootIdent(expr ast.Expr) *ast.Ident {
+	for {
+		switch e := expr.(type) {
+		case *ast.Ident:
+			return e
+		case *ast.SelectorExpr:
+			expr = e.X
+		case *ast.IndexExpr:
+			expr = e.X
+		case *ast.ParenExpr:
+			expr = e.X
+		default:
+			return nil
+		}
+	}
 }
 
 func indexIn(ins ssa.Instruction) int {

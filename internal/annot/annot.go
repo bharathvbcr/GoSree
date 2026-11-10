@@ -72,12 +72,24 @@ type Index struct {
 	// ImmTypes holds the types annotated //gocap:imm (or //safe:imm). They are candidates: the ownership pass decides
 	// whether each one actually satisfies the imm rules.
 	ImmTypes map[*types.TypeName]token.Pos
+	// ImmPrefix records whether the annotation was //gocap: or //safe: for each candidate type.
+	ImmPrefix map[*types.TypeName]string
 	// MubVars holds parameters and local variables marked as mutable borrows.
 	MubVars map[*types.Var]bool
 	// RobVars holds parameters and local variables marked as read-only borrows.
 	RobVars map[*types.Var]bool
 	// Borrows maps AST positions of borrow statements/expressions to their BorrowKind.
 	Borrows map[token.Pos]BorrowKind
+}
+
+// ImmPrefixOf returns the directive prefix ("//gocap:" or "//safe:") used for tn, defaulting to "//gocap:".
+func (ix *Index) ImmPrefixOf(tn *types.TypeName) string {
+	if ix.ImmPrefix != nil {
+		if p, ok := ix.ImmPrefix[tn]; ok && p != "" {
+			return p
+		}
+	}
+	return "//gocap:"
 }
 
 // IsMub reports whether v is marked as a mutable borrow variable.
@@ -121,11 +133,12 @@ var Analyzer = &analysis.Analyzer{
 
 func run(pass *analysis.Pass) (any, error) {
 	ix := &Index{
-		IsoVars:  map[*types.Var]bool{},
-		ImmTypes: map[*types.TypeName]token.Pos{},
-		MubVars:  map[*types.Var]bool{},
-		RobVars:  map[*types.Var]bool{},
-		Borrows:  map[token.Pos]BorrowKind{},
+		IsoVars:   map[*types.Var]bool{},
+		ImmTypes:  map[*types.TypeName]token.Pos{},
+		ImmPrefix: map[*types.TypeName]string{},
+		MubVars:   map[*types.Var]bool{},
+		RobVars:   map[*types.Var]bool{},
+		Borrows:   map[token.Pos]BorrowKind{},
 	}
 	for _, file := range pass.Files {
 		starts := lineStarts(pass.Fset, file)
@@ -223,6 +236,7 @@ func apply(pass *analysis.Pass, ix *Index, c *ast.Comment, lead, verb, args stri
 		}
 		if tn, ok := pass.TypesInfo.Defs[ts.Name].(*types.TypeName); ok {
 			ix.ImmTypes[tn] = ts.Pos()
+			ix.ImmPrefix[tn] = lead
 		}
 	case "mub", "mut":
 		applyBorrow(pass, ix, c, lead, verb, args, target, BorrowMut, malformed)

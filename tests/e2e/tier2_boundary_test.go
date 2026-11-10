@@ -12,6 +12,6 @@ import (
 // spanning empty structs, loops, defers, multiple returns, interface boxing,
 // method receivers, and slice index borrows.
 func TestTier2_BoundaryAndCornerCases(t *testing.T) {
-	// Evaluates under borrowAnalyzer when M1 lands; falls back to ownershipAnalyzer for move/imm sub-cases
-	RunTierTest(t, borrowAnalyzer, "t2_boundaries", "Milestone 1")
+	// Evaluates under compositeAnalyzer when M2 lands; falls back for move/imm sub-cases
+	RunTierTest(t, compositeAnalyzer, "t2_boundaries", "Milestone 2")
 }

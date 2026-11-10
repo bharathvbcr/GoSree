@@ -18,5 +18,5 @@ import (
 // 7. Synchronous closures vs asynchronous goroutine closures
 // 8. Channel select statements with \iso send and fallback branches
 func TestTier3_CrossFeatureCombinations(t *testing.T) {
-	RunTierTest(t, borrowAnalyzer, "t3_combinations", "Milestone 1 & 2")
+	RunTierTest(t, compositeAnalyzer, "t3_combinations", "Milestone 2")
 }
