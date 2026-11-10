@@ -5,8 +5,8 @@ import (
 
 	"golang.org/x/tools/go/analysis/analysistest"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
-	"github.com/bharathvbcr/gocap/internal/annot/stale"
+	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/annot/stale"
 )
 
 // TestStale checks that a hatch is stale only when no pass muted a finding through it. A hatch that

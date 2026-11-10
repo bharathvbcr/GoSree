@@ -1,12 +1,12 @@
 // WITNESS: panic
 //
-// Type confusion in Go with no unsafe, no cgo and no reflection, in a program gocap accepts
+// Type confusion in Go with no unsafe, no cgo and no reflection, in a program gosree accepts
 // without a word.
 //
 // An interface value is two words: a type word and a data word. The route is published through an
 // atomic.Pointer, and a toggle flips its codec in place between a *Gzip and a *Plain. A request
 // that reads the field while a flip is half-written calls Gzip's method on a Plain's memory (or
-// the reverse). Rust rejects the program (the route is written while it is shared); gocap accepts
+// the reverse). Rust rejects the program (the route is written while it is shared); gosree accepts
 // it. The two codecs have the same layout, so the confusion is detected by a magic word instead of
 // crashing; with different layouts it reads or writes past the object.
 //

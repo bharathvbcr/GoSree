@@ -1,7 +1,7 @@
 package t1_erasure
 
 // TC-T1-9.1: Directives in function declarations erase cleanly with 0 bytes/instructions overhead
-//gocap:iso p
+//gosree:iso p
 func DirectivesIsoParam(p *int) int {
 	return *p
 }
@@ -17,13 +17,13 @@ type LegacyImmType struct {
 	Val int
 }
 
-// TC-T1-9.3: //gocap:unsafe <reason> suppresses diagnostics for attached statement
+// TC-T1-9.3: //gosree:unsafe <reason> suppresses diagnostics for attached statement
 func UnsafeEscapeHatch() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:unsafe deliberate alias test for benchmarking
-	//gocap:mut
+	//gosree:unsafe deliberate alias test for benchmarking
+	//gosree:mut
 	b2 := &x
 	*b1 = 20
 	*b2 = 30

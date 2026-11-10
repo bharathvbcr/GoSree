@@ -7,7 +7,7 @@ import (
 	"sort"
 )
 
-// Override is a named type gocap treats as shareable by assumption rather than by proof.
+// Override is a named type gosree treats as shareable by assumption rather than by proof.
 type Override struct {
 	// Name is "pkgpath.Type"; Pointer says the assumption covers *Type rather than Type.
 	Name    string
@@ -17,7 +17,7 @@ type Override struct {
 }
 
 // overrides is the curated table of shared-by-design types. Every entry is an assumption, not a
-// check: gocap trusts that these types synchronise their own state.
+// check: gosree trusts that these types synchronise their own state.
 var overrides = []Override{
 	{"sync.Mutex", true, "synchronisation primitive"},
 	{"sync.RWMutex", true, "synchronisation primitive"},
@@ -98,7 +98,7 @@ func QualifiedName(t types.Type) string {
 }
 
 // Shareable reports whether a value of type t can be copied to another goroutine without creating
-// shared mutable memory that gocap cannot see: pointer-free values, strings, channels, verified imm
+// shared mutable memory that gosree cannot see: pointer-free values, strings, channels, verified imm
 // types, pointers to imm types, and the override table.
 func (c *Classifier) Shareable(t types.Type) bool {
 	if c.memo == nil {

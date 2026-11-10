@@ -16,7 +16,7 @@ type goer interface{ Go(func()) }
 
 func main() {
 	x := 0
-	b := &x //gocap:mut
+	b := &x //gosree:mut
 	var wg sync.WaitGroup
 	var g goer = &wg
 	g.Go(func() { *b = 1 }) // MISS(CAP003): the closure capturing the \mut borrow b runs on a new goroutine (WaitGroup.Go via interface dispatch)

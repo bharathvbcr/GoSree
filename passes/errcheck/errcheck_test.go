@@ -6,7 +6,7 @@ import (
 
 	"golang.org/x/tools/go/analysis/analysistest"
 
-	"github.com/bharathvbcr/gocap/passes/errcheck"
+	"github.com/bharathvbcr/gosree/passes/errcheck"
 )
 
 func TestSafeErrBasic(t *testing.T) {

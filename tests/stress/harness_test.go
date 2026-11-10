@@ -1,4 +1,4 @@
-// Package stress_test is gocap's adversarial suite: programs written to get past the checker.
+// Package stress_test is gosree's adversarial suite: programs written to get past the checker.
 //
 // Every fixture under testdata/src is real, compiling Go. Each line states what the checker does
 // with it today and whether that is right, with a marker in a trailing comment:
@@ -22,7 +22,7 @@
 // promoted to HIT. Every run logs the ledger (hits, misses, false positives, crashes), so a green
 // run never reads as "no known holes".
 //
-// The analyzers run exactly as cmd/gocap runs them (annot, unsafeban, ownership, borrow), through
+// The analyzers run exactly as cmd/gosree runs them (annot, unsafeban, ownership, borrow), through
 // the same driver package multichecker uses.
 package stress_test
 
@@ -42,14 +42,14 @@ import (
 	"golang.org/x/tools/go/analysis/checker"
 	"golang.org/x/tools/go/packages"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
-	"github.com/bharathvbcr/gocap/passes/borrow"
-	"github.com/bharathvbcr/gocap/passes/errcheck"
-	"github.com/bharathvbcr/gocap/passes/ownership"
-	"github.com/bharathvbcr/gocap/passes/unsafeban"
+	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/passes/borrow"
+	"github.com/bharathvbcr/gosree/passes/errcheck"
+	"github.com/bharathvbcr/gosree/passes/ownership"
+	"github.com/bharathvbcr/gosree/passes/unsafeban"
 )
 
-// cliAnalyzers is the analyzer set of cmd/gocap/main.go, in its order.
+// cliAnalyzers is the analyzer set of cmd/gosree/main.go, in its order.
 func cliAnalyzers() []*analysis.Analyzer {
 	return []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer, borrow.Analyzer, errcheck.Analyzer}
 }
@@ -64,7 +64,7 @@ var (
 // rootsEnv restricts a run to the fixture roots with one of the listed prefixes (comma separated).
 // It exists so one area can be worked on while another's fixtures are mid-edit; a filtered run says
 // so, and is not a run of the suite.
-const rootsEnv = "GOCAP_STRESS_ROOTS"
+const rootsEnv = "GOSREE_STRESS_ROOTS"
 
 func selected(root string) bool {
 	filter := os.Getenv(rootsEnv)
@@ -184,7 +184,7 @@ func gopath(t *testing.T) string {
 		t.Fatalf("reading the cap package: %v", err)
 	}
 	gen := t.TempDir()
-	dir := filepath.Join(gen, "src", "github.com", "bharathvbcr", "gocap", "cap")
+	dir := filepath.Join(gen, "src", "github.com", "bharathvbcr", "gosree", "cap")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/annot"
 )
 
 // StorageViolation is the diagnostic code for second-class borrow storage violations.
@@ -80,19 +80,19 @@ func (sc *storageChecker) report(pos token.Pos, cat, msg string) {
 
 func isBorrowDirective(text string) (string, bool) {
 	text = strings.TrimSpace(text)
-	// Block comments: /*gocap:mut*/ or /*safe:mut*/
+	// Block comments: /*gosree:mut*/ or /*safe:mut*/
 	if strings.HasPrefix(text, "/*") && strings.HasSuffix(text, "*/") {
 		inner := strings.TrimSpace(text[2 : len(text)-2])
-		if strings.HasPrefix(inner, "gocap:") {
-			return checkVerb(strings.TrimPrefix(inner, "gocap:"))
+		if strings.HasPrefix(inner, "gosree:") {
+			return checkVerb(strings.TrimPrefix(inner, "gosree:"))
 		}
 		if strings.HasPrefix(inner, "safe:") {
 			return checkVerb(strings.TrimPrefix(inner, "safe:"))
 		}
 	}
-	// Line comments: //gocap:... or //safe:...
-	if strings.HasPrefix(text, "//gocap:") {
-		verb, _, _ := strings.Cut(strings.TrimPrefix(text, "//gocap:"), " ")
+	// Line comments: //gosree:... or //safe:...
+	if strings.HasPrefix(text, "//gosree:") {
+		verb, _, _ := strings.Cut(strings.TrimPrefix(text, "//gosree:"), " ")
 		return checkVerb(verb)
 	}
 	if strings.HasPrefix(text, "//safe:") {

@@ -23,7 +23,7 @@ type jobRef struct{ j *Job }
 func (jobRef) keep() {}
 
 // A bound method value of an interface carries its receiver; whoever calls it hands the receiver to
-// a method gocap cannot see, which may retain it, and with it j.
+// a method gosree cannot see, which may retain it, and with it j.
 func boundMethodRetains() {
 	j := &Job{}
 	var k keeper2 = jobRef{j}

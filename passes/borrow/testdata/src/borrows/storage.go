@@ -6,13 +6,13 @@ package borrows
 
 // Field with mutable borrow directive in named struct -> BORROW001
 type StructWithBorrowField struct {
-	//gocap:mut
+	//gosree:mut
 	ptr *int // want `BORROW001: struct field 'ptr' cannot have second-class borrow type`
 }
 
 // Field with read-only borrow trailing comment in named struct -> BORROW001
 type StructWithRobField struct {
-	val *int //gocap:rob // want `BORROW001: struct field 'val' cannot have second-class borrow type`
+	val *int //gosree:rob // want `BORROW001: struct field 'val' cannot have second-class borrow type`
 }
 
 // Field with legacy safe prefix -> BORROW001
@@ -26,18 +26,18 @@ type StructWithLegacyField struct {
 // ============================================================================
 
 // Package-level global with doc comment borrow directive -> BORROW001
-//gocap:mut
+//gosree:mut
 var globalMut *int // want `BORROW001: package variable 'globalMut' cannot store second-class borrow`
 
 // Package-level global with trailing comment borrow directive -> BORROW001
-var globalRob *int //gocap:rob // want `BORROW001: package variable 'globalRob' cannot store second-class borrow`
+var globalRob *int //gosree:rob // want `BORROW001: package variable 'globalRob' cannot store second-class borrow`
 
 var plainGlobal *int
 
 // Dynamic SSA store of a borrow into a package-level global -> BORROW001
 func storeGlobalBorrow() {
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	plainGlobal = b // want `BORROW001: package variable 'plainGlobal' cannot store second-class borrow`
 }
@@ -53,7 +53,7 @@ type StackTuple struct {
 // Transient stack tuple allocated and used strictly within function activation -> CLEAN PASS
 func localStackStructClean() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	t := StackTuple{p: b}
 	_ = *t.p
@@ -63,7 +63,7 @@ func localStackStructClean() {
 // Clean transient stack tuple with primitive return value -> CLEAN PASS
 func localStackStructReturnPrimitive() int {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	t := StackTuple{p: b}
 	*t.p = 20
@@ -73,10 +73,10 @@ func localStackStructReturnPrimitive() int {
 func localStackStructFieldUpdateReturnPrimitive() int {
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	t := StackTuple{p: b}
-	//gocap:mut
+	//gosree:mut
 	b2 := &y
 	t.p = b2
 	return *t.p
@@ -89,7 +89,7 @@ func localStackStructFieldUpdateReturnPrimitive() int {
 // Stack struct holding borrow escaping via value return -> BORROW001
 func escapeViaReturn() StackTuple {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	t := StackTuple{p: b}
 	return t // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
@@ -98,7 +98,7 @@ func escapeViaReturn() StackTuple {
 // Stack struct holding borrow escaping via pointer return -> BORROW001
 func escapeViaPointerReturn() *StackTuple {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	t := &StackTuple{p: b}
 	return t // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
@@ -107,7 +107,7 @@ func escapeViaPointerReturn() *StackTuple {
 // Stack struct holding borrow escaping via heap store -> BORROW001
 func escapeViaHeapStore(heapPtr *StackTuple) {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	t := StackTuple{p: b}
 	*heapPtr = t // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
@@ -118,7 +118,7 @@ var globalTuple StackTuple
 
 func escapeViaGlobalStore() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	t := StackTuple{p: b}
 	globalTuple = t // want `BORROW001: package variable 'globalTuple' cannot store second-class borrow`
@@ -128,9 +128,9 @@ func escapeViaGlobalStore() {
 // 5. Unsafe Escape Hatch (Suppressed 0 diagnostics)
 // ============================================================================
 
-//gocap:unsafe testing escape hatch
+//gosree:unsafe testing escape hatch
 type UnsafeStruct struct {
-	//gocap:mut
+	//gosree:mut
 	p *int
 }
 
@@ -140,7 +140,7 @@ type UnsafeStruct struct {
 
 func escapeMapKey() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	t := StackTuple{p: b}
 	m := make(map[StackTuple]int)
@@ -149,14 +149,14 @@ func escapeMapKey() {
 
 func escapeMapLit() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	_ = map[int]*int{0: b} // want `BORROW001: map cannot store second-class borrow`
 }
 
 func escapeSliceLit() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	_ = []*int{b} // want `BORROW001: slice cannot store second-class borrow`
 }
@@ -165,21 +165,21 @@ func boxArgHelper(v any) {}
 
 func escapeInterfaceArg() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	boxArgHelper(b) // want `BORROW001: struct field or interface cannot box second-class borrow`
 }
 
 func escapeInterfaceRet() any {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	return b // want `BORROW001: struct field or interface cannot box second-class borrow`
 }
 
 func escapeHeapField() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	h := new(StackTuple)
 	h.p = b // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`

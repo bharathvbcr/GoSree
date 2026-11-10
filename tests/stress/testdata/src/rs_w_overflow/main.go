@@ -4,7 +4,7 @@
 // arithmetic is 65536. The buffer is a thousandth of what the caller believes it allocated; the
 // write of the second record fails Go's bounds check. Go stays memory-safe here (the bounds check
 // is the backstop), but the overflow itself is silent. Rust panics on the multiplication in a
-// debug build and offers checked_mul in release. gocap has no rule; go vet has none.
+// debug build and offers checked_mul in release. gosree has no rule; go vet has none.
 package main
 
 import "fmt"

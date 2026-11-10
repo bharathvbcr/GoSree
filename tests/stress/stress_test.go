@@ -35,7 +35,7 @@ func TestStress(t *testing.T) {
 }
 
 // crashProbeEnv names the fixture root a child test process should analyze.
-const crashProbeEnv = "GOCAP_STRESS_CRASH_PROBE"
+const crashProbeEnv = "GOSREE_STRESS_CRASH_PROBE"
 
 // TestCrashProbe is the child half of the crash check: TestStress re-runs this test binary with
 // crashProbeEnv set, once per CRASH fixture, because an analyzer that panics takes the process down.
@@ -102,15 +102,15 @@ func probeCrash(t *testing.T, root string) (crashed bool, output string) {
 	return false, ""
 }
 
-// TestDump prints every diagnostic for the fixture roots named in GOCAP_STRESS_DUMP (comma
+// TestDump prints every diagnostic for the fixture roots named in GOSREE_STRESS_DUMP (comma
 // separated), without checking markers. It is the exploration tool: write a fixture, dump it, then
 // mark each line.
 //
-//	GOCAP_STRESS_DUMP=moves_alias go test ./tests/stress -run TestDump -v
+//	GOSREE_STRESS_DUMP=moves_alias go test ./tests/stress -run TestDump -v
 func TestDump(t *testing.T) {
-	names := os.Getenv("GOCAP_STRESS_DUMP")
+	names := os.Getenv("GOSREE_STRESS_DUMP")
 	if names == "" {
-		t.Skip("set GOCAP_STRESS_DUMP to a comma-separated list of fixture roots")
+		t.Skip("set GOSREE_STRESS_DUMP to a comma-separated list of fixture roots")
 	}
 	for _, fx := range analyze(t, strings.Split(names, ",")) {
 		var b strings.Builder

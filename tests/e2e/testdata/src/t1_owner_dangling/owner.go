@@ -1,13 +1,13 @@
 package t1_owner_dangling
 
 import (
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 // TC-T1-3.1: Mutation of owner while read-only borrow is active rejected (BORROW003)
 func MutateOwnerDuringRob() {
 	x := 10
-	//gocap:rob
+	//gosree:rob
 	r := &x
 	x = 20 // want `BORROW003: cannot assign to 'x' because it is borrowed`
 	println(*r)
@@ -16,7 +16,7 @@ func MutateOwnerDuringRob() {
 // TC-T1-3.2: Mutation of owner while mutable borrow is active rejected (BORROW003)
 func MutateOwnerDuringMub() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	m := &x
 	x = 20 // want `BORROW003: cannot assign to 'x' because it is borrowed`
 	*m = 30
@@ -25,7 +25,7 @@ func MutateOwnerDuringMub() {
 // TC-T1-3.3: Move/channel send of owner while borrowed rejected (BORROW003)
 func MoveOwnerDuringBorrow(ch chan int) {
 	x := 10
-	//gocap:rob
+	//gosree:rob
 	r := &x
 	ch <- x // want `BORROW003: cannot move 'x' because it is borrowed`
 	println(*r)
@@ -34,7 +34,7 @@ func MoveOwnerDuringBorrow(ch chan int) {
 // TC-T1-3.4: Returning reference to local stack variable rejected (BORROW004)
 func ReturnLocalStackRef() *int {
 	x := 10
-	//gocap:rob
+	//gosree:rob
 	return &x // want `BORROW004: cannot return reference to local stack variable 'x'`
 }
 
@@ -45,7 +45,7 @@ type LocalData struct {
 
 func ReturnStackFieldRef() *int {
 	d := LocalData{Val: 42}
-	//gocap:rob
+	//gosree:rob
 	return &d.Val // want `BORROW004: cannot return reference to local stack variable`
 }
 

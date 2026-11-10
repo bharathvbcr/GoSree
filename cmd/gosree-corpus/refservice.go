@@ -18,7 +18,7 @@ import (
 
 	"golang.org/x/tools/go/analysis/checker"
 
-	"github.com/bharathvbcr/gocap/passes/ownership"
+	"github.com/bharathvbcr/gosree/passes/ownership"
 )
 
 // A reference service is measured on an archived commit, never on a checkout: a checkout moves, and
@@ -249,7 +249,7 @@ type Finding struct {
 	Category string `json:"category"`
 	Message  string `json:"message"`
 	// Transfer is where the transfer that caused the finding is, and TransferFunc the function
-	// holding it: the finding's own position for SAFE002 and SAFE004, the related position gocap
+	// holding it: the finding's own position for SAFE002 and SAFE004, the related position gosree
 	// gives for a finding away from its transfer, and empty for findings no transfer causes.
 	Transfer     string `json:"transfer,omitempty"`
 	TransferFunc string `json:"transfer_func,omitempty"`

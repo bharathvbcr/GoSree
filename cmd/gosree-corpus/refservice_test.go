@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bharathvbcr/gocap/passes/ownership"
+	"github.com/bharathvbcr/gosree/passes/ownership"
 )
 
 // TestTotalAddsEveryField checks that the module total sums every Stats field: add names them one by
@@ -91,7 +91,7 @@ func TestCheckApplied(t *testing.T) {
 	}
 	short := ok
 	short.Iso = 1
-	if err := checkApplied(rows, short, true); err == nil || !strings.Contains(err.Error(), "iso: table has 2, gocap parsed 1") {
+	if err := checkApplied(rows, short, true); err == nil || !strings.Contains(err.Error(), "iso: table has 2, gosree parsed 1") {
 		t.Errorf("an iso name that did not parse: got %v", err)
 	}
 	bad := ok
@@ -107,7 +107,7 @@ func TestCheckApplied(t *testing.T) {
 	if err := checkApplied(withTest, ok, false); err != nil {
 		t.Errorf("a test-file row without -tests: %v", err)
 	}
-	if err := checkApplied(withTest, ok, true); err == nil || !strings.Contains(err.Error(), "unsafe: table has 2, gocap parsed 1") {
+	if err := checkApplied(withTest, ok, true); err == nil || !strings.Contains(err.Error(), "unsafe: table has 2, gosree parsed 1") {
 		t.Errorf("a test-file row that did not parse with -tests: got %v", err)
 	}
 }

@@ -1,5 +1,5 @@
 // Package rs_send: Rust's Send and Sync traits decide statically which types may cross or be shared
-// between threads; Rc, RefCell and a &mut to a non-Sync buffer cannot. gocap's analogue is
+// between threads; Rc, RefCell and a &mut to a non-Sync buffer cannot. gosree's analogue is
 // ownership: a non-shareable value that crosses a goroutine boundary must be owned and is moved
 // (SAFE002/SAFE003). This file records what is caught and one accepted route per type.
 package rs_send

@@ -5,7 +5,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/bharathvbcr/gocap/internal/gusseterr"
+	"github.com/bharathvbcr/gosree/internal/gusseterr"
 )
 
 func BenchmarkSolvePackageAB(b *testing.B) {

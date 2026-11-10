@@ -12,7 +12,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/annot"
 )
 
 // SAFE009: memory annotated //safe:guarded_by is read or written only while its mutex is held, a

@@ -4,26 +4,26 @@ package b
 // Positive Parameter Directives
 // -------------------------------------------------------------
 
-//gocap:mub p
+//gosree:mub p
 func paramMub(p *int) { *p = 1 }
 
-//gocap:mut p
+//gosree:mut p
 func paramMut(p *int) { *p = 2 }
 
-//gocap:rob p
+//gosree:rob p
 func paramRob(p *int) int { return *p }
 
-//gocap:ref p
+//gosree:ref p
 func paramRef(p *int) int { return *p }
 
-//gocap:mut p, q
+//gosree:mut p, q
 func multiMut(p, q *int) {}
 
-//gocap:rob p, q
+//gosree:rob p, q
 func multiRob(p, q *int) {}
 
-//gocap:mut p
-//gocap:rob q
+//gosree:mut p
+//gosree:rob q
 func mixedParams(p, q *int) {}
 
 // Legacy prefix parameter directives
@@ -36,10 +36,10 @@ func legacyRob(p *int) {}
 // Method receiver parameter directive
 type Node struct{ val int }
 
-//gocap:mut n
+//gosree:mut n
 func (n *Node) MutReceiver() { n.val = 1 }
 
-//gocap:rob n
+//gosree:rob n
 func (n *Node) RobReceiver() int { return n.val }
 
 // -------------------------------------------------------------
@@ -50,27 +50,27 @@ func localAssignments() {
 	x := 42
 
 	// Preceding line comment
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
 
 	// Preceding line comment with rob
-	//gocap:rob
+	//gosree:rob
 	b2 := &x
 
 	// Trailing line comment
-	b3 := &x //gocap:mut
+	b3 := &x //gosree:mut
 
 	// Trailing line comment with rob
-	b4 := &x //gocap:rob
+	b4 := &x //gosree:rob
 
 	// Inline comment before statement on same line
-	/*gocap:mut*/ b5 := &x
+	/*gosree:mut*/ b5 := &x
 
 	// Inline comment inside statement
-	b6 := /*gocap:rob*/ &x
+	b6 := /*gosree:rob*/ &x
 
 	// Var declaration
-	//gocap:mut
+	//gosree:mut
 	var b7 = &x
 
 	// Legacy prefix on local assignment
@@ -78,7 +78,7 @@ func localAssignments() {
 	b8 := &x
 
 	// Explicit LHS name in argument
-	//gocap:mut b9
+	//gosree:mut b9
 	b9 := &x
 
 	_ = b1
@@ -96,14 +96,14 @@ func localAssignments() {
 // Positive Escape Hatch & Canonical Iso/Imm
 // -------------------------------------------------------------
 
-//gocap:iso p
+//gosree:iso p
 func canonicalIso(p *int) {}
 
-//gocap:imm
+//gosree:imm
 type ImmType struct{ n int }
 
 func safeUnsafeEscape() {
-	//gocap:unsafe reason for escape
+	//gosree:unsafe reason for escape
 	_ = 1
 }
 
@@ -112,54 +112,54 @@ func safeUnsafeEscape() {
 // -------------------------------------------------------------
 
 // Unknown directive
-//gocap:bogus // want `SAFE007: unknown directive //gocap:bogus`
+//gosree:bogus // want `SAFE007: unknown directive //gosree:bogus`
 func badDirective() {}
 
 // Func with mut but missing parameter names
-//gocap:mut // want `SAFE007: //gocap:mut needs at least one parameter name`
+//gosree:mut // want `SAFE007: //gosree:mut needs at least one parameter name`
 func missingParam(p *int) {}
 
 // Func with rob but missing parameter names
-//gocap:rob // want `SAFE007: //gocap:rob needs at least one parameter name`
+//gosree:rob // want `SAFE007: //gosree:rob needs at least one parameter name`
 func missingParamRob(p *int) {}
 
 // Func with mut naming non-existent parameter
-//gocap:mut nonExistent // want `SAFE007: //gocap:mut names "nonExistent", which is not a parameter of badParamName`
+//gosree:mut nonExistent // want `SAFE007: //gosree:mut names "nonExistent", which is not a parameter of badParamName`
 func badParamName(p *int) {}
 
 // Func with rob naming non-existent parameter
-//gocap:rob nonExistent // want `SAFE007: //gocap:rob names "nonExistent", which is not a parameter of badRobParamName`
+//gosree:rob nonExistent // want `SAFE007: //gosree:rob names "nonExistent", which is not a parameter of badRobParamName`
 func badRobParamName(p *int) {}
 
 // Conflicting directives on same parameter: mut and rob
-//gocap:mut p
-//gocap:rob p // want `SAFE007: //gocap:rob names "p", which is already annotated as mutable borrow`
+//gosree:mut p
+//gosree:rob p // want `SAFE007: //gosree:rob names "p", which is already annotated as mutable borrow`
 func conflictMutRob(p *int) {}
 
 // Conflicting directives on same parameter: iso and mut
-//gocap:iso p
-//gocap:mut p // want `SAFE007: //gocap:mut names "p", which already has an iso capability annotation`
+//gosree:iso p
+//gosree:mut p // want `SAFE007: //gosree:mut names "p", which already has an iso capability annotation`
 func conflictIsoMut(p *int) {}
 
 // Conflicting directives on same parameter: mut and iso
-//gocap:mut p
-//gocap:iso p // want `SAFE007: //gocap:iso names "p", which already has a conflicting capability/borrow annotation`
+//gosree:mut p
+//gosree:iso p // want `SAFE007: //gosree:iso names "p", which already has a conflicting capability/borrow annotation`
 func conflictMutIso(p *int) {}
 
 // Mut directive on type declaration (invalid target)
-//gocap:mut // want `SAFE007: //gocap:mut must be attached to a function declaration or an assignment statement`
+//gosree:mut // want `SAFE007: //gosree:mut must be attached to a function declaration or an assignment statement`
 type BadTypeTarget struct{}
 
 // Rob directive on return statement (invalid target)
 func badReturnTarget() {
-	//gocap:rob // want `SAFE007: //gocap:rob must be attached to a function declaration or an assignment statement`
+	//gosree:rob // want `SAFE007: //gosree:rob must be attached to a function declaration or an assignment statement`
 	return
 }
 
 // Assignment with mismatched variable name argument
 func mismatchedAssignArg() {
 	x := 10
-	//gocap:mut wrongVar // want `SAFE007: //gocap:mut on assignment names "wrongVar", which does not match assigned variable`
+	//gosree:mut wrongVar // want `SAFE007: //gosree:mut on assignment names "wrongVar", which does not match assigned variable`
 	b := &x
 	_ = b
 }
@@ -167,5 +167,5 @@ func mismatchedAssignArg() {
 // Dangling borrow directive at end of function
 func danglingBorrow() {
 	_ = 1
-	//gocap:mut // want `SAFE007: //gocap:mut is not attached to a function or assignment`
+	//gosree:mut // want `SAFE007: //gosree:mut is not attached to a function or assignment`
 }

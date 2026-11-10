@@ -5,7 +5,7 @@ import (
 	"go/token"
 )
 
-// A hatch is one //gocap:unsafe scope. It covers the positions in [start, end) that are in none of
+// A hatch is one //gosree:unsafe scope. It covers the positions in [start, end) that are in none of
 // its holes. Which code that is follows one rule a reader can apply by eye:
 //
 // A hatch covers the code written under it: on its own line above a statement, or in a declaration's
@@ -20,7 +20,7 @@ type hatch struct {
 	at, atEnd token.Pos
 }
 
-// Hatch is a //gocap:unsafe directive: Pos and End delimit its comment.
+// Hatch is a //gosree:unsafe directive: Pos and End delimit its comment.
 type Hatch struct{ Pos, End token.Pos }
 
 func (h *hatch) covers(pos token.Pos) bool {

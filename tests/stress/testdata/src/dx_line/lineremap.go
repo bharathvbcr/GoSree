@@ -28,6 +28,6 @@ func control(p *int) uintptr {
 func late() int {
 	x := 1
 //line lineremap.go:99
-	//gocap:unsafe returning a local by value is fine
+	//gosree:unsafe returning a local by value is fine
 	return x
 }

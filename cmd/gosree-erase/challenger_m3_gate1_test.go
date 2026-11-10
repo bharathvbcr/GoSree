@@ -17,7 +17,7 @@ import (
 func TestChallenger_NestedGenericsSlicesChannels(t *testing.T) {
 	src := `package test
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 type MultiGen[A, B, C any] struct {
 	a A
@@ -49,7 +49,7 @@ func ProcessGenerics[T any](
 	if strings.Contains(out, "cap.") {
 		t.Errorf("erased output still contains 'cap.':\n%s", out)
 	}
-	if strings.Contains(out, "github.com/bharathvbcr/gocap/cap") {
+	if strings.Contains(out, "github.com/bharathvbcr/gosree/cap") {
 		t.Errorf("cap import was not removed:\n%s", out)
 	}
 
@@ -80,13 +80,13 @@ func ProcessGenerics[T any](
 // on type specs, func decls, var decls, const decls, and package clauses.
 func TestChallenger_DocCommentsPreservation(t *testing.T) {
 	src := `// Package testpkg documents the package.
-//gocap:unsafe package initialization
+//gosree:unsafe package initialization
 package testpkg
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 // GlobalConfig stores system settings.
-//gocap:imm
+//gosree:imm
 type GlobalConfig struct {
 	// TimeoutSec is duration.
 	//safe:imm
@@ -95,25 +95,25 @@ type GlobalConfig struct {
 
 // GlobalStatus indicates node state.
 //
-//gocap:unsafe global lock
+//gosree:unsafe global lock
 //
 // More details about GlobalStatus.
 var GlobalStatus = 1
 
 // MaxRetries is the upper bound.
-//gocap:unsafe const declaration
+//gosree:unsafe const declaration
 const MaxRetries = 5
 
 // DoWork executes the main task.
-//gocap:iso x
+//gosree:iso x
 //safe:iso y
-//gocap:mut z
+//gosree:mut z
 // More documentation after directives.
 func DoWork(x cap.Iso[int], y *int, z cap.Mut[int]) {
 }
 
 // Compute is an isolated helper.
-	//gocap:iso a
+	//gosree:iso a
 	//safe:imm
 func Compute(a *int) {}
 `
@@ -123,7 +123,7 @@ func Compute(a *int) {}
 	}
 
 	out := string(res)
-	if strings.Contains(out, "//gocap:") || strings.Contains(out, "//safe:") {
+	if strings.Contains(out, "//gosree:") || strings.Contains(out, "//safe:") {
 		t.Fatalf("output still contains directives:\n%s", out)
 	}
 
@@ -237,9 +237,9 @@ func TestChallenger_InlineCommentsInExpressions(t *testing.T) {
 
 func Calc() int {
 	x := 10
-	y := /*gocap:mut*/ &x
-	z := 20 + /*gocap:unsafe math*/ 30
-	/*gocap:mut*/
+	y := /*gosree:mut*/ &x
+	z := 20 + /*gosree:unsafe math*/ 30
+	/*gosree:mut*/
 	_ = y
 	_ = z
 	return x
@@ -251,7 +251,7 @@ func Calc() int {
 	}
 
 	out := string(res)
-	if strings.Contains(out, "/*gocap:") || strings.Contains(out, "/*safe:") {
+	if strings.Contains(out, "/*gosree:") || strings.Contains(out, "/*safe:") {
 		t.Fatalf("inline comments were not stripped:\n%s", out)
 	}
 
@@ -267,7 +267,7 @@ func Calc() int {
 func TestChallenger_ExplicitTypeArgumentsOnHelpers(t *testing.T) {
 	src := `package test
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 func Run(x int) {
 	m := cap.BorrowMut[int](&x)
@@ -286,7 +286,7 @@ func Run(x int) {
 	if strings.Contains(out, "cap.BorrowMut") || strings.Contains(out, "cap.Move") {
 		t.Errorf("cap helper calls with explicit type arguments were NOT unwrapped:\n%s", out)
 	}
-	if strings.Contains(out, "github.com/bharathvbcr/gocap/cap") {
+	if strings.Contains(out, "github.com/bharathvbcr/gosree/cap") {
 		t.Errorf("cap import was not removed:\n%s", out)
 	}
 }
@@ -307,7 +307,7 @@ go 1.24
 
 import (
 	"fmt"
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type Config struct {
@@ -354,15 +354,15 @@ func main() {
 // TestChallenger_CLIStdinFlags verifies -l, -d, -o, -w on stdin and files.
 func TestChallenger_CLIStdinFlags(t *testing.T) {
 	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "gocap-erase")
+	binPath := filepath.Join(tmpDir, "gosree-erase")
 
 	cmdBuild := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := cmdBuild.CombinedOutput(); err != nil {
-		t.Fatalf("building gocap-erase failed: %v\n%s", err, string(out))
+		t.Fatalf("building gosree-erase failed: %v\n%s", err, string(out))
 	}
 
 	sampleSrc := `package test
-//gocap:iso x
+//gosree:iso x
 func Sample(x *int) int { return *x }
 `
 
@@ -376,7 +376,7 @@ func Sample(x *int) int { return *x }
 	}
 	t.Logf("stdin -l output:\n%s", outL.String())
 	if strings.Contains(outL.String(), "package test") {
-		t.Errorf("BUG: 'gocap-erase -l' on stdin printed the entire erased file instead of listing <stdin> or nothing! Output:\n%s", outL.String())
+		t.Errorf("BUG: 'gosree-erase -l' on stdin printed the entire erased file instead of listing <stdin> or nothing! Output:\n%s", outL.String())
 	}
 
 	// 2. Stdin with -d flag
@@ -388,8 +388,8 @@ func Sample(x *int) int { return *x }
 		t.Fatalf("stdin -d failed: %v", err)
 	}
 	t.Logf("stdin -d output:\n%s", outD.String())
-	if !strings.Contains(outD.String(), "-//gocap:iso") && !strings.Contains(outD.String(), "---") {
-		t.Errorf("BUG: 'gocap-erase -d' on stdin did NOT print diff! Output:\n%s", outD.String())
+	if !strings.Contains(outD.String(), "-//gosree:iso") && !strings.Contains(outD.String(), "---") {
+		t.Errorf("BUG: 'gosree-erase -d' on stdin did NOT print diff! Output:\n%s", outD.String())
 	}
 
 	// 3. Stdin with -w flag (should fail)
@@ -397,7 +397,7 @@ func Sample(x *int) int { return *x }
 	cmdW.Stdin = strings.NewReader(sampleSrc)
 	errW := cmdW.Run()
 	if errW == nil {
-		t.Errorf("expected 'gocap-erase -w' on stdin to return error, but it succeeded")
+		t.Errorf("expected 'gosree-erase -w' on stdin to return error, but it succeeded")
 	}
 
 	// 4. Multiple inputs with -o (should fail)
@@ -407,13 +407,13 @@ func Sample(x *int) int { return *x }
 	_ = os.WriteFile(file2, []byte("package p\n"), 0644)
 	cmdMultiO := exec.Command(binPath, "-o", filepath.Join(tmpDir, "out.go"), file1, file2)
 	if err := cmdMultiO.Run(); err == nil {
-		t.Errorf("expected 'gocap-erase -o' with multiple files to fail, but it succeeded")
+		t.Errorf("expected 'gosree-erase -o' with multiple files to fail, but it succeeded")
 	}
 
 	// 5. Directory with -o (should fail)
 	cmdDirO := exec.Command(binPath, "-o", filepath.Join(tmpDir, "out.go"), tmpDir)
 	if err := cmdDirO.Run(); err == nil {
-		t.Errorf("expected 'gocap-erase -o' with directory to fail, but it succeeded")
+		t.Errorf("expected 'gosree-erase -o' with directory to fail, but it succeeded")
 	}
 }
 
@@ -421,11 +421,11 @@ func Sample(x *int) int { return *x }
 // and ignoring of vendor, testdata, and hidden directories.
 func TestChallenger_DirectoryRecursionRobustness(t *testing.T) {
 	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "gocap-erase")
+	binPath := filepath.Join(tmpDir, "gosree-erase")
 
 	cmdBuild := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := cmdBuild.CombinedOutput(); err != nil {
-		t.Fatalf("building gocap-erase failed: %v\n%s", err, string(out))
+		t.Fatalf("building gosree-erase failed: %v\n%s", err, string(out))
 	}
 
 	// Create directory structure:
@@ -447,7 +447,7 @@ func TestChallenger_DirectoryRecursionRobustness(t *testing.T) {
 		}
 	}
 
-	withDirective := "package p\n\n//gocap:iso x\nfunc F(x *int) {}\n"
+	withDirective := "package p\n\n//gosree:iso x\nfunc F(x *int) {}\n"
 	noDirective := "package p\n\nfunc G() {}\n"
 
 	fA := filepath.Join(tmpDir, "pkg1", "a.go")
@@ -462,15 +462,15 @@ func TestChallenger_DirectoryRecursionRobustness(t *testing.T) {
 	_ = os.WriteFile(fT, []byte(withDirective), 0644)
 	_ = os.WriteFile(fH, []byte(withDirective), 0644)
 
-	// Run gocap-erase -w in-place on root directory
+	// Run gosree-erase -w in-place on root directory
 	cmdWalk := exec.Command(binPath, "-w", tmpDir)
 	if out, err := cmdWalk.CombinedOutput(); err != nil {
-		t.Fatalf("recursive gocap-erase -w failed: %v\n%s", err, string(out))
+		t.Fatalf("recursive gosree-erase -w failed: %v\n%s", err, string(out))
 	}
 
 	// Verify fA was modified (directive removed)
 	cA, _ := os.ReadFile(fA)
-	if strings.Contains(string(cA), "//gocap:iso") {
+	if strings.Contains(string(cA), "//gosree:iso") {
 		t.Errorf("pkg1/a.go was not erased")
 	}
 
@@ -482,19 +482,19 @@ func TestChallenger_DirectoryRecursionRobustness(t *testing.T) {
 
 	// Verify vendor/v.go was skipped
 	cV, _ := os.ReadFile(fV)
-	if !strings.Contains(string(cV), "//gocap:iso") {
+	if !strings.Contains(string(cV), "//gosree:iso") {
 		t.Errorf("vendor/v.go should have been skipped, but was erased")
 	}
 
 	// Verify testdata/t.go was skipped
 	cT, _ := os.ReadFile(fT)
-	if !strings.Contains(string(cT), "//gocap:iso") {
+	if !strings.Contains(string(cT), "//gosree:iso") {
 		t.Errorf("testdata/t.go should have been skipped, but was erased")
 	}
 
 	// Verify .hidden/h.go was skipped
 	cH, _ := os.ReadFile(fH)
-	if !strings.Contains(string(cH), "//gocap:iso") {
+	if !strings.Contains(string(cH), "//gosree:iso") {
 		t.Errorf(".hidden/h.go should have been skipped, but was erased")
 	}
 }
@@ -509,7 +509,7 @@ func TestChallenger_DiffStressPerformance(t *testing.T) {
 		b1.WriteString("line\n")
 		b2.WriteString("line\n")
 	}
-	b1.WriteString("//gocap:iso x\n")
+	b1.WriteString("//gosree:iso x\n")
 	b2.WriteString("\n")
 
 	t.Logf("Running printUnifiedDiff on 6000-line diff...")

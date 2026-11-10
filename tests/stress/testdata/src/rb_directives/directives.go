@@ -1,32 +1,32 @@
-// Package rb_directives puts a //gocap: or //safe: directive on every kind of declaration and
+// Package rb_directives puts a //gosree: or //safe: directive on every kind of declaration and
 // statement, in legal but unusual places. The parser must report or ignore each one, never panic.
 // It does not: every placement below is either applied, reported as SAFE007, or ignored.
 package rb_directives
 
-//gocap:unsafe on an import declaration
+//gosree:unsafe on an import declaration
 import (
-	//gocap:iso x // HIT(SAFE007)
+	//gosree:iso x // HIT(SAFE007)
 	"sync"
 )
 
-//gocap:imm // HIT(SAFE007)
-//gocap:unsafe a type group
+//gosree:imm // HIT(SAFE007)
+//gosree:unsafe a type group
 type (
-	//gocap:imm
+	//gosree:imm
 	A struct{ a int }
-	//gocap:imm
+	//gosree:imm
 	B struct{ b *int }
 )
 
-//gocap:unsafe const block
+//gosree:unsafe const block
 const (
-	//gocap:mut // HIT(SAFE007)
+	//gosree:mut // HIT(SAFE007)
 	C1 = iota
-	//gocap:rob c2 // HIT(SAFE007)
+	//gosree:rob c2 // HIT(SAFE007)
 	C2
 )
 
-//gocap:guarded_by // HIT(SAFE007)
+//gosree:guarded_by // HIT(SAFE007)
 var (
 	mu sync.Mutex
 	//safe:guarded_by mu
@@ -39,100 +39,100 @@ var (
 
 // Bodyless has no body.
 //
-//gocap:iso p
-//gocap:mub q
-//gocap:rob p // HIT(SAFE007)
+//gosree:iso p
+//gosree:mub q
+//gosree:rob p // HIT(SAFE007)
 //safe:holds mu
 func Bodyless(p, q *int) // HIT(SAFE001)
 
-//gocap:iso // HIT(SAFE007)
+//gosree:iso // HIT(SAFE007)
 func noArgs() {}
 
-//gocap:iso p, p, p // HIT(SAFE007) a name listed twice is reported, and the directive has no effect
+//gosree:iso p, p, p // HIT(SAFE007) a name listed twice is reported, and the directive has no effect
 func dup(p *int) { _ = p }
 
-//gocap:imm // HIT(SAFE007)
+//gosree:imm // HIT(SAFE007)
 func immOnFunc() {}
 
-//gocap:holds nosuch // HIT(SAFE007)
+//gosree:holds nosuch // HIT(SAFE007)
 func holdsUnknown() {}
 
-//gocap:frobnicate // HIT(SAFE007)
+//gosree:frobnicate // HIT(SAFE007)
 func unknownVerb() {}
 
-// An empty verb (//gocap: alone) is not a directive to gofmt, which rewrites it to this line.
+// An empty verb (//gosree: alone) is not a directive to gofmt, which rewrites it to this line.
 func emptyVerb() {}
 
 //safe:unsafe // HIT(SAFE007)
 func emptyReason() {}
 
-/*gocap:unsafe block form */
+/*gosree:unsafe block form */
 func blockForm() {}
 
-/*gocap:mut*/   // HIT(SAFE007)
+/*gosree:mut*/   // HIT(SAFE007)
 func blockMut() {}
 
-//gocap:unsafe trailing // with a comment
+//gosree:unsafe trailing // with a comment
 func trailing() {}
 
-//gocap:unsafe	tab separated reason // a tab separates verb and reason as a space does
+//gosree:unsafe	tab separated reason // a tab separates verb and reason as a space does
 func tabbed() {}
 
 func statements(ch chan *int) (r int) {
-	//gocap:unsafe label
+	//gosree:unsafe label
 L:
-	for i := 0; i < 2; i++ { //gocap:unsafe same-line for
-		switch i { //gocap:rob // HIT(SAFE007)
-		//gocap:unsafe case clause
+	for i := 0; i < 2; i++ { //gosree:unsafe same-line for
+		switch i { //gosree:rob // HIT(SAFE007)
+		//gosree:unsafe case clause
 		case 0:
-			//gocap:mut // HIT(SAFE007)
+			//gosree:mut // HIT(SAFE007)
 			continue L
 		default:
-			//gocap:iso nothing // HIT(SAFE007)
+			//gosree:iso nothing // HIT(SAFE007)
 			break L
 		}
 	}
 	x := 1
-	//gocap:mut x // HIT(SAFE007)
+	//gosree:mut x // HIT(SAFE007)
 	p := &x
-	//gocap:mut y // HIT(SAFE007)
+	//gosree:mut y // HIT(SAFE007)
 	q := &x
-	//gocap:rob
+	//gosree:rob
 	var v1, v2 = &x, &x
-	//gocap:mut
+	//gosree:mut
 	_ = &x
-	//gocap:rob
+	//gosree:rob
 	_, _ = p, q
-	//gocap:mut
+	//gosree:mut
 	var _ = &x
-	//gocap:unsafe defer
+	//gosree:unsafe defer
 	defer func() { r++ }()
-	//gocap:unsafe go
+	//gosree:unsafe go
 	go func() {}()
-	//gocap:unsafe select
+	//gosree:unsafe select
 	select {
-	//gocap:unsafe comm clause
+	//gosree:unsafe comm clause
 	default:
 	}
 	s := []int{
-		//gocap:unsafe inside a composite literal // HIT(SAFE007)
+		//gosree:unsafe inside a composite literal // HIT(SAFE007)
 		1,
-		2, //gocap:mut // HIT(SAFE007)
+		2, //gosree:mut // HIT(SAFE007)
 	}
 	_ = s
 	_, _ = v1, v2
-	//gocap:rob
-	r = *p /* gocap:mut */ + *q // HIT(SAFE007) the space after "/*" makes this a near miss, which is reported and not applied
+	//gosree:rob
+	r = *p /* gosree:mut */ + *q // HIT(SAFE007) the space after "/*" makes this a near miss, which is reported and not applied
 	{
-		//gocap:unsafe empty block follows // HIT(SAFE007)
+		//gosree:unsafe empty block follows // HIT(SAFE007)
 	}
-	//gocap:unsafe return
+	//gosree:unsafe return
 	return r
-	//gocap:unsafe after return, nothing follows in this block // HIT(SAFE007)
+	//gosree:unsafe after return, nothing follows in this block // HIT(SAFE007)
 }
 
 type S struct {
-	//gocap:mut // HIT(SAFE007)
+	//gosree:mut // HIT(SAFE007)
 	f1 int // HIT(BORROW001)
 	//safe:guarded_by f1 // HIT(SAFE007)
 	f2 int
@@ -156,22 +156,22 @@ type SEmbed struct {
 }
 
 type I interface {
-	//gocap:iso p // HIT(SAFE007)
+	//gosree:iso p // HIT(SAFE007)
 	M(p *int)
 }
 
 func generic[T any]() {
-	//gocap:mut
+	//gosree:mut
 	var t T
 	_ = t
 }
 
-//gocap:iso r
+//gosree:iso r
 func (r *S) recv() { r.f1 = 1 }
 
 func init() {
-	//gocap:unsafe in init
+	//gosree:unsafe in init
 	counter = 1
 }
 
-//gocap:unsafe at the end of the file with nothing after it // HIT(SAFE007)
+//gosree:unsafe at the end of the file with nothing after it // HIT(SAFE007)

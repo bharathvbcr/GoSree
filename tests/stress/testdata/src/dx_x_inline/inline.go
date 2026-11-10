@@ -5,7 +5,7 @@
 // type-parameter or result list it is reported.
 package dx_x_inline
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 type Job struct{ ID int }
 
@@ -15,25 +15,25 @@ var (
 )
 
 // Accepted: after the type of a receiver.
-func (j *Job /*gocap:mub*/) keep() {
+func (j *Job /*gosree:mub*/) keep() {
 	jobs = j // HIT(BORROW001)
 }
 
 // Accepted: after the type of a two-name field; it covers both names.
-func both(a, b *int /*gocap:mub*/) {
+func both(a, b *int /*gosree:mub*/) {
 	global = a // HIT(BORROW001)
 	global = b // HIT(BORROW001)
 }
 
 // Accepted: args choose among the names of the field.
-func one(a, b *int /*gocap:mub b*/) {
+func one(a, b *int /*gosree:mub b*/) {
 	global = a
 	global = b // HIT(BORROW001)
 }
 
 // Accepted: one parameter per line, the directive after the comma that ends the line.
 func perLine(
-	a *int, //gocap:mub
+	a *int, //gosree:mub
 	b *int,
 ) {
 	global = a // HIT(BORROW001)
@@ -42,7 +42,7 @@ func perLine(
 
 // Accepted: a function literal's parameter, checked like the cap.Mut spelling.
 func inFunc() {
-	f := func(b *int /*gocap:mub*/) {
+	f := func(b *int /*gosree:mub*/) {
 		global = b // HIT(BORROW001)
 	}
 	g := func(b cap.Mut[int]) {
@@ -53,7 +53,7 @@ func inFunc() {
 
 // The borrow pass does not look into a package-level function literal, whichever spelling marks
 // the parameter: annot records both borrows, the store is not checked.
-var lit = func(b *int /*gocap:mub*/) {
+var lit = func(b *int /*gosree:mub*/) {
 	global = b // MISS(BORROW001): the borrow pass skips package-level function literals; annot applied the directive
 }
 
@@ -62,7 +62,7 @@ var litTyped = func(b cap.Mut[int]) {
 }
 
 // Accepted: iso after the type moves the caller's argument.
-func own(j *Job /*gocap:iso*/) { _ = j }
+func own(j *Job /*gosree:iso*/) { _ = j }
 
 func caller() {
 	j := &Job{}
@@ -71,41 +71,41 @@ func caller() {
 }
 
 // Rejected: before the name, between the names, after the comma before the next parameter.
-func before(/*gocap:mub*/ b *int) { global = b } // HIT(SAFE007)
+func before(/*gosree:mub*/ b *int) { global = b } // HIT(SAFE007)
 
-func between(a /*gocap:mub*/, b *int) { global = a } // HIT(SAFE007)
+func between(a /*gosree:mub*/, b *int) { global = a } // HIT(SAFE007)
 
-func afterComma(a *int, /*gocap:mub*/ b *int) { global = b } // HIT(SAFE007)
+func afterComma(a *int, /*gosree:mub*/ b *int) { global = b } // HIT(SAFE007)
 
 // gofmt's spelling of the line above: the printer moves the comment before the comma, where it
 // follows a's type. The formatted line reads, and is applied, as a borrow of a; b, which the author
 // meant, is no longer annotated, and the SAFE007 above is gone. annot cannot tell this text from an
 // intended annotation of a; the only stable place for the directive is after the type.
-func afterCommaFormatted(a *int /*gocap:mub*/, b *int) { global = a; global = b } // HIT(BORROW001)
+func afterCommaFormatted(a *int /*gosree:mub*/, b *int) { global = a; global = b } // HIT(BORROW001)
 
 // Rejected: a result, an unnamed parameter, a type parameter.
-func result() (p *int /*gocap:mub*/) { return nil } // HIT(SAFE007)
+func result() (p *int /*gosree:mub*/) { return nil } // HIT(SAFE007)
 
-func unnamed(*int /*gocap:mub*/) {} // HIT(SAFE007)
+func unnamed(*int /*gosree:mub*/) {} // HIT(SAFE007)
 
-func typeParam[T any /*gocap:mub*/](t T) { _ = t } // HIT(SAFE007)
+func typeParam[T any /*gosree:mub*/](t T) { _ = t } // HIT(SAFE007)
 
 // Rejected: an interface method and a function type have no body to check.
 type I interface {
-	M(p *int /*gocap:mub*/) // HIT(SAFE007)
+	M(p *int /*gosree:mub*/) // HIT(SAFE007)
 }
 
-type F func(p *int /*gocap:rob*/) // HIT(SAFE007)
+type F func(p *int /*gosree:rob*/) // HIT(SAFE007)
 
 // Rejected: verbs that do not belong in a parameter list, and an unknown verb.
-func hatchInList(p *int /*gocap:unsafe reviewed*/) { _ = p } // HIT(SAFE007)
+func hatchInList(p *int /*gosree:unsafe reviewed*/) { _ = p } // HIT(SAFE007)
 
-func unknownInList(p *int /*gocap:mubb*/) { _ = p } // HIT(SAFE007)
+func unknownInList(p *int /*gosree:mubb*/) { _ = p } // HIT(SAFE007)
 
 // Rejected: the inline form conflicting with a doc-comment directive on the same parameter, and naming
 // a parameter the field does not declare.
 //
-//gocap:rob b
-func conflict(b *int /*gocap:mub*/) { _ = b } // HIT(SAFE007)
+//gosree:rob b
+func conflict(b *int /*gosree:mub*/) { _ = b } // HIT(SAFE007)
 
-func misnamed(a *int /*gocap:mub b*/) { _ = a } // HIT(SAFE007)
+func misnamed(a *int /*gosree:mub b*/) { _ = a } // HIT(SAFE007)

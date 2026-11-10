@@ -1,7 +1,7 @@
 // Package rs_encap: Rust's privacy is per module, and a struct with a private field cannot be
 // built outside its module, so a constructor's invariant holds for every value. Copying is opt-in
 // (Clone/Copy), so a type whose copies would share state is not copied by accident. In Go, every
-// importer can make the zero value of any exported type and copy any value. gocap has no rule.
+// importer can make the zero value of any exported type and copy any value. gosree has no rule.
 package rs_encap
 
 import "rs_encap/money"

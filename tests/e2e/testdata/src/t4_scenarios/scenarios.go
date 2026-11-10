@@ -11,7 +11,7 @@ type Job struct {
 	Result int
 }
 
-//gocap:mut j
+//gosree:mut j
 func ProcessJob(j *Job) {
 	j.Result = j.ID * 10
 }
@@ -77,7 +77,7 @@ func RunPipeline() int {
 // Scenario 3: Real-Time Event Processor with Shared \imm Config & Second-Class Borrows
 // =========================================================================
 
-//gocap:imm
+//gosree:imm
 type ProcessorConfig struct {
 	maxBatchSize int
 	workerCount  int
@@ -87,8 +87,8 @@ type EventBatch struct {
 	Events []int
 }
 
-//gocap:rob cfg
-//gocap:mut batch
+//gosree:rob cfg
+//gosree:mut batch
 func ProcessEventBatch(cfg *ProcessorConfig, batch *EventBatch) int {
 	sum := 0
 	for i := 0; i < len(batch.Events) && i < cfg.maxBatchSize; i++ {
@@ -116,12 +116,12 @@ type CachePartition struct {
 	Entries map[string]CacheEntry
 }
 
-//gocap:mut cp
+//gosree:mut cp
 func (cp *CachePartition) Put(k string, v string) {
 	cp.Entries[k] = CacheEntry{Value: v}
 }
 
-//gocap:rob cp
+//gosree:rob cp
 func (cp *CachePartition) Get(k string) (string, bool) {
 	entry, ok := cp.Entries[k]
 	return entry.Value, ok
@@ -175,7 +175,7 @@ func Attack4ParentWriteAfterCapture() {
 // Attack 5: Stack borrow escape over channel
 func Attack5StackBorrowChannelEscape(ch chan *int) {
 	val := 10
-	//gocap:mut
+	//gosree:mut
 	b := &val
 	ch <- b // want `CAP003: stack-scoped borrow 'b' .* cannot cross goroutine boundary`
 }
@@ -183,7 +183,7 @@ func Attack5StackBorrowChannelEscape(ch chan *int) {
 // Attack 6: Stack borrow capture in goroutine closure
 func Attack6StackBorrowGoroutineEscape() {
 	val := 10
-	//gocap:mut
+	//gosree:mut
 	b := &val
 	go func() { // want `CAP003: stack-scoped borrow 'b' .* cannot cross goroutine boundary`
 		*b = 20
@@ -192,7 +192,7 @@ func Attack6StackBorrowGoroutineEscape() {
 
 // Attack 7: Second-class borrow in struct field
 type Attack7Struct struct {
-	//gocap:mut
+	//gosree:mut
 	P *int // want `BORROW001: struct field 'P' cannot have second-class borrow type`
 }
 
@@ -201,7 +201,7 @@ var Attack8Global *int // want `SAFE006: package variable Attack8Global is writt
 
 func Attack8GlobalStore() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	Attack8Global = b // want `BORROW001: package variable 'Attack8Global' cannot store second-class borrow`
 }
@@ -209,12 +209,12 @@ func Attack8GlobalStore() {
 // Attack 9: Dangling return of stack reference
 func Attack9DanglingStackReturn() *int {
 	x := 10
-	//gocap:rob
+	//gosree:rob
 	return &x // want `BORROW004: cannot return reference to local stack variable 'x'`
 }
 
 // Attack 10: Mutation of field on immutable type
 func Attack10MutationOfImm() {
 	cfg := &ProcessorConfig{maxBatchSize: 10, workerCount: 2}
-	cfg.maxBatchSize = 20 // want `SAFE005: write to a field of ProcessorConfig, which is //gocap:imm`
+	cfg.maxBatchSize = 20 // want `SAFE005: write to a field of ProcessorConfig, which is //gosree:imm`
 }

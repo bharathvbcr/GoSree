@@ -1,7 +1,7 @@
 package marker_soundness
 
 import (
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 // Test 1: cap.BorrowMut creating simultaneous mutable borrows -> BORROW002
@@ -347,7 +347,7 @@ type closureBox struct{ f func() }
 
 func callClosureHelper(fn func()) { fn() }
 
-//gocap:iso v
+//gosree:iso v
 func consumeIsoInt(v int) { _ = v }
 
 // Test 31: Pre-existing closure in struct field / passed to helper / mutating *p, alias passed to callee, and Iso move -> BORROW003

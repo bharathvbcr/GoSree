@@ -1,6 +1,6 @@
 package main
 
-// Stress suite for gocap-erase.
+// Stress suite for gosree-erase.
 //
 // Every subtest is either a regression LOCK (asserts correct behaviour) or a
 // KNOWN BUG (asserts that the bug is still present and fails with
@@ -9,7 +9,7 @@ package main
 // that a green run never reads as "no known bugs".
 //
 // The end-to-end oracle builds every corpus program twice, offline, inside a
-// throwaway module whose path is github.com/bharathvbcr/gocap and which holds
+// throwaway module whose path is github.com/bharathvbcr/gosree and which holds
 // a byte-for-byte copy of ../../cap/cap.go, so the import path the eraser
 // matches is the real one and no network or go.sum is needed.
 
@@ -81,7 +81,7 @@ func lockPassed(t *testing.T) {
 // End-to-end harness
 // ---------------------------------------------------------------------------
 
-const capImportPath = "github.com/bharathvbcr/gocap/cap"
+const capImportPath = "github.com/bharathvbcr/gosree/cap"
 
 type stressModule struct {
 	dir string
@@ -108,7 +108,7 @@ func newStressModule(t *testing.T) *stressModule {
 	if err != nil {
 		t.Fatalf("reading real cap/cap.go: %v", err)
 	}
-	mustWrite(t, filepath.Join(dir, "go.mod"), "module github.com/bharathvbcr/gocap\n\ngo 1.27\n")
+	mustWrite(t, filepath.Join(dir, "go.mod"), "module github.com/bharathvbcr/gosree\n\ngo 1.27\n")
 	mustWrite(t, filepath.Join(dir, "cap", "cap.go"), string(capSrc))
 	mustWrite(t, filepath.Join(dir, "other", "cap", "cap.go"), otherCapSrc)
 	return &stressModule{dir: dir}
@@ -235,7 +235,7 @@ type e2eCase struct {
 	extra func(t *testing.T, r *e2eResult)
 }
 
-const hdr = "package main\n\nimport (\n\t\"fmt\"\n\n\t\"github.com/bharathvbcr/gocap/cap\"\n)\n\n"
+const hdr = "package main\n\nimport (\n\t\"fmt\"\n\n\t\"github.com/bharathvbcr/gosree/cap\"\n)\n\n"
 
 var stressCorpus = []e2eCase{
 	// ---------------- locks: name resolution ----------------
@@ -260,7 +260,7 @@ func main() {
 import (
 	"fmt"
 
-	c "github.com/bharathvbcr/gocap/cap"
+	c "github.com/bharathvbcr/gosree/cap"
 )
 
 func main() {
@@ -277,7 +277,7 @@ func main() {
 import (
 	"fmt"
 
-	. "github.com/bharathvbcr/gocap/cap"
+	. "github.com/bharathvbcr/gosree/cap"
 )
 
 func main() {
@@ -293,8 +293,8 @@ func main() {
 import (
 	"fmt"
 
-	"github.com/bharathvbcr/gocap/cap"
-	gc "github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
+	gc "github.com/bharathvbcr/gosree/cap"
 )
 
 func main() {
@@ -309,20 +309,20 @@ func main() {
 import (
 	"fmt"
 
-	"github.com/bharathvbcr/gocap/other/cap"
+	"github.com/bharathvbcr/gosree/other/cap"
 )
 
 func main() {
 	fmt.Println(cap.Move(1))
 }
 `},
-	{name: "gocap_renamed_other_named_cap", src: `package main
+	{name: "gosree_renamed_other_named_cap", src: `package main
 
 import (
 	"fmt"
 
-	gc "github.com/bharathvbcr/gocap/cap"
-	"github.com/bharathvbcr/gocap/other/cap"
+	gc "github.com/bharathvbcr/gosree/cap"
+	"github.com/bharathvbcr/gosree/other/cap"
 )
 
 func main() {
@@ -439,7 +439,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type T struct{ A int }
@@ -565,7 +565,7 @@ func main() {
 import (
 	"fmt"
 
-	. "github.com/bharathvbcr/gocap/cap"
+	. "github.com/bharathvbcr/gosree/cap"
 )
 
 func main() {
@@ -610,7 +610,7 @@ func main() {
 import (
 	"fmt"
 
-	. "github.com/bharathvbcr/gocap/cap"
+	. "github.com/bharathvbcr/gosree/cap"
 )
 
 func main() {
@@ -643,7 +643,7 @@ func main() {
 import (
 	"fmt"
 
-	_ "github.com/bharathvbcr/gocap/cap"
+	_ "github.com/bharathvbcr/gosree/cap"
 )
 
 func main() { fmt.Println("blank") }
@@ -666,7 +666,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type T struct{ A int }
@@ -747,7 +747,7 @@ package main
 import (
 	_ "embed"
 
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 //go:generate echo hi
@@ -780,7 +780,7 @@ func g() {}
 	})
 
 	t.Run("strings_and_comments_mentioning_markers", func(t *testing.T) {
-		src := "package p\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\n" +
+		src := "package p\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\n" +
 			"// Use cap.Mut[T] and cap.Move(x) here.\n" +
 			"var raw = `cap.Mut[T] cap.Move(x)`\n" +
 			"var s = \"cap.Borrow(&x)\"\n" +
@@ -807,17 +807,17 @@ func g() {}
 
 /*
 #include <stdlib.h>
-// cap.Move(x) gocap:iso in C comment
+// cap.Move(x) gosree:iso in C comment
 static int twice(int x) { return 2 * x; }
 */
 import "C"
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 func F(p cap.Mut[C.int]) C.int { return C.twice(*cap.Move(p)) }
 `
 		out := mustErase(t, src)
-		pre := "/*\n#include <stdlib.h>\n// cap.Move(x) gocap:iso in C comment\nstatic int twice(int x) { return 2 * x; }\n*/\nimport \"C\""
+		pre := "/*\n#include <stdlib.h>\n// cap.Move(x) gosree:iso in C comment\nstatic int twice(int x) { return 2 * x; }\n*/\nimport \"C\""
 		if !strings.Contains(out, pre) {
 			t.Errorf("cgo preamble changed:\n%s", out)
 		}
@@ -830,7 +830,7 @@ func F(p cap.Mut[C.int]) C.int { return C.twice(*cap.Move(p)) }
 	t.Run("refuses_bad_input", func(t *testing.T) {
 		for name, src := range map[string]string{
 			"empty":        "",
-			"syntax_error": "package p\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\nfunc F(p cap.Mut[int] {\n",
+			"syntax_error": "package p\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\nfunc F(p cap.Mut[int] {\n",
 			"no_package":   "func F() {}\n",
 		} {
 			if _, err := safeErase([]byte(src)); err == nil || errors.Is(err, errErasePanicked) {
@@ -839,7 +839,7 @@ func F(p cap.Mut[C.int]) C.int { return C.twice(*cap.Move(p)) }
 		}
 		// A file with only a package clause and a type error is still
 		// syntactically valid: erasure is syntactic and must not refuse.
-		out := mustErase(t, "package p\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\nvar x cap.Mut[int] = 3\n")
+		out := mustErase(t, "package p\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\nvar x cap.Mut[int] = 3\n")
 		if !strings.Contains(out, "var x *int = 3") {
 			t.Errorf("type-error file not erased:\n%s", out)
 		}
@@ -850,7 +850,7 @@ func F(p cap.Mut[C.int]) C.int { return C.twice(*cap.Move(p)) }
 	})
 
 	t.Run("generated_and_test_files", func(t *testing.T) {
-		src := "// Code generated by x. DO NOT EDIT.\n\npackage p_test\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\nvar v cap.Iso[int]\n"
+		src := "// Code generated by x. DO NOT EDIT.\n\npackage p_test\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\nvar v cap.Iso[int]\n"
 		out := mustErase(t, src)
 		if !strings.HasPrefix(out, "// Code generated by x. DO NOT EDIT.\n\npackage p_test") || !strings.Contains(out, "var v *int") {
 			t.Errorf("generated header or erasure wrong:\n%s", out)
@@ -874,11 +874,11 @@ func F(p cap.Mut[C.int]) C.int { return C.twice(*cap.Move(p)) }
 
 	t.Run("bom_and_non_utf8_comment", func(t *testing.T) {
 		// Invalid UTF-8 is refused (gc refuses it too); nothing is written.
-		bad := "package p\n\n// bytes: \xff\xfe\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\nvar v cap.Mut[int]\n"
+		bad := "package p\n\n// bytes: \xff\xfe\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\nvar v cap.Mut[int]\n"
 		if _, err := safeErase([]byte(bad)); err == nil || errors.Is(err, errErasePanicked) {
 			t.Errorf("invalid UTF-8 accepted or panicked: %v", err)
 		}
-		bom := "\xef\xbb\xbfpackage p\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\nvar v cap.Mut[int]\n"
+		bom := "\xef\xbb\xbfpackage p\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\nvar v cap.Mut[int]\n"
 		out, err := safeErase([]byte(bom))
 		t.Logf("BOM input: err=%v out=%q", err, out)
 		if err != nil || !strings.Contains(string(out), "var v *int") {
@@ -899,7 +899,7 @@ func F(p cap.Mut[C.int]) C.int { return C.twice(*cap.Move(p)) }
 		lockPassed(t)
 	})
 
-	t.Run("gocap_free_file_untouched", func(t *testing.T) {
+	t.Run("gosree_free_file_untouched", func(t *testing.T) {
 		// A file with no cap import and no directive is returned byte for
 		// byte: no gofmt, no CRLF conversion.
 		for _, src := range []string{
@@ -908,7 +908,7 @@ func F(p cap.Mut[C.int]) C.int { return C.twice(*cap.Move(p)) }
 			"package p\n\nimport capx \"example.com/other/cap\"\n\nvar _ = capx.Move\n",
 		} {
 			if out := mustErase(t, src); out != src {
-				t.Errorf("gocap-free file changed:\ninput  %q\noutput %q", src, out)
+				t.Errorf("gosree-free file changed:\ninput  %q\noutput %q", src, out)
 			}
 		}
 		lockPassed(t)
@@ -921,7 +921,7 @@ import (
 	"fmt"
 
 	// markers for the borrow checker
-	"github.com/bharathvbcr/gocap/cap" // keep me? import trailer
+	"github.com/bharathvbcr/gosree/cap" // keep me? import trailer
 )
 
 func F(x int) int {
@@ -940,7 +940,7 @@ func F(x int) int {
 import (
 	"fmt"
 	// cap is below
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 	"os"
 )
 
@@ -970,7 +970,7 @@ func F(x int) int {
 func TestStressEraseScale(t *testing.T) {
 	t.Run("ten_thousand_markers", func(t *testing.T) {
 		var b strings.Builder
-		b.WriteString("package p\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\n")
+		b.WriteString("package p\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\n")
 		for i := 0; i < 10000; i++ {
 			fmt.Fprintf(&b, "func F%d(p cap.Mut[int], q cap.Ref[[]int]) cap.Iso[int] { return cap.Move(cap.BorrowMut(p)) }\n", i)
 		}
@@ -988,7 +988,7 @@ func TestStressEraseScale(t *testing.T) {
 	})
 	t.Run("deep_nesting", func(t *testing.T) {
 		const depth = 2000
-		src := "package p\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\nvar x = " +
+		src := "package p\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\nvar x = " +
 			strings.Repeat("cap.Move(", depth) + "1" + strings.Repeat(")", depth) + "\n"
 		start := time.Now()
 		out := mustErase(t, src)
@@ -1006,7 +1006,7 @@ func TestStressEraseScale(t *testing.T) {
 
 func buildEraser(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "gocap-erase-stress")
+	bin := filepath.Join(t.TempDir(), "gosree-erase-stress")
 	if runtime.GOOS == "windows" {
 		bin += ".exe"
 	}
@@ -1015,7 +1015,7 @@ func buildEraser(t *testing.T) string {
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", bin, ".")
 	cmd.Env = append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=local")
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("building gocap-erase: %v\n%s", err, out)
+		t.Fatalf("building gosree-erase: %v\n%s", err, out)
 	}
 	return bin
 }
@@ -1037,7 +1037,7 @@ func runEraser(t *testing.T, bin, dir string, args ...string) (string, int) {
 	return string(out), code
 }
 
-const markedFile = "package p\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\nfunc F(p cap.Mut[int]) int { return *cap.Move(p) }\n"
+const markedFile = "package p\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\nfunc F(p cap.Mut[int]) int { return *cap.Move(p) }\n"
 
 func readFile(t *testing.T, p string) string {
 	t.Helper()
@@ -1162,7 +1162,7 @@ func TestStressCLI(t *testing.T) {
 		dir := t.TempDir()
 		good := filepath.Join(dir, "good.go")
 		bad := filepath.Join(dir, "bad.go")
-		badSrc := "package p\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\nfunc F(p cap.Mut[int] {\n"
+		badSrc := "package p\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\nfunc F(p cap.Mut[int] {\n"
 		mustWrite(t, good, markedFile)
 		mustWrite(t, bad, badSrc)
 		out, code := runEraser(t, bin, filepath.Dir(dir), "-w", dir)
@@ -1190,7 +1190,7 @@ func TestStressCLI(t *testing.T) {
 		dir := t.TempDir()
 		good := filepath.Join(dir, "good.go")
 		refused := filepath.Join(dir, "refused.go")
-		src := "package p\n\nimport \"github.com/bharathvbcr/gocap/cap\"\n\ntype T struct{ A int }\n\ntype W struct{ cap.Mut[T] }\n"
+		src := "package p\n\nimport \"github.com/bharathvbcr/gosree/cap\"\n\ntype T struct{ A int }\n\ntype W struct{ cap.Mut[T] }\n"
 		mustWrite(t, good, markedFile)
 		mustWrite(t, refused, src)
 		out, code := runEraser(t, bin, filepath.Dir(dir), "-w", dir)
@@ -1400,14 +1400,14 @@ func main() {
 		}
 		var syms []string
 		for _, line := range strings.Split(string(out), "\n") {
-			if strings.Contains(line, "gocap/cap") {
+			if strings.Contains(line, "gosree/cap") {
 				syms = append(syms, strings.TrimSpace(line))
 			}
 		}
 		sort.Strings(syms)
 		return syms
 	}
-	t.Logf("gocap/cap symbols in original binary: %d %v; in erased: %d", len(nm(bo)), nm(bo), len(nm(be)))
+	t.Logf("gosree/cap symbols in original binary: %d %v; in erased: %d", len(nm(bo)), nm(bo), len(nm(be)))
 
 	// Byte-level residue explains why whole binaries differ: the inlining
 	// tree / file table of the annotated build still names cap.go and the
@@ -1417,13 +1417,13 @@ func main() {
 		if err != nil {
 			t.Fatal(err)
 		}
-		return bytes.Count(b, []byte("gocap/cap")), int64(len(b))
+		return bytes.Count(b, []byte("gosree/cap")), int64(len(b))
 	}
 	ro, so := residue(bo)
 	re, se := residue(be)
-	t.Logf("bytes \"gocap/cap\" occurrences: original=%d (size %d) erased=%d (size %d)", ro, so, re, se)
+	t.Logf("bytes \"gosree/cap\" occurrences: original=%d (size %d) erased=%d (size %d)", ro, so, re, se)
 	if re != 0 {
-		t.Errorf("erased binary still mentions gocap/cap %d times", re)
+		t.Errorf("erased binary still mentions gosree/cap %d times", re)
 	}
 	lockPassed(t)
 }

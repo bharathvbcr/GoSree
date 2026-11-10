@@ -17,8 +17,8 @@ import (
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 
-	"github.com/bharathvbcr/gocap/internal/kinds"
-	"github.com/bharathvbcr/gocap/passes/ownership"
+	"github.com/bharathvbcr/gosree/internal/kinds"
+	"github.com/bharathvbcr/gosree/passes/ownership"
 )
 
 // The census answers the question README item 4 turns on: of the transfers hatched because they
@@ -49,7 +49,7 @@ import (
 //
 // "After construction" is a store into a field whose base is not an allocation of the storing
 // function (a composite literal, new(T), &T{}); a store through a parameter, a load or a global is
-// after. The census reads the code and gocap's function summaries (a collection handed to a function
+// after. The census reads the code and gosree's function summaries (a collection handed to a function
 // whose summary writes or keeps it is written); it errs towards reporting a blocker (an interface
 // field whose stores it cannot see is X).
 const (
@@ -106,7 +106,7 @@ type census struct {
 	// contentWrites[t][field] says why the contents of an unguarded collection field of t may be
 	// written after construction ("" or absent: only read).
 	contentWrites map[*types.Named]map[string]string
-	// facts are gocap's summaries of the functions the module calls (std and dependencies included).
+	// facts are gosree's summaries of the functions the module calls (std and dependencies included).
 	facts map[*types.Func]*ownership.FuncFact
 	// ifaceStores[t][field] are the static types stored into an interface or func field of t.
 	ifaceStores map[*types.Named]map[string][]types.Type
@@ -131,7 +131,7 @@ func runCensus(pkgs []*packages.Package, acts []*checker.Action, rows []annotati
 	printCensus(rep, path)
 }
 
-// summaries collects gocap's function summaries from an analysis run: each root action carries the
+// summaries collects gosree's function summaries from an analysis run: each root action carries the
 // facts of every package it imports.
 func summaries(acts []*checker.Action) map[*types.Func]*ownership.FuncFact {
 	out := map[*types.Func]*ownership.FuncFact{}
@@ -360,7 +360,7 @@ func (c *census) checkContents(t *types.Named, f *types.Var, v ssa.Value) {
 // mutates follows the uses of a collection value and returns why its contents may be written, or ""
 // if every use only reads it: an index or map read, range, len or cap, a comparison, or a call whose
 // summary neither writes nor keeps it. An update, an element store, append or copy into it, delete or
-// clear, storing it anywhere, returning it, or a call gocap cannot see all count as writes.
+// clear, storing it anywhere, returning it, or a call gosree cannot see all count as writes.
 func (c *census) mutates(v ssa.Value, depth int, seen map[ssa.Value]bool) string {
 	if seen[v] {
 		return ""
@@ -638,7 +638,7 @@ func (c *census) rootClasses(t types.Type) (string, []string) {
 }
 
 // interfaceClasses classifies an interface-typed value by the module types that implement it; with
-// none in the module, the value is of a type gocap would have to vouch for (X).
+// none in the module, the value is of a type gosree would have to vouch for (X).
 func (c *census) interfaceClasses(t types.Type) []string {
 	iface, _ := t.Underlying().(*types.Interface)
 	var out []string

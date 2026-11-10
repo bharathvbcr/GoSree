@@ -2,7 +2,7 @@
 //
 // A zero value that needed a constructor: Cache's map is made only by NewCache, and a Cache
 // declared with var panics on its first Put. Rust has no implicit zero value; a struct is built by
-// naming every field or calling a constructor. gocap has no rule.
+// naming every field or calling a constructor. gosree has no rule.
 package main
 
 type Cache struct{ items map[string]int }

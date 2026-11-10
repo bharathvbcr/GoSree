@@ -6,7 +6,7 @@ import (
 
 	"golang.org/x/tools/go/analysis/analysistest"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/annot"
 )
 
 func TestDirectives(t *testing.T) {

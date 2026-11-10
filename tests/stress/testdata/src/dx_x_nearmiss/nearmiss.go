@@ -1,7 +1,7 @@
 // Package dx_x_nearmiss is the next round after dx_directive: spellings of a directive that a reader
 // takes for one and parseDirective does not accept. Each is reported as SAFE007 at the comment and
 // has no effect, so the check it asks for visibly does not run (fail closed), and prose that merely
-// starts with "safe:" or "gocap:" stays clean.
+// starts with "safe:" or "gosree:" stays clean.
 //
 // Do not gofmt this file: it holds the spellings gofmt produces from typos, next to the typos.
 package dx_x_nearmiss
@@ -37,54 +37,54 @@ func (s *S) unlocked() {
 
 // A hatch spelled wrong mutes nothing: the cast under it is still reported, and so is the spelling.
 func hatchSpelledWrong(p *int) uintptr {
-	//GOCAP:unsafe reviewed // HIT(SAFE007)
+	//GOSREE:unsafe reviewed // HIT(SAFE007)
 	return uintptr(unsafe.Pointer(p)) // HIT(SAFE001)
 }
 
 func hatchSpaced(p *int) uintptr {
-	// gocap:unsafe reviewed // HIT(SAFE007)
+	// gosree:unsafe reviewed // HIT(SAFE007)
 	return uintptr(unsafe.Pointer(p)) // HIT(SAFE001)
 }
 
 func hatchTypo(p *int) uintptr {
-	//Gocap:unsfae reviewed // HIT(SAFE007) prefix case and a transposition, within edit distance 1 of unsafe
+	//Gosree:unsfae reviewed // HIT(SAFE007) prefix case and a transposition, within edit distance 1 of unsafe
 	return uintptr(unsafe.Pointer(p)) // HIT(SAFE001)
 }
 
 // A near miss on a later line of a multi-line block comment, reported at the comment's start.
-/* HIT(SAFE007) the second line of this comment reads as //gocap:iso j
- * gocap:iso j
+/* HIT(SAFE007) the second line of this comment reads as //gosree:iso j
+ * gosree:iso j
  */
 func blockIso(j *Job) { _ = j }
 
 // The gofmt pairs. Each typo is written as typed, then as gofmt rewrites it inside a doc comment:
 // gofmt keeps "//x:y" unspaced only when y starts with a lower-case letter or a digit.
 //
-//gocap:Iso j // HIT(SAFE007) as typed: an unknown directive
+//gosree:Iso j // HIT(SAFE007) as typed: an unknown directive
 func isoTyped(j *Job) { _ = j }
 
 // gofmt's spelling of the line above.
 //
-// gocap:Iso j // HIT(SAFE007) after gofmt: a near miss
+// gosree:Iso j // HIT(SAFE007) after gofmt: a near miss
 func isoFormatted(j *Job) { _ = j }
 
 // An empty verb, as typed.
 //
-//gocap: // HIT(SAFE007)
+//gosree: // HIT(SAFE007)
 func emptyTyped() {}
 
 // gofmt's spelling of the line above.
 //
-// gocap: // HIT(SAFE007)
+// gosree: // HIT(SAFE007)
 func emptyFormatted() {}
 
-// Prose is left alone: after "safe:" or "gocap:" and a space, only a verb spelled exactly, followed by
+// Prose is left alone: after "safe:" or "gosree:" and a space, only a verb spelled exactly, followed by
 // white space or the end of the line, is taken for a directive.
 //
 // safe: this lock is held by the caller
-// gocap: see docs/DIRECTIVES.md
+// gosree: see docs/DIRECTIVES.md
 // Safe: unsafe.Pointer is never used here.
 // safe: is this right? It is.
 // Thread-safe: yes.
-// gocap:isolation is a design note, not a verb.
+// gosree:isolation is a design note, not a verb.
 func prose() {}

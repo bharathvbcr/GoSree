@@ -8,7 +8,7 @@ import "sync"
 
 // Config is a valid imm type: a fixed-size array of ints is pointer-free.
 //
-//gocap:imm
+//gosree:imm
 type Config struct {
 	arr [4]int
 }

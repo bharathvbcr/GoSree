@@ -5,7 +5,7 @@ import (
 	"sync"
 )
 
-// Poke and Hold have no Go body (an assembly or linkname implementation, say): gocap cannot see what
+// Poke and Hold have no Go body (an assembly or linkname implementation, say): gosree cannot see what
 // they do, so their summaries say they may write every argument, and say why.
 func Poke(p *int) // want Poke:"ownership summary"
 

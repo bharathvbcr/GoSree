@@ -12,8 +12,8 @@ type Job struct{ ID int }
 
 // Duplicates are reported.
 //
-//gocap:imm
-//gocap:imm // HIT(SAFE007)
+//gosree:imm
+//gosree:imm // HIT(SAFE007)
 type Frozen struct{ n int }
 
 var gmu sync.Mutex
@@ -22,19 +22,19 @@ var gmu sync.Mutex
 //safe:holds gmu // HIT(SAFE007)
 func locked() {}
 
-//gocap:iso j
-//gocap:iso j // HIT(SAFE007)
+//gosree:iso j
+//gosree:iso j // HIT(SAFE007)
 func twice(j *Job) { _ = j }
 
 func hatchTwice(p *int) uintptr {
-	//gocap:unsafe reviewed
-	//gocap:unsafe reviewed again // HIT(SAFE007)
+	//gosree:unsafe reviewed
+	//gosree:unsafe reviewed again // HIT(SAFE007)
 	return uintptr(unsafe.Pointer(p))
 }
 
 // A list with one bad name has no effect at all, not even for the good names: q is not moved.
 //
-//gocap:iso p, nosuch // HIT(SAFE007)
+//gosree:iso p, nosuch // HIT(SAFE007)
 func partial(p, q *Job) { _, _ = p, q }
 
 func partialCaller() {
@@ -57,7 +57,7 @@ func (p *Pair) bump() {
 // A borrow directive on a var statement with several names makes every name a borrow.
 func multiVar() {
 	a := 1
-	//gocap:mut
+	//gosree:mut
 	var b1, b2 = &a, &a // HIT(BORROW002)
 	*b1, *b2 = 2, 3
 }
@@ -66,16 +66,16 @@ func multiVar() {
 // two statements is reported at the second.
 func rebind() {
 	x, y := 1, 2
-	b := &x //gocap:mut
+	b := &x //gosree:mut
 	*b = 3
-	b = &y //gocap:rob // HIT(SAFE007)
+	b = &y //gosree:rob // HIT(SAFE007)
 	_ = *b
 }
 
 // iso on a method of a generic type moves the caller's argument.
 type Box[T any] struct{ v T }
 
-//gocap:iso j
+//gosree:iso j
 func (b *Box[T]) Put(j *Job) { _ = j }
 
 func genericCaller(b *Box[int]) {

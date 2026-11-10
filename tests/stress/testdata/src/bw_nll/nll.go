@@ -7,8 +7,8 @@ func use(p *int) { *p++ }
 // 1. control: two overlapping mutable borrows in straight-line code.
 func straightConflict() {
 	x := 0
-	b1 := &x //gocap:mut
-	b2 := &x //gocap:mut // HIT(BORROW002)
+	b1 := &x //gosree:mut
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	*b1 = 2
 }
@@ -20,10 +20,10 @@ func straightConflict() {
 // the top of the same block, reached only around the back edge, is never seen.
 func loopBackEdgeSameBlock(n int) {
 	x := 0
-	b1 := &x //gocap:mut
+	b1 := &x //gosree:mut
 	for i := 0; i < n; i++ {
 		*b1 = i
-		b2 := &x //gocap:mut // MISS(BORROW002): b1 is used on the next iteration, so it is live here; docs/BORROW_CHECKING_AND_NLL.md §3 defines Live(b) by any path to a use, back edges included
+		b2 := &x //gosree:mut // MISS(BORROW002): b1 is used on the next iteration, so it is live here; docs/BORROW_CHECKING_AND_NLL.md §3 defines Live(b) by any path to a use, back edges included
 		*b2 = i
 	}
 }
@@ -32,12 +32,12 @@ func loopBackEdgeSameBlock(n int) {
 // different basic block from b2's creation and the forward BFS reaches it through the header.
 func loopBackEdgeOtherBlock(n int) {
 	x := 0
-	b1 := &x //gocap:mut
+	b1 := &x //gosree:mut
 	for i := 0; i < n; i++ {
 		if i > 0 {
 			*b1 = i
 		}
-		b2 := &x //gocap:mut // HIT(BORROW002)
+		b2 := &x //gosree:mut // HIT(BORROW002)
 		*b2 = i
 	}
 }
@@ -46,7 +46,7 @@ func loopBackEdgeOtherBlock(n int) {
 // (b is read again on the next iteration).
 func loopOwnerWriteSameBlock(n int) {
 	x := 0
-	b := &x //gocap:rob
+	b := &x //gosree:rob
 	s := 0
 	for i := 0; i < n; i++ {
 		s += *b
@@ -59,7 +59,7 @@ func loopOwnerWriteSameBlock(n int) {
 // the owner write, so b is live there.
 func deferredClosure() {
 	x := 0
-	b := &x //gocap:mut
+	b := &x //gosree:mut
 	defer func() { *b = 1 }()
 	x = 2 // HIT(BORROW003)
 }
@@ -68,9 +68,9 @@ func deferredClosure() {
 // after the second borrow is a use of b.
 func closureCalledLater() {
 	x := 0
-	b1 := &x //gocap:mut
+	b1 := &x //gosree:mut
 	f := func() { *b1 = 1 }
-	b2 := &x //gocap:mut // HIT(BORROW002)
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 2
 	f()
 }
@@ -81,9 +81,9 @@ func run(f func()) { f() }
 
 func closurePassedDown() {
 	x := 0
-	b1 := &x //gocap:mut
+	b1 := &x //gosree:mut
 	f := func() { *b1 = 1 }
-	b2 := &x //gocap:mut // HIT(BORROW002)
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 2
 	run(f)
 }
@@ -92,9 +92,9 @@ func closurePassedDown() {
 // used after it. The second-order alias keeps b1 live.
 func pointerToBorrow() {
 	x := 0
-	b1 := &x //gocap:mut
+	b1 := &x //gosree:mut
 	pb := &b1
-	b2 := &x //gocap:mut // HIT(BORROW002)
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	**pb = 2
 }
@@ -103,11 +103,11 @@ func pointerToBorrow() {
 // alias tracker (assignments with an identifier LHS only) never sees. c then outlives b2.
 func storeLaunder() {
 	x := 0
-	b1 := &x //gocap:mut
+	b1 := &x //gosree:mut
 	var c *int
 	pc := &c
 	*pc = b1 // HIT(BORROW001)
-	b2 := &x //gocap:mut // MISS(BORROW002): c holds b1 (written through *pc) and is used below, so b1 is live; docs/BORROW_CHECKING_AND_NLL.md §3 counts "any value derived from it"
+	b2 := &x //gosree:mut // MISS(BORROW002): c holds b1 (written through *pc) and is used below, so b1 is live; docs/BORROW_CHECKING_AND_NLL.md §3 counts "any value derived from it"
 	*b2 = 1
 	*c = 2
 }
@@ -118,9 +118,9 @@ func identity(p *int) *int { return p }
 
 func throughIdentity() {
 	x := 0
-	b1 := &x //gocap:mut
+	b1 := &x //gosree:mut
 	q := identity(b1)
-	b2 := &x //gocap:mut // HIT(BORROW002)
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	*q = 2
 }
@@ -129,11 +129,11 @@ func throughIdentity() {
 // after it in control flow.
 func gotoLoop(n int) {
 	x := 0
-	b1 := &x //gocap:mut
+	b1 := &x //gosree:mut
 	i := 0
 again:
 	*b1 = i
-	b2 := &x //gocap:mut // MISS(BORROW002): the goto back edge reaches `*b1 = i` again, so b1 is live here (same same-block back-edge blind spot as loopBackEdgeSameBlock)
+	b2 := &x //gosree:mut // MISS(BORROW002): the goto back edge reaches `*b1 = i` again, so b1 is live here (same same-block back-edge blind spot as loopBackEdgeSameBlock)
 	*b2 = i
 	i++
 	if i < n {
@@ -149,7 +149,7 @@ func reborrowEachIteration(n int) {
 	x := 0
 	var b *int
 	for i := 0; i < n; i++ {
-		b = &x //gocap:mut // FP(BORROW002): b is written and last used within the same iteration; nothing is carried across the back edge or out of the loop
+		b = &x //gosree:mut // FP(BORROW002): b is written and last used within the same iteration; nothing is carried across the back edge or out of the loop
 		*b += i
 	}
 	x = 1
@@ -161,10 +161,10 @@ func reborrowEachIteration(n int) {
 // NLL accepts the twin (`let mut b = &mut x; *b = 1; b = &mut y; let c = &mut x; *c = 2; *b = 3;`).
 func reassignToOtherOwner() {
 	x, y := 0, 0
-	b := &x //gocap:mut
+	b := &x //gosree:mut
 	*b = 1
-	b = &y  //gocap:mut
-	c := &x //gocap:mut // FP(BORROW002): b now points at y; the loan on x died at the reassignment
+	b = &y  //gosree:mut
+	c := &x //gosree:mut // FP(BORROW002): b now points at y; the loan on x died at the reassignment
 	*c = 2
 	*b = 3
 }
@@ -172,9 +172,9 @@ func reassignToOtherOwner() {
 // 12. FP probe: sequential reuse after the last use, the case NLL exists for.
 func sequentialReuse() {
 	x := 0
-	b1 := &x //gocap:mut
+	b1 := &x //gosree:mut
 	*b1 = 1
-	b2 := &x //gocap:mut
+	b2 := &x //gosree:mut
 	*b2 = 2
 }
 
@@ -182,7 +182,7 @@ func sequentialReuse() {
 // second borrow in between. Reborrowing for a call is fine in Rust.
 func passDownThenUse() {
 	x := 0
-	b := &x //gocap:mut
+	b := &x //gosree:mut
 	use(b)
 	*b = 3
 }
@@ -190,10 +190,10 @@ func passDownThenUse() {
 // 14. FP probe: shared borrows read in a loop.
 func sharedInLoop(n int) int {
 	x := 5
-	r1 := &x //gocap:rob
+	r1 := &x //gosree:rob
 	s := 0
 	for i := 0; i < n; i++ {
-		r2 := &x //gocap:rob
+		r2 := &x //gosree:rob
 		s += *r1 + *r2
 	}
 	return s
@@ -203,12 +203,12 @@ func sharedInLoop(n int) int {
 // takes a fresh mutable borrow after the branch.
 func earlyReturn(fail bool) int {
 	x := 0
-	b := &x //gocap:mut
+	b := &x //gosree:mut
 	if fail {
 		*b = -1
 		return x
 	}
-	b2 := &x //gocap:mut
+	b2 := &x //gosree:mut
 	*b2 = 1
 	return x
 }

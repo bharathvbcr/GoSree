@@ -5,7 +5,7 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
-	"github.com/bharathvbcr/gocap/internal/kinds"
+	"github.com/bharathvbcr/gosree/internal/kinds"
 )
 
 // TestOverrideBudget turns the abandon criterion's cap on assumptions into a failing build.
@@ -19,7 +19,7 @@ func TestOverrideBudget(t *testing.T) {
 }
 
 // notInModule names packages call tables refer to that this module does not depend on: their entries
-// are checked only when gocap analyses a program that imports them.
+// are checked only when gosree analyses a program that imports them.
 var notInModule = map[string]bool{"golang.org/x/sync/errgroup": true}
 
 // TestCallTablesResolve loads every package a call table names on the current toolchain and checks

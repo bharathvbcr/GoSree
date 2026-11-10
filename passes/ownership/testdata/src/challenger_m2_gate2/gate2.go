@@ -8,7 +8,7 @@ type Packet struct {
 func selectMultiSendIsoAndBorrow(ch1 chan *Packet, ch2 chan *int) int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	select { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch1 <- p:
@@ -22,7 +22,7 @@ func selectMultiSendIsoAndBorrow(ch1 chan *Packet, ch2 chan *int) int {
 func selectMultiSendBorrowFirst(ch1 chan *int, ch2 chan *Packet) int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	select { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch1 <- b:
@@ -36,9 +36,9 @@ func selectMultiSendBorrowFirst(ch1 chan *int, ch2 chan *Packet) int {
 func selectTwoBorrows(ch1 chan *int, ch2 chan *int) {
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:mut
+	//gosree:mut
 	b2 := &y
 	select { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel` `CAP003: stack-scoped borrow 'b2' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch1 <- b1:
@@ -93,7 +93,7 @@ func sink(p *Packet, b *int) {}
 func goCallIsoAndBorrow() int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go sink(p, b) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 	p.ID = 20    // want `SAFE003: composite literal is used after it was passed to a goroutine`
@@ -106,9 +106,9 @@ func sink2(b1 *int, b2 *int) {}
 func goCallTwoBorrows() {
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:mut
+	//gosree:mut
 	b2 := &y
 	go sink2(b1, b2) // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement` `CAP003: stack-scoped borrow 'b2' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
@@ -117,7 +117,7 @@ func goCallTwoBorrows() {
 func multiSendSeparateLines(ch1 chan *Packet, ch2 chan *int) int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	ch2 <- b // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	ch1 <- p

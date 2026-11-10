@@ -1,6 +1,6 @@
 // Package rs_errors: Rust's Result is #[must_use]; ignoring it is a warning (an error under
 // deny(warnings)), and the value is reachable only through Ok, so it cannot be used on the error
-// path. Go returns (value, error) pairs, and nothing ties the value to the check. gocap has no
+// path. Go returns (value, error) pairs, and nothing ties the value to the check. gosree has no
 // rule for error handling. go vet's unusedresult covers a fixed list of pure functions
 // (fmt.Sprintf, errors.New, ...), not ignored errors; errcheck is third-party.
 package rs_errors

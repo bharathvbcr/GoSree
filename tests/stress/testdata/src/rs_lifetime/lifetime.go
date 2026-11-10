@@ -2,7 +2,7 @@
 // consumes the value, so a closed file, a dropped sender or a buffer handed back cannot be used
 // again. Go has a garbage collector, so these are not use-after-free of memory, but each is a use
 // after the value's logical end of life, and two of them (Scanner.Bytes, Buffer.Bytes) are real
-// dangling borrows: the bytes change under the holder. gocap has no rule for any of them outside
+// dangling borrows: the bytes change under the holder. gosree has no rule for any of them outside
 // goroutine transfers.
 package rs_lifetime
 

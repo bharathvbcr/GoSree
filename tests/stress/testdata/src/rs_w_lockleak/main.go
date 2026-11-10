@@ -2,7 +2,7 @@
 //
 // A lock leaked on an early return: Withdraw returns false still holding a.mu, and the next call
 // blocks forever. With no other goroutine alive the runtime reports the deadlock as a fatal error.
-// Rust's MutexGuard unlocks on every path. gocap's SAFE009 tracks a must-lockset over this
+// Rust's MutexGuard unlocks on every path. gosree's SAFE009 tracks a must-lockset over this
 // function for the guarded field, so it knows a.mu is held at the early return, and says nothing.
 package main
 

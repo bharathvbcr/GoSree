@@ -1,4 +1,4 @@
-//go:build gocap_off
+//go:build gosree_off
 
 package dx_buildtag
 

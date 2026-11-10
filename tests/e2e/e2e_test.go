@@ -12,10 +12,10 @@ import (
 	"golang.org/x/tools/go/analysis/analysistest"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
-	"github.com/bharathvbcr/gocap/passes/borrow"
-	"github.com/bharathvbcr/gocap/passes/ownership"
-	"github.com/bharathvbcr/gocap/passes/unsafeban"
+	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/passes/borrow"
+	"github.com/bharathvbcr/gosree/passes/ownership"
+	"github.com/bharathvbcr/gosree/passes/unsafeban"
 )
 
 // ActiveAnalyzers tracks the analyzers available in the current milestone.
@@ -37,7 +37,7 @@ var (
 
 	// compositeAnalyzer is initialized in Milestone 2 & 4 for multi-analyzer boundary/scenario suites.
 	compositeAnalyzer = &analysis.Analyzer{
-		Name: "gocap_composite",
+		Name: "gosree_composite",
 		Doc:  "composite analyzer running borrow and ownership passes for acceptance testing",
 		Requires: []*analysis.Analyzer{
 			annot.Analyzer,

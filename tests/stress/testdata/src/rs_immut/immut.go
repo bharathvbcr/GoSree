@@ -1,6 +1,6 @@
 // Package rs_immut: immutability by default. Rust bindings and statics are immutable unless
 // marked mut, and another crate cannot write a static at all without unsafe. Go package variables
-// are writable by every importer through their elements, entries and pointees. gocap's SAFE006
+// are writable by every importer through their elements, entries and pointees. gosree's SAFE006
 // is per package: it reports writes to a package's own variables, and its README says it "sees
 // direct writes only ... A write through a method of another package, or through a pointer that
 // escaped the package, does not" count.

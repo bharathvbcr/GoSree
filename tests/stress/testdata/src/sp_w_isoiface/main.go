@@ -1,6 +1,6 @@
 // WITNESS: race
 //
-// A method with a //gocap:iso parameter owns its argument and may start a goroutine with it. Called
+// A method with a //gosree:iso parameter owns its argument and may start a goroutine with it. Called
 // statically, the caller's argument moves (SAFE003 on reuse). Called through an interface it
 // satisfies, the call is an invoke with no summary (graph.call), the owned parameter is not seen,
 // and the caller keeps writing what the method's goroutine writes.
@@ -12,7 +12,7 @@ type Submitter interface{ Submit(j *Job) }
 
 type worker struct{ done chan struct{} }
 
-//gocap:iso j
+//gosree:iso j
 func (w worker) Submit(j *Job) {
 	go func() {
 		j.ID = 2

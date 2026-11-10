@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/bharathvbcr/gocap/internal/kinds"
+	"github.com/bharathvbcr/gosree/internal/kinds"
 )
 
 // FuncFact summarises how a function treats its arguments, so callers in other packages can check
@@ -36,7 +36,7 @@ type FuncFact struct {
 	Links []Link
 	// Acquires are the parameter mutexes the function returns holding (lockset.go).
 	Acquires []acquire
-	// Unknown: gocap could not analyse the function (it has no body, or depends on one that could
+	// Unknown: gosree could not analyse the function (it has no body, or depends on one that could
 	// not be), so Leaks and Writes are all set by assumption, not because it was seen to do either.
 	Unknown bool
 }
@@ -68,7 +68,7 @@ type summary struct {
 	// links are the parameters and results the function joins (FuncFact.Links).
 	links    []Link
 	acquires []acquire
-	// pessimistic marks a summary for a function gocap could not analyse.
+	// pessimistic marks a summary for a function gosree could not analyse.
 	pessimistic bool
 }
 
@@ -116,7 +116,7 @@ func (s *summary) isFreshResult(k int) bool {
 }
 
 // unavailable is the note diagnostics add when a callee's behaviour is assumed rather than known, so
-// a reader can tell a callee gocap could not analyse from one it saw retain or write.
+// a reader can tell a callee gosree could not analyse from one it saw retain or write.
 func (s *summary) unavailable() string {
 	if s.pessimistic {
 		return " (summary unavailable)"
@@ -152,7 +152,7 @@ func optimistic(fn *ssa.Function, st *state) *summary {
 	return s
 }
 
-// summary returns what gocap knows about calling fn.
+// summary returns what gosree knows about calling fn.
 func (st *state) summary(fn *ssa.Function) *summary {
 	if o := fn.Origin(); o != nil {
 		fn = o
@@ -199,7 +199,7 @@ func (st *state) summary(fn *ssa.Function) *summary {
 
 // atomicSummary is the summary of a sync/atomic function with n parameters and no summary (a
 // function without a Go body has none; see tables.go): it may keep
-// what it is given and its result is not fresh, as for any function gocap cannot see, but it writes
+// what it is given and its result is not fresh, as for any function gosree cannot see, but it writes
 // nothing a race check counts. A sync/atomic function with a summary keeps it, with its writes
 // cleared.
 func atomicSummary(n int) *summary {

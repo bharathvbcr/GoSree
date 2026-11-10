@@ -2,7 +2,7 @@
 //
 // Iterator invalidation in safe Go: a pointer into a slice survives an append that reallocates,
 // and the write through it lands in the old backing array. The update is lost silently. Rust's
-// borrow checker rejects `items.push(..)` while `p` borrows `items[0]`. gocap's borrow rules apply
+// borrow checker rejects `items.push(..)` while `p` borrows `items[0]`. gosree's borrow rules apply
 // only to annotated borrows, so it says nothing. The panic is this program's own assertion: the
 // language does not notice.
 package main

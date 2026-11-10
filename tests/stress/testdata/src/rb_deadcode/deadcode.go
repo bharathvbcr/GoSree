@@ -46,9 +46,9 @@ end:
 func deadBorrows() {
 	x := 1
 	return
-	//gocap:mut
+	//gosree:mut
 	p := &x
-	//gocap:rob
+	//gosree:rob
 	q := &x
 	*p = *q
 }
@@ -57,7 +57,7 @@ func deadUnsafe(ch chan *Job) {
 	j := &Job{}
 	ch <- j
 	panic("y")
-	//gocap:unsafe only in dead code
+	//gosree:unsafe only in dead code
 	j.ID = 2
 }
 

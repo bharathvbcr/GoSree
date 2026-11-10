@@ -11,7 +11,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/annot"
 )
 
 // Diagnostic Categories for Borrow Checking
@@ -1311,7 +1311,7 @@ func (bc *borrowChecker) checkOwnerMutation() {
 					checkClosureVar(argId)
 				}
 			}
-			// B2. Passing borrowed owner to an //gocap:iso parameter or passing pre-existing pointer alias to a non-rob function
+			// B2. Passing borrowed owner to an //gosree:iso parameter or passing pre-existing pointer alias to a non-rob function
 			if bc.ix.BorrowAt(stmt.Pos()) == annot.BorrowNone {
 				if funType := bc.pass.TypesInfo.TypeOf(stmt.Fun); funType != nil {
 					if sig, ok := funType.Underlying().(*types.Signature); ok && sig.Params() != nil {
@@ -1906,7 +1906,7 @@ func (bc *borrowChecker) checkLoopEscapes() {
 						}
 					}
 
-					// Case 2: RHS is a direct borrow expression (&x /*gocap:mut*/ or cap.BorrowMut(&x))
+					// Case 2: RHS is a direct borrow expression (&x /*gosree:mut*/ or cap.BorrowMut(&x))
 					candExpr := unwrapped
 					if call, ok := candExpr.(*ast.CallExpr); ok && len(call.Args) == 1 && bc.ix.BorrowAt(call.Pos()) != annot.BorrowNone {
 						candExpr = unparen(call.Args[0])

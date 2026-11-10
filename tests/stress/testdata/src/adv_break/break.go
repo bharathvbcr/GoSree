@@ -9,7 +9,7 @@ import (
 
 type Packet struct{ Data []byte }
 
-//gocap:imm
+//gosree:imm
 type FrozenCfg struct {
 	limit int
 	ports [2]int
@@ -36,13 +36,13 @@ func openPacket(ok bool) (*Packet, error) {
 // 1. Generic identity helpers (*T and unconstrained T) laundering a second-class borrow out of the frame.
 func genericBorrowEscape() *int {
 	x := 10
-	b := &x //gocap:mut
+	b := &x //gosree:mut
 	return idPtr(b) // HIT(BORROW001)
 }
 
 func genericUnconstrainedBorrowEscape() *int {
 	x := 20
-	b := &x //gocap:rob
+	b := &x //gosree:rob
 	return idVal(b) // HIT(BORROW001)
 }
 
@@ -50,7 +50,7 @@ func genericUnconstrainedBorrowEscape() *int {
 func subsliceAppendInvalidate() int {
 	s := make([]int, 2, 4)
 	sub := s[1:]
-	b := &sub[0]         //gocap:rob
+	b := &sub[0]         //gosree:rob
 	_ = append(s[:1], 9) // HIT(BORROW003)
 	return *b
 }

@@ -204,7 +204,7 @@ func marshal() {
 	})
 }
 
-// A callee gocap could not analyse may write anything it is given, and the finding says why. A
+// A callee gosree could not analyse may write anything it is given, and the finding says why. A
 // shareable argument (a mutex) is exempt even then.
 func unknownCallee() {
 	h := &Handler{}

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/bharathvbcr/gocap/internal/gusseterr"
+	"github.com/bharathvbcr/gosree/internal/gusseterr"
 )
 
 func TestSelfTestAndPanicFirewall(t *testing.T) {

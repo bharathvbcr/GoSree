@@ -3,7 +3,7 @@
 // A dangling borrow in safe Go: bufio.Scanner.Bytes returns a view into the scanner's buffer that
 // is valid only until the next Scan. Keeping it is a borrow that outlives what it borrows; the GC
 // keeps the memory alive, but the scanner moves the next line over it. Rust's lending API ties
-// the slice's lifetime to the scanner, so keeping it across the next call does not compile. gocap
+// the slice's lifetime to the scanner, so keeping it across the next call does not compile. gosree
 // has no rule for it. The panic is this program's own check of what it kept.
 //
 // The lines are 3000 bytes so the second Scan shifts unread data to the front of its 4 KiB

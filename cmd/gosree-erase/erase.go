@@ -14,10 +14,8 @@ import (
 )
 
 const (
-	capPath      = "github.com/bharathvbcr/gocap/cap"
-	rootPath     = "github.com/bharathvbcr/gocap"
-	sreeCapPath  = "github.com/bharathvbcr/gosree/cap"
-	sreeRootPath = "github.com/bharathvbcr/gosree"
+	capPath  = "github.com/bharathvbcr/gosree/cap"
+	rootPath = "github.com/bharathvbcr/gosree"
 )
 
 // markerTypes are the generic alias types of package cap: cap.Mut[T] = *T.
@@ -26,7 +24,7 @@ var markerTypes = map[string]bool{"Mut": true, "Mub": true, "Ref": true, "Rob": 
 // helperFuncs are the identity helpers of package cap.
 var helperFuncs = map[string]bool{"BorrowMut": true, "Borrow": true, "BorrowRef": true, "BorrowMub": true, "BorrowRob": true, "Move": true}
 
-// capImport is one import of package cap (or the gocap root path).
+// capImport is one import of package cap (or the gosree root path).
 type capImport struct {
 	spec  *ast.ImportSpec
 	path  string
@@ -62,9 +60,9 @@ type effConst struct {
 	values []ast.Expr
 }
 
-// Erase transforms gocap-annotated Go source into standard Go source.
+// Erase transforms gosree-annotated Go source into standard Go source.
 //
-// A file with no gocap content (no cap import and no directive comment) is
+// A file with no gosree content (no cap import and no directive comment) is
 // returned byte-for-byte. A construct that cannot be erased without changing
 // the program makes Erase fail with a description instead of guessing.
 func Erase(src []byte) ([]byte, error) {
@@ -141,17 +139,15 @@ func (e *eraser) problem(pos token.Pos, msg string, args ...any) {
 func (e *eraser) collectImports() {
 	for _, spec := range e.file.Imports {
 		path := strings.Trim(spec.Path.Value, "`\"")
-		if path != capPath && path != rootPath && path != sreeCapPath && path != sreeRootPath {
+		if path != capPath && path != rootPath {
 			continue
 		}
 		imp := capImport{spec: spec, path: path}
 		switch {
-		case spec.Name == nil && (path == capPath || path == sreeCapPath):
+		case spec.Name == nil && path == capPath:
 			imp.local = "cap"
-		case spec.Name == nil && path == sreeRootPath:
-			imp.local = "gosree"
 		case spec.Name == nil:
-			imp.local = "gocap"
+			imp.local = "gosree"
 		case spec.Name.Name == ".":
 			imp.dot = true
 		case spec.Name.Name == "_":

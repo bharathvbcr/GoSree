@@ -1,7 +1,7 @@
 // Package rs_generics: Rust's traits make equality and hashing static. A type without PartialEq
 // cannot be compared, one without Hash + Eq cannot be a map key, and a Box<dyn Any> must be
 // downcast through Option. Go's interfaces accept any dynamic type and check comparability at run
-// time, so == and map insertion panic. gocap has no rule; go vet has none.
+// time, so == and map insertion panic. gosree has no rule; go vet has none.
 package rs_generics
 
 // 1. == on interfaces holding slices panics (rs_w_ifaceeq runs it).

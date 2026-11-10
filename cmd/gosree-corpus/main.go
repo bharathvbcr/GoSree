@@ -1,6 +1,6 @@
-// Command gocap-corpus measures gocap on a body of code.
+// Command gosree-corpus measures gosree on a body of code.
 //
-// By default it runs gocap over the Go race detector's own test corpus
+// By default it runs gosree over the Go race detector's own test corpus
 // ($GOROOT/src/runtime/race/testdata) and reports how many TestRace* functions it flags and how many
 // TestNoRace* functions it leaves clean. The corpus is copied into <out>/racecorpus on every run and
 // never committed: it is GOROOT content, and copying it fresh ties the numbers to the installed Go
@@ -8,19 +8,19 @@
 // counted. It then measures a second copy, <out>/racecorpus-annotated, carrying the //safe:guarded_by
 // directives its lock-discipline tests would have (annotations.go), and reports both.
 //
-//	go run ./cmd/gocap-corpus -out build
+//	go run ./cmd/gosree-corpus -out build
 //
 // With -module it analyses the packages of any module instead and reports how often the
 // //safe:unsafe escape hatch was needed: suppressed transfers over all transfers, per package and in
 // total, with the findings that remain. The report goes to <out>/module-report.json.
 //
-//	go run ./cmd/gocap-corpus -module ~/src/service [-tests] [packages]
+//	go run ./cmd/gosree-corpus -module ~/src/service [-tests] [packages]
 //
 // A reference service is measured on an archived commit instead, optionally with a table of //safe
 // directives added to the archived copy, and -list writes every finding for diffing runs:
 //
-//	go run ./cmd/gocap-corpus -git ~/src/repo -rev <sha> -subdir backend/svc \
-//	    -annotate cmd/gocap-corpus/refservice/svc.tsv -list -out build/ref [-tests]
+//	go run ./cmd/gosree-corpus -git ~/src/repo -rev <sha> -subdir backend/svc \
+//	    -annotate cmd/gosree-corpus/refservice/svc.tsv -list -out build/ref [-tests]
 package main
 
 import (
@@ -46,9 +46,9 @@ import (
 	"golang.org/x/tools/go/analysis/checker"
 	"golang.org/x/tools/go/packages"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
-	"github.com/bharathvbcr/gocap/passes/ownership"
-	"github.com/bharathvbcr/gocap/passes/unsafeban"
+	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/passes/ownership"
+	"github.com/bharathvbcr/gosree/passes/unsafeban"
 )
 
 // Report is the machine-readable result, written to <out>/corpus-report.json.
@@ -65,7 +65,7 @@ type Report struct {
 // Side summarises one half of the corpus.
 type Side struct {
 	Total int `json:"total"`
-	// Flagged counts functions with at least one gocap diagnostic in the function or in a
+	// Flagged counts functions with at least one gosree diagnostic in the function or in a
 	// same-package function it references.
 	Flagged int `json:"flagged"`
 	// ByCategory counts functions per diagnostic category (a function can count in several).
@@ -139,7 +139,7 @@ func main() {
 	rep.Files = copied
 	rep.Skipped = skipped
 	path := writeJSON(*out, "corpus-report.json", rep)
-	printSummary("gocap race corpus", rep, path)
+	printSummary("gosree race corpus", rep, path)
 
 	// The same corpus with the //safe directives its lock-discipline tests would carry.
 	adst, err := filepath.Abs(filepath.Join(*out, "racecorpus-annotated"))
@@ -158,11 +158,11 @@ func main() {
 	arep.Annotations = len(corpusAnnotations)
 	apath := writeJSON(*out, "corpus-report-annotated.json", arep)
 	fmt.Println()
-	printSummary(fmt.Sprintf("gocap race corpus, annotated (%d directives)", len(corpusAnnotations)), arep, apath)
+	printSummary(fmt.Sprintf("gosree race corpus, annotated (%d directives)", len(corpusAnnotations)), arep, apath)
 	printAnnotated(rep, arep)
 }
 
-// measureCorpus loads the corpus copy in dir as a race build and scores gocap's findings on it.
+// measureCorpus loads the corpus copy in dir as a race build and scores gosree's findings on it.
 func measureCorpus(dir string) Report {
 	// The corpus calls runtime.RaceDisable, which only exists in race builds.
 	cfg := &packages.Config{Mode: packages.LoadAllSyntax, Tests: true, Dir: dir, BuildFlags: []string{"-race"}}
@@ -215,7 +215,7 @@ func printAnnotated(plain, annotated Report) {
 	}
 }
 
-// analyze runs every gocap analyzer on pkgs and returns the root actions, failing on any analyzer
+// analyze runs every gosree analyzer on pkgs and returns the root actions, failing on any analyzer
 // error: a pass that could not run must not look like a pass that found nothing.
 func analyze(pkgs []*packages.Package) []*checker.Action {
 	analyzers := []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer}

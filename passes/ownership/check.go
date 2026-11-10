@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/annot"
 )
 
 // checkTransfers checks every place a value crosses to another goroutine (or to an owned parameter):
@@ -690,7 +690,7 @@ func (st *state) identifyBorrow(g *graph, t transfer) (*types.Var, string, strin
 		}
 	}
 
-	// 4. Function/method call (cap.Move or owned //gocap:iso / cap.Iso parameter)
+	// 4. Function/method call (cap.Move or owned //gosree:iso / cap.Iso parameter)
 	if callIns, ok := t.instr.(*ssa.Call); ok {
 		var targetCall *ast.CallExpr
 		ast.Inspect(syntax, func(n ast.Node) bool {

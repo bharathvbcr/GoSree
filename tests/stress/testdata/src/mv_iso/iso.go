@@ -1,4 +1,4 @@
-// Package mv_iso probes //gocap:iso parameters. The two halves of the rule are checked in different
+// Package mv_iso probes //gosree:iso parameters. The two halves of the rule are checked in different
 // places: the iso callee treats the parameter as owned (buildGraph gives it no foreign event, so the
 // callee may move it on without SAFE002), while the caller treats the argument as moved only when
 // it can see the callee statically (graph.call: sum.isIso). Every call that reaches an iso callee
@@ -6,13 +6,13 @@
 // half, and the move is checked nowhere.
 package mv_iso
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 type Job struct{ ID int }
 
 var keep *Job // HIT(SAFE006)
 
-//gocap:iso j
+//gosree:iso j
 func take(j *Job) { go func() { j.ID++ }() }
 
 // control: a direct call to an iso parameter is a move.
@@ -34,7 +34,7 @@ type Sink interface{ Take(j *Job) }
 
 type S struct{}
 
-//gocap:iso j
+//gosree:iso j
 func (S) Take(j *Job) { go func() { j.ID++ }() }
 
 // iso through an interface method: the call is an escape, not a move (WITNESS mv_w_iso_iface).
@@ -72,7 +72,7 @@ func viaGeneric() {
 	j.ID = 1 // MISS(SAFE003): applyG calls take(j), which moves j to a goroutine
 }
 
-//gocap:iso j
+//gosree:iso j
 func stash(j *Job) { keep = j }
 
 // an iso parameter the callee stores in a global: the caller's use is a use after the move, and
@@ -83,7 +83,7 @@ func isoStash() {
 	j.ID = 1 // HIT(SAFE003)
 }
 
-//gocap:iso j
+//gosree:iso j
 func passThrough(j *Job) *Job { return j }
 
 // control: an iso callee that hands the value straight back. The caller owns the result again.

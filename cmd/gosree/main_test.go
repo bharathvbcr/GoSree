@@ -13,39 +13,39 @@ import (
 )
 
 var (
-	gocapBin  string
+	gosreeBin string
 	buildOnce sync.Once
 	buildErr  error
 )
 
-func getGocapBin(t *testing.T) string {
+func getGosreeBin(t *testing.T) string {
 	t.Helper()
 	buildOnce.Do(func() {
-		tmpDir, err := os.MkdirTemp("", "gocap-test-*")
+		tmpDir, err := os.MkdirTemp("", "gosree-test-*")
 		if err != nil {
 			buildErr = err
 			return
 		}
-		gocapBin = filepath.Join(tmpDir, "gocap")
-		cmd := exec.Command("go", "build", "-o", gocapBin, "github.com/bharathvbcr/gocap/cmd/gosree")
+		gosreeBin = filepath.Join(tmpDir, "gosree")
+		cmd := exec.Command("go", "build", "-o", gosreeBin, "github.com/bharathvbcr/gosree/cmd/gosree")
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			buildErr = fmt.Errorf("failed to build gocap: %v\nOutput: %s", err, string(out))
+			buildErr = fmt.Errorf("failed to build gosree: %v\nOutput: %s", err, string(out))
 		}
 	})
 	if buildErr != nil {
 		t.Fatalf("setup failed: %v", buildErr)
 	}
-	return gocapBin
+	return gosreeBin
 }
 
-// TestGocapFlags verifies that -flags returns JSON describing all registered analyzers.
-func TestGocapFlags(t *testing.T) {
-	bin := getGocapBin(t)
+// TestGosreeFlags verifies that -flags returns JSON describing all registered analyzers.
+func TestGosreeFlags(t *testing.T) {
+	bin := getGosreeBin(t)
 	cmd := exec.Command(bin, "-flags")
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("failed to run gocap -flags: %v", err)
+		t.Fatalf("failed to run gosree -flags: %v", err)
 	}
 
 	var flags []struct {
@@ -53,7 +53,7 @@ func TestGocapFlags(t *testing.T) {
 		Usage string `json:"Usage"`
 	}
 	if err := json.Unmarshal(out, &flags); err != nil {
-		t.Fatalf("invalid JSON from gocap -flags: %v\nOutput: %s", err, string(out))
+		t.Fatalf("invalid JSON from gosree -flags: %v\nOutput: %s", err, string(out))
 	}
 
 	expected := map[string]bool{
@@ -70,14 +70,14 @@ func TestGocapFlags(t *testing.T) {
 	}
 	for name, found := range expected {
 		if !found {
-			t.Errorf("expected analyzer flag -%s not found in gocap -flags output", name)
+			t.Errorf("expected analyzer flag -%s not found in gosree -flags output", name)
 		}
 	}
 }
 
-// TestGocapHelp verifies standard multichecker help output.
-func TestGocapHelp(t *testing.T) {
-	bin := getGocapBin(t)
+// TestGosreeHelp verifies standard multichecker help output.
+func TestGosreeHelp(t *testing.T) {
+	bin := getGosreeBin(t)
 	cmd := exec.Command(bin, "-help")
 	out, _ := cmd.CombinedOutput()
 	helpStr := string(out)
@@ -90,9 +90,9 @@ func TestGocapHelp(t *testing.T) {
 	}
 }
 
-// TestGocapSafeErrViolation verifies that gocap CLI reports ERR001-ERR005 from safeerr.
-func TestGocapSafeErrViolation(t *testing.T) {
-	bin := getGocapBin(t)
+// TestGosreeSafeErrViolation verifies that gosree CLI reports ERR001-ERR005 from safeerr.
+func TestGosreeSafeErrViolation(t *testing.T) {
+	bin := getGosreeBin(t)
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	errPkg := filepath.Join(repoRoot, "passes", "errcheck", "testdata", "src", "errbasic")
 
@@ -108,14 +108,14 @@ func TestGocapSafeErrViolation(t *testing.T) {
 	outStr := string(out)
 	for _, code := range []string{"ERR001", "ERR002", "ERR003", "ERR004", "ERR005"} {
 		if !strings.Contains(outStr, code) {
-			t.Errorf("expected %s in gocap CLI output, got:\n%s", code, outStr)
+			t.Errorf("expected %s in gosree CLI output, got:\n%s", code, outStr)
 		}
 	}
 }
 
-// TestGocapCleanPackage verifies that clean packages return exit code 0.
-func TestGocapCleanPackage(t *testing.T) {
-	bin := getGocapBin(t)
+// TestGosreeCleanPackage verifies that clean packages return exit code 0.
+func TestGosreeCleanPackage(t *testing.T) {
+	bin := getGosreeBin(t)
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	cleanPkg := filepath.Join(repoRoot, "tests", "e2e", "testdata", "src", "t1_valid")
 
@@ -129,9 +129,9 @@ func TestGocapCleanPackage(t *testing.T) {
 	}
 }
 
-// TestGocapDiagnosticsReport verifies exit code 3 and diagnostic emission on violations.
-func TestGocapDiagnosticsReport(t *testing.T) {
-	bin := getGocapBin(t)
+// TestGosreeDiagnosticsReport verifies exit code 3 and diagnostic emission on violations.
+func TestGosreeDiagnosticsReport(t *testing.T) {
+	bin := getGosreeBin(t)
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	violationPkg := filepath.Join(repoRoot, "passes", "borrow", "testdata", "src", "borrows")
 
@@ -155,9 +155,9 @@ func TestGocapDiagnosticsReport(t *testing.T) {
 	}
 }
 
-// TestGocapFlagDisabling verifies that -<analyzer>=false suppresses that pass's diagnostics.
-func TestGocapFlagDisabling(t *testing.T) {
-	bin := getGocapBin(t)
+// TestGosreeFlagDisabling verifies that -<analyzer>=false suppresses that pass's diagnostics.
+func TestGosreeFlagDisabling(t *testing.T) {
+	bin := getGosreeBin(t)
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	violationPkg := filepath.Join(repoRoot, "passes", "borrow", "testdata", "src", "borrows")
 
@@ -176,7 +176,7 @@ func TestGocapFlagDisabling(t *testing.T) {
 
 // TestGoVetIntegration verifies vettool execution via go vet.
 func TestGoVetIntegration(t *testing.T) {
-	bin := getGocapBin(t)
+	bin := getGosreeBin(t)
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	cleanPkg := filepath.Join(repoRoot, "tests", "e2e", "testdata", "src", "t1_valid")
 
@@ -187,9 +187,9 @@ func TestGoVetIntegration(t *testing.T) {
 	}
 }
 
-// TestGocapChallengerM4Coverage verifies that gocap CLI catches all BORROW001-004 categories on challenger_m4_coverage.
-func TestGocapChallengerM4Coverage(t *testing.T) {
-	bin := getGocapBin(t)
+// TestGosreeChallengerM4Coverage verifies that gosree CLI catches all BORROW001-004 categories on challenger_m4_coverage.
+func TestGosreeChallengerM4Coverage(t *testing.T) {
+	bin := getGosreeBin(t)
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	pkgPath := filepath.Join(repoRoot, "passes", "borrow", "testdata", "src", "challenger_m4_coverage")
 
@@ -213,9 +213,9 @@ func TestGocapChallengerM4Coverage(t *testing.T) {
 	}
 }
 
-// TestGocapUnsafebanViolation verifies that gocap CLI reports SAFE001 on unsafe packages.
-func TestGocapUnsafebanViolation(t *testing.T) {
-	bin := getGocapBin(t)
+// TestGosreeUnsafebanViolation verifies that gosree CLI reports SAFE001 on unsafe packages.
+func TestGosreeUnsafebanViolation(t *testing.T) {
+	bin := getGosreeBin(t)
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	unsafePkg := filepath.Join(repoRoot, "passes", "unsafeban", "testdata", "src", "u")
 
@@ -231,9 +231,9 @@ func TestGocapUnsafebanViolation(t *testing.T) {
 	}
 }
 
-// TestGocapMultiPackageInvocation verifies analyzing multiple packages in a single CLI run.
-func TestGocapMultiPackageInvocation(t *testing.T) {
-	bin := getGocapBin(t)
+// TestGosreeMultiPackageInvocation verifies analyzing multiple packages in a single CLI run.
+func TestGosreeMultiPackageInvocation(t *testing.T) {
+	bin := getGosreeBin(t)
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	cleanPkg := filepath.Join(repoRoot, "tests", "e2e", "testdata", "src", "t1_valid")
 	violationPkg := filepath.Join(repoRoot, "passes", "borrow", "testdata", "src", "borrows")
@@ -255,9 +255,9 @@ func TestGocapMultiPackageInvocation(t *testing.T) {
 	}
 }
 
-// TestGocapInvalidFlag verifies that an unrecognized flag returns a non-zero exit code and error.
-func TestGocapInvalidFlag(t *testing.T) {
-	bin := getGocapBin(t)
+// TestGosreeInvalidFlag verifies that an unrecognized flag returns a non-zero exit code and error.
+func TestGosreeInvalidFlag(t *testing.T) {
+	bin := getGosreeBin(t)
 	cmd := exec.Command(bin, "-nonexistentflag")
 	out, err := cmd.CombinedOutput()
 	if err == nil {

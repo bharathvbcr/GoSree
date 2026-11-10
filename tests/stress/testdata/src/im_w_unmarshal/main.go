@@ -15,7 +15,7 @@ type inner struct{ Port int }
 
 // Config is accepted as imm.
 //
-//gocap:imm
+//gosree:imm
 type Config struct { // MISS(SAFE005): the promoted exported field Port makes Config writable outside its package; only direct fields are checked for Exported()
 	inner
 }

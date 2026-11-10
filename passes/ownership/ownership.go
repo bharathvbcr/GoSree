@@ -29,9 +29,9 @@ import (
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
-	"github.com/bharathvbcr/gocap/internal/kinds"
-	"github.com/bharathvbcr/gocap/passes/unsafeban"
+	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/kinds"
+	"github.com/bharathvbcr/gosree/passes/unsafeban"
 )
 
 // Rule categories.

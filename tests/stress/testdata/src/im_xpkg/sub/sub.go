@@ -9,7 +9,7 @@ func (i *inner) SetPort(p int) { i.Port = p }
 // Config passes the imm shape check (its only field, inner, is unexported and pointer-free), yet
 // other packages can name and write Config.Port through the promotion.
 //
-//gocap:imm
+//gosree:imm
 type Config struct { // MISS(SAFE005): Port is promoted from the unexported embedded inner, so other packages and encoding/json can write it; immShapeProblem checks only direct fields for Exported() (witness: im_w_unmarshal)
 	inner
 }

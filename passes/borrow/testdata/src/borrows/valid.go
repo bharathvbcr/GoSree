@@ -1,7 +1,7 @@
 package borrows
 
 // TC-VALID-01: Valid borrow parameter passing without lifetime annotations
-//gocap:mut p
+//gosree:mut p
 func bump(p *int) {
 	*p++
 }
@@ -14,24 +14,24 @@ func testValidBorrowPassing() {
 // TC-VALID-02: Non-Lexical Lifetime (NLL) sequential expiry
 func testNonLexicalLifetimeExpiry() {
 	x := 1
-	b1 := &x /*gocap:mut*/
+	b1 := &x /*gosree:mut*/
 	*b1 = 2 // b1's last use; borrow ends immediately here
-	b2 := &x /*gocap:mut*/
+	b2 := &x /*gosree:mut*/
 	*b2 = 3 // b2 validly borrows x because b1 is dead
 }
 
 // TC-VALID-03: Multiple concurrent read-only borrows
 func testMultiReadBorrowAllow() {
 	x := 1
-	r1 := &x /*gocap:rob*/
-	r2 := &x /*gocap:rob*/
+	r1 := &x /*gosree:rob*/
+	r2 := &x /*gosree:rob*/
 	println(*r1 + *r2) // both active simultaneously without conflict
 }
 
 // Valid owner mutation after borrow expired
 func testOwnerMutationAfterDrop() {
 	x := 1
-	r := &x /*gocap:rob*/
+	r := &x /*gosree:rob*/
 	println(*r) // last use of r
 	x = 2       // valid: r is dead at this point
 }
@@ -40,7 +40,7 @@ func testOwnerMutationAfterDrop() {
 func testLoopBorrow() {
 	x := 0
 	for i := 0; i < 5; i++ {
-		b := &x /*gocap:mut*/
+		b := &x /*gosree:mut*/
 		*b += i // b dies at end of each iteration; next iteration is clean
 	}
 }
@@ -49,16 +49,16 @@ func testLoopBorrow() {
 func testBranchLocalBorrow(cond bool) {
 	x := 1
 	if cond {
-		b := &x /*gocap:mut*/
+		b := &x /*gosree:mut*/
 		*b = 10
 	} else {
-		b2 := &x /*gocap:mut*/
+		b2 := &x /*gosree:mut*/
 		*b2 = 20
 	}
 }
 
 // Read-only borrow parameter passing
-//gocap:rob p
+//gosree:rob p
 func readVal(p *int) int {
 	return *p
 }

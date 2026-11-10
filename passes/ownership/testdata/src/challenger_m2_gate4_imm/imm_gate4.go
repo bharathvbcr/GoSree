@@ -1,12 +1,12 @@
 package challenger_m2_gate4_imm
 
-//gocap:imm
+//gosree:imm
 type SubConfig struct { // want SubConfig:"imm"
 	value int
 	desc  string
 }
 
-//gocap:imm
+//gosree:imm
 type HostConfig struct { // want HostConfig:"imm"
 	sub  *SubConfig
 	rate int
@@ -28,7 +28,7 @@ func readNestedFieldImmBorrow(h *HostConfig) int {
 
 // 1.2 Mutable borrow of nested field of immutable struct must be rejected
 func mutBorrowNestedFieldImm(h *HostConfig) {
-	//gocap:mut
+	//gosree:mut
 	m := &h.sub.value // want `SAFE005: cannot borrow field of immutable type SubConfig as mutable`
 	_ = m
 }
@@ -51,7 +51,7 @@ func overwriteImm(h *HostConfig) {
 
 // 1.6 Stack-scoped read-only borrow of nested field cannot escape into a goroutine
 func nestedFieldBorrowEscape(h *HostConfig) {
-	//gocap:rob
+	//gosree:rob
 	r := &h.sub.value
 	go func() { // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		_ = *r
@@ -73,7 +73,7 @@ func directPointerBindingShare(cfg *HostConfig) int {
 
 // 2.2 Direct pointer binding marked as \rob cannot escape into a goroutine
 func directPointerBindingRobEscape(cfg *HostConfig) {
-	//gocap:rob
+	//gosree:rob
 	b := cfg
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		_ = b.rate
@@ -82,7 +82,7 @@ func directPointerBindingRobEscape(cfg *HostConfig) {
 
 // 2.3 Direct pointer binding marked as \mut on immutable type must be rejected
 func directPointerBindingMutReject(cfg *HostConfig) {
-	//gocap:mut
+	//gosree:mut
 	b := cfg // want `SAFE005: cannot borrow immutable type HostConfig as mutable`
 	_ = b
 }
@@ -109,7 +109,7 @@ func runMethodAsGoroutine(h *HostConfig) {
 }
 
 // 3.3 Normal struct method receiver marked as \rob cannot escape into a goroutine
-//gocap:rob h
+//gosree:rob h
 func (h *NormalData) escapeRobReceiver() {
 	go func() { // want `CAP003: stack-scoped borrow 'h' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		_ = h.count
@@ -117,7 +117,7 @@ func (h *NormalData) escapeRobReceiver() {
 }
 
 // 3.4 Normal struct method receiver marked as \mub cannot escape into a goroutine
-//gocap:mub h
+//gosree:mub h
 func (h *NormalData) escapeMubReceiver() {
 	go func() { // want `CAP003: stack-scoped borrow 'h' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		h.count = 100
@@ -129,7 +129,7 @@ func (h *NormalData) read() int {
 }
 
 // 3.5 Method receiver marked as \rob passed to go call
-//gocap:rob h
+//gosree:rob h
 func (h *NormalData) escapeRobReceiverMethodGo() {
 	go h.read() // want `CAP003: stack-scoped borrow 'h' \(\\rob\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
@@ -157,7 +157,7 @@ func captureImmAndUnowned(cfg *HostConfig, p *NormalData) {
 // 4.3 Closure capturing immutable value and stack-scoped borrow: CAP003 only on borrow
 func captureImmAndBorrow(cfg *HostConfig) int {
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		_ = cfg.rate + *b
@@ -170,7 +170,7 @@ func captureImmAndBorrow(cfg *HostConfig) int {
 func captureImmIsoAndBorrow(cfg *HostConfig) int {
 	isoP := &NormalData{count: 1}
 	x := 42
-	//gocap:rob
+	//gosree:rob
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		_ = cfg.rate + *b
@@ -195,23 +195,23 @@ func fanOutImm(cfg *HostConfig) {
 
 // 4.6 Sending a stack-scoped borrow of an immutable field on a channel must be rejected
 func sendImmBorrowOnChannel(cfg *HostConfig, ch chan *int) {
-	//gocap:rob
+	//gosree:rob
 	b := &cfg.sub.value
 	ch <- b // want `CAP003: stack-scoped borrow 'b' \(\\rob\) cannot cross goroutine boundary: cannot be sent on a channel`
 }
 
 // 4.7 Multi-level nested immutable struct mutable borrow
-//gocap:imm
+//gosree:imm
 type Level3 struct { // want Level3:"imm"
 	val int
 }
 
-//gocap:imm
+//gosree:imm
 type Level2 struct { // want Level2:"imm"
 	l3 *Level3
 }
 
-//gocap:imm
+//gosree:imm
 type Level1 struct { // want Level1:"imm"
 	l2 *Level2
 }
@@ -219,7 +219,7 @@ type Level1 struct { // want Level1:"imm"
 // 4.8 Closure capturing immutable borrow and \iso variable with use-after-move
 func captureImmFieldRobAndIso(h *HostConfig) int {
 	p := &NormalData{count: 10}
-	//gocap:rob
+	//gosree:rob
 	r := &h.sub.value
 	go func() { // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		p.count = *r
@@ -233,9 +233,9 @@ func captureImmMultiBorrowsIso(h *HostConfig) int {
 	p := &NormalData{count: 10}
 	x := 1
 	y := 2
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	go func() { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		p.count = *b1 + *b2 + h.rate
@@ -245,31 +245,31 @@ func captureImmMultiBorrowsIso(h *HostConfig) int {
 }
 
 // 4.10 Immutable method taking borrow argument called via go statement
-//gocap:mut b
+//gosree:mut b
 func (h *HostConfig) mutateWithBorrow(b *int) {
 	*b = h.rate
 }
 
 func callImmMethodWithBorrowGo(h *HostConfig) {
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go h.mutateWithBorrow(b) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
 
-// 4.11 Rejection of non-immutable types annotated with //gocap:imm
-//gocap:imm
-type BadImm struct { // want `SAFE005: //gocap:imm type BadImm is not immutable: field ptr has type \*int`
+// 4.11 Rejection of non-immutable types annotated with //gosree:imm
+//gosree:imm
+type BadImm struct { // want `SAFE005: //gosree:imm type BadImm is not immutable: field ptr has type \*int`
 	ptr *int
 }
 
-//gocap:imm
-type BadSlice struct { // want `SAFE005: //gocap:imm type BadSlice is not immutable: field items has type \[\]int`
+//gosree:imm
+type BadSlice struct { // want `SAFE005: //gosree:imm type BadSlice is not immutable: field items has type \[\]int`
 	items []int
 }
 
-//gocap:imm
-type BadMap struct { // want `SAFE005: //gocap:imm type BadMap is not immutable: field table has type map\[string\]int`
+//gosree:imm
+type BadMap struct { // want `SAFE005: //gosree:imm type BadMap is not immutable: field table has type map\[string\]int`
 	table map[string]int
 }
 

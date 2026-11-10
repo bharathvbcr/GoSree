@@ -2,7 +2,7 @@ package challenger_m2_gate4
 
 import "sync"
 
-//gocap:imm
+//gosree:imm
 type Config struct { // want Config:"imm"
 	maxWorkers int
 	timeout    int
@@ -16,7 +16,7 @@ type Packet struct {
 func closureIsoBorrowSubsequentRead() int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		p.ID = *b
@@ -29,7 +29,7 @@ func closureIsoBorrowSubsequentRead() int {
 func closureIsoBorrowSubsequentWrite() {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		p.ID = *b
@@ -41,7 +41,7 @@ func closureIsoBorrowSubsequentWrite() {
 func closureIsoBorrowSubsequentWriteAndRead() int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:rob
+	//gosree:rob
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		p.ID = *b
@@ -54,9 +54,9 @@ func closureIsoBorrowSubsequentWriteAndRead() int {
 func closureMultipleDistinctBorrows() {
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	go func() { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		_ = *b1
@@ -69,9 +69,9 @@ func closureMultipleDistinctBorrows() {
 func closureMultipleOccurrencesSameBorrow() {
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	go func() { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		sum := *b1 + *b1 + *b1
@@ -85,11 +85,11 @@ func closureThreeBorrowsMixed() {
 	x := 1
 	y := 2
 	z := 3
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
-	//gocap:mut
+	//gosree:mut
 	b3 := &z
 	go func() { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b3' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		_ = *b1 + *b2 + *b3
@@ -101,9 +101,9 @@ func closureIsoAndMultipleBorrowsReadWrite() int {
 	p := &Packet{ID: 10}
 	x := 100
 	y := 200
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	go func() { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		p.ID = *b1 + *b2
@@ -119,9 +119,9 @@ func closureMultipleIsoAndMultipleBorrows() int {
 	p2 := &Packet{ID: 2}
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	go func() { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		p1.ID = *b1
@@ -136,9 +136,9 @@ func closureMultipleIsoAndMultipleBorrows() int {
 func variableBoundClosureMultipleBorrows() {
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	fn := func() {
 		_ = *b1 + *b2
@@ -151,9 +151,9 @@ func variableBoundClosureIsoAndBorrows() int {
 	p := &Packet{ID: 10}
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	fn := func() {
 		p.ID = *b1 + *b2
@@ -168,7 +168,7 @@ func variableBoundClosureIsoAndBorrows() int {
 func closureCaptureIsoNoSubsequentUse() {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		p.ID = *b
@@ -180,7 +180,7 @@ func closureCaptureIsoNoSubsequentUse() {
 // Expected: CAP003 on borrow, NO diagnostic on immConfig since \imm is shareable.
 func closureCaptureImmAndBorrow(cfg *Config) int {
 	x := 100
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		_ = cfg.maxWorkers + *b
@@ -191,7 +191,7 @@ func closureCaptureImmAndBorrow(cfg *Config) int {
 // 13. Closure with nested function literal capturing borrow
 func closureNestedFuncLitCaptureBorrow() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		inner := func() int {
@@ -209,7 +209,7 @@ func resetPacket(p *Packet) {
 func closureIsoBorrowWithDeferredUse() {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	defer resetPacket(p) // want `SAFE003: this deferred call uses variable p, which runs when the function returns, after it was captured by a goroutine`
 	go func() {          // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
@@ -222,7 +222,7 @@ func closureIsoBorrowJoinedWithWaitGroup() int {
 	var wg sync.WaitGroup
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	wg.Add(1)
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
@@ -238,7 +238,7 @@ func closureIsoBorrowUsedBeforeJoin() int {
 	var wg sync.WaitGroup
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	wg.Add(1)
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
@@ -254,9 +254,9 @@ func closureIsoBorrowUsedBeforeJoin() int {
 func closureBranchingBorrows(cond bool) {
 	x := 1
 	y := 2
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	go func() { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		if cond {
@@ -270,7 +270,7 @@ func closureBranchingBorrows(cond bool) {
 // 18. Closure in loop capturing borrow declared outside the loop
 func closureInLoopCapturingOuterBorrow() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	for i := 0; i < 3; i++ {
 		p := &Packet{ID: i}
@@ -285,7 +285,7 @@ func closureInLoopCapturingOuterBorrow() {
 func closureInLoopCapturingInnerBorrow() {
 	for i := 0; i < 3; i++ {
 		x := i
-		//gocap:mut
+		//gosree:mut
 		b := &x
 		p := &Packet{ID: i}
 		go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
@@ -300,11 +300,11 @@ func closureSwitchBorrows(val int) {
 	x := 10
 	y := 20
 	z := 30
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
-	//gocap:mut
+	//gosree:mut
 	b3 := &z
 	go func() { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b3' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		switch val {

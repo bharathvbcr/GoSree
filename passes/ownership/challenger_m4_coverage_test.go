@@ -5,7 +5,7 @@ import (
 
 	"golang.org/x/tools/go/analysis/analysistest"
 
-	"github.com/bharathvbcr/gocap/passes/ownership"
+	"github.com/bharathvbcr/gosree/passes/ownership"
 )
 
 // TestChallengerM4AdversarialCoverage executes white-box adversarial coverage hardening

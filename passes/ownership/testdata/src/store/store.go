@@ -44,7 +44,7 @@ func (s *Store) Get(k string) int { // want Get:"ownership summary"
 	return s.data[k]
 }
 
-// Touch only locks and unlocks: a mutex is shareable, so calls on it write nothing gocap tracks.
+// Touch only locks and unlocks: a mutex is shareable, so calls on it write nothing gosree tracks.
 func (s *Store) Touch() { // want Touch:"ownership summary"
 	s.mu.Lock()
 	s.mu.Unlock()

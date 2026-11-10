@@ -14,8 +14,8 @@ type Outer struct {
 // 1. control: two mutable borrows of the same field.
 func sameField() {
 	var s Pair
-	b1 := &s.A //gocap:mut
-	b2 := &s.A //gocap:mut // HIT(BORROW002)
+	b1 := &s.A //gosree:mut
+	b2 := &s.A //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	*b1 = 2
 }
@@ -24,8 +24,8 @@ func sameField() {
 // checker tracks places, not variables); the two pointers can never alias.
 func disjointFields() {
 	var s Pair
-	a := &s.A //gocap:mut
-	b := &s.B //gocap:mut // FP(BORROW002): s.A and s.B are disjoint places; ownership is keyed on the root variable s, so any two field borrows of s conflict
+	a := &s.A //gosree:mut
+	b := &s.B //gosree:mut // FP(BORROW002): s.A and s.B are disjoint places; ownership is keyed on the root variable s, so any two field borrows of s conflict
 	*a = 1
 	*b = 2
 	*a = 3
@@ -34,16 +34,16 @@ func disjointFields() {
 // 3. control: the whole struct against one of its fields must conflict.
 func wholeVsField() {
 	var s Pair
-	w := &s   //gocap:mut
-	f := &s.A //gocap:mut // HIT(BORROW002)
+	w := &s   //gosree:mut
+	f := &s.A //gosree:mut // HIT(BORROW002)
 	*f = 1
 	w.B = 2
 }
 
 // 4. two different fresh allocations: distinct composite literals have distinct synthetic owners.
 func freshAllocations() {
-	a := &Pair{} //gocap:mut
-	b := &Pair{} //gocap:mut
+	a := &Pair{} //gosree:mut
+	b := &Pair{} //gosree:mut
 	a.A = 1
 	b.A = 2
 	a.B = 3
@@ -51,8 +51,8 @@ func freshAllocations() {
 
 // 5. two borrows through two different pointer parameters, written as `&(*p).A` / `&(*q).A`.
 func derefDifferentPointers(p, q *Pair) {
-	a := &(*p).A //gocap:mut
-	b := &(*q).A //gocap:mut
+	a := &(*p).A //gosree:mut
+	b := &(*q).A //gosree:mut
 	*a = 1
 	*b = 2
 	*a = 3
@@ -60,8 +60,8 @@ func derefDifferentPointers(p, q *Pair) {
 
 // 5b. control for 5: the same borrows written without the explicit deref are told apart.
 func derefControl(p, q *Pair) {
-	a := &p.A //gocap:mut
-	b := &q.A //gocap:mut
+	a := &p.A //gosree:mut
+	b := &q.A //gosree:mut
 	*a = 1
 	*b = 2
 	*a = 3
@@ -70,8 +70,8 @@ func derefControl(p, q *Pair) {
 // 5c. a fresh allocation does not collide with an unrelated local named x.
 func defaultNameCollides() {
 	x := 0
-	a := &x      //gocap:mut
-	b := &Pair{} //gocap:mut
+	a := &x      //gosree:mut
+	b := &Pair{} //gosree:mut
 	b.A = 1
 	*a = 2
 }
@@ -79,8 +79,8 @@ func defaultNameCollides() {
 // 5d. control for 5c: the same code with the local renamed.
 func defaultNameRenamed() {
 	y := 0
-	a := &y      //gocap:mut
-	b := &Pair{} //gocap:mut
+	a := &y      //gosree:mut
+	b := &Pair{} //gosree:mut
 	b.A = 1
 	*a = 2
 }
@@ -90,8 +90,8 @@ func aliasBeforeBorrow() {
 	x := 0
 	p := &x
 	q := p
-	b1 := p //gocap:mut
-	b2 := q //gocap:mut // HIT(BORROW002): q == p == &x, so b1 and b2 are two live mutable borrows of x
+	b1 := p //gosree:mut
+	b2 := q //gosree:mut // HIT(BORROW002): q == p == &x, so b1 and b2 are two live mutable borrows of x
 	*b2 = 1
 	*b1 = 2
 }
@@ -100,8 +100,8 @@ func aliasBeforeBorrow() {
 func aliasDirect() {
 	x := 0
 	p := &x
-	b1 := p  //gocap:mut
-	b2 := &x //gocap:mut // HIT(BORROW002)
+	b1 := p  //gosree:mut
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	*b1 = 2
 }
@@ -109,7 +109,7 @@ func aliasDirect() {
 // 8. two parameters that alias at the call site: the callee cannot know, so the caller must not
 // pass the same object twice as \mub. The callee holds two "exclusive" borrows of one int.
 //
-//gocap:mub a, b
+//gosree:mub a, b
 func addTo(a, b *int) {
 	*a += 1
 	*b += 1
@@ -124,8 +124,8 @@ func callerAliases() {
 func nestedPath() {
 	var o Outer
 	in := &o.In
-	b1 := &in.A   //gocap:mut
-	b2 := &o.In.A //gocap:mut // HIT(BORROW002): in == &o.In, so b1 and b2 both point at o.In.A
+	b1 := &in.A   //gosree:mut
+	b2 := &o.In.A //gosree:mut // HIT(BORROW002): in == &o.In, so b1 and b2 both point at o.In.A
 	*b2 = 1
 	*b1 = 2
 }
@@ -133,8 +133,8 @@ func nestedPath() {
 // 10. array element against the whole array.
 func arrayElemVsWhole() {
 	var arr [4]int
-	e := &arr[0] //gocap:mut
-	w := &arr    //gocap:mut // HIT(BORROW002)
+	e := &arr[0] //gosree:mut
+	w := &arr    //gosree:mut // HIT(BORROW002)
 	w[1] = 1
 	*e = 2
 }
@@ -143,8 +143,8 @@ func arrayElemVsWhole() {
 // answer too. Recorded as a lock.
 func arrayDistinctElems() {
 	var arr [4]int
-	e0 := &arr[0] //gocap:mut
-	e1 := &arr[1] //gocap:mut // HIT(BORROW002)
+	e0 := &arr[0] //gosree:mut
+	e1 := &arr[1] //gosree:mut // HIT(BORROW002)
 	*e1 = 1
 	*e0 = 2
 }
@@ -152,8 +152,8 @@ func arrayDistinctElems() {
 // 12. a sub-slice sharing the backing array: t is s[1:], and &t[0] is &s[1].
 func subSliceShares(s []int) {
 	t := s[1:]
-	b1 := &s[1] //gocap:mut
-	b2 := &t[0] //gocap:mut // HIT(BORROW002): t[0] and s[1] are the same element of one backing array
+	b1 := &s[1] //gosree:mut
+	b2 := &t[0] //gosree:mut // HIT(BORROW002): t[0] and s[1] are the same element of one backing array
 	*b2 = 1
 	*b1 = 2
 }
@@ -163,8 +163,8 @@ type IntPtr *int
 
 func namedPointerConversion() {
 	x := 0
-	b1 := &x         //gocap:mut
-	b2 := IntPtr(&x) //gocap:mut // HIT(BORROW002)
+	b1 := &x         //gosree:mut
+	b2 := IntPtr(&x) //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	*b1 = 2
 }
@@ -173,8 +173,8 @@ func namedPointerConversion() {
 func behindInterface(i any) {
 	p := i.(*Pair)
 	q := i.(*Pair)
-	b1 := &p.A //gocap:mut
-	b2 := &q.A //gocap:mut // HIT(BORROW002): p and q are the same *Pair, unboxed twice from i
+	b1 := &p.A //gosree:mut
+	b2 := &q.A //gosree:mut // HIT(BORROW002): p and q are the same *Pair, unboxed twice from i
 	*b2 = 1
 	*b1 = 2
 }

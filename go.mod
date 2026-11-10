@@ -1,4 +1,4 @@
-module github.com/bharathvbcr/gocap
+module github.com/bharathvbcr/gosree
 
 go 1.27
 

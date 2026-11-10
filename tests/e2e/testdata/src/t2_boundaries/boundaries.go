@@ -11,7 +11,7 @@ type EmptyStruct struct{}
 
 func EmptyStructBorrow() {
 	e := EmptyStruct{}
-	//gocap:mut
+	//gosree:mut
 	b := &e
 	_ = b
 }
@@ -19,7 +19,7 @@ func EmptyStructBorrow() {
 // TC-T2-1.2: Zero-length array borrow
 func ZeroLengthArrayBorrow() {
 	var arr [0]int
-	//gocap:rob
+	//gosree:rob
 	r := &arr
 	_ = len(*r)
 }
@@ -27,7 +27,7 @@ func ZeroLengthArrayBorrow() {
 // TC-T2-1.3: Nil pointer assigned to borrow binding
 func NilPointerBorrow() {
 	var p *int = nil
-	//gocap:rob
+	//gosree:rob
 	r := p
 	_ = r
 }
@@ -54,7 +54,7 @@ func EmptyWaitGroup() {
 func LoopLocalBorrow() {
 	for i := 0; i < 5; i++ {
 		x := i
-		//gocap:mut
+		//gosree:mut
 		b := &x
 		*b = x + 1
 	}
@@ -65,7 +65,7 @@ func LoopCarriedBorrowEscape() {
 	var outer *int
 	for i := 0; i < 5; i++ {
 		x := i
-		//gocap:mut
+		//gosree:mut
 		b := &x
 		outer = b // want `BORROW002: cannot borrow 'x' as mutable`
 	}
@@ -76,7 +76,7 @@ func LoopCarriedBorrowEscape() {
 func NestedLoopConflict() {
 	x := 10
 	for i := 0; i < 3; i++ {
-		//gocap:rob
+		//gosree:rob
 		r := &x
 		for j := 0; j < 3; j++ {
 			x = i + j // want `BORROW003: cannot assign to 'x' because it is borrowed`
@@ -101,7 +101,7 @@ func LoopBreakContinueBorrow() int {
 			continue
 		}
 		x := i * 2
-		//gocap:mut
+		//gosree:mut
 		b := &x
 		*b += 1
 		sum += *b
@@ -117,14 +117,14 @@ func LoopBreakContinueBorrow() int {
 // =========================================================================
 
 // TC-T2-3.1: defer extending borrow lifetime across entire function
-//gocap:mut p
+//gosree:mut p
 func DeferExtendsBorrow(p *int) {
 	*p = 100
 }
 
 func DeferBorrowCall() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	defer DeferExtendsBorrow(b)
 	// Between defer and return, b is active
@@ -133,7 +133,7 @@ func DeferBorrowCall() {
 // TC-T2-3.2: Mutation of owner between defer borrow and return rejected (BORROW003)
 func DeferOwnerConflict() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	defer DeferExtendsBorrow(b)
 	x = 20 // want `BORROW003: cannot assign to 'x' because it is borrowed`
@@ -168,7 +168,7 @@ func PanicRecoverBoundary() (recovered bool) {
 		}
 	}()
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	if *b == 10 {
 		panic("expected")
@@ -184,13 +184,13 @@ func PanicRecoverBoundary() (recovered bool) {
 func BranchingBorrowLifetimes(cond bool) int {
 	x := 10
 	if cond {
-		//gocap:mut
+		//gosree:mut
 		b := &x
 		*b = 20
 		return *b
 	} else {
 		// Valid: b is dead on false branch!
-		//gocap:mut
+		//gosree:mut
 		b2 := &x
 		*b2 = 30
 		return *b2
@@ -203,7 +203,7 @@ func EarlyReturnBorrow(val int) int {
 	if x < 0 {
 		return 0
 	}
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	*b *= 2
 	return *b
@@ -214,12 +214,12 @@ func SwitchCaseBorrows(mode int) int {
 	x := 100
 	switch mode {
 	case 1:
-		//gocap:mut
+		//gosree:mut
 		b := &x
 		*b += 10
 		return *b
 	case 2:
-		//gocap:rob
+		//gosree:rob
 		r := &x
 		return *r
 	default:
@@ -240,7 +240,7 @@ func SelectIsoSend(ch chan *EmptyStruct) {
 // TC-T2-4.5: Multiple return values (borrow and error)
 func MultiReturnBorrow(input int) (int, error) {
 	x := input
-	//gocap:rob
+	//gosree:rob
 	r := &x
 	return *r, nil
 }
@@ -252,18 +252,18 @@ func MultiReturnBorrow(input int) (int, error) {
 // TC-T2-5.1: Boxing second-class borrow into interface rejected (BORROW001)
 func InterfaceConversionReject() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	var i any = b // want `BORROW001: struct field or interface cannot box second-class borrow`
 	_ = i
 }
 
-// TC-T2-5.2: Method receiver with //gocap:mut receiver directive
+// TC-T2-5.2: Method receiver with //gosree:mut receiver directive
 type Counter struct {
 	Count int
 }
 
-//gocap:mut c
+//gosree:mut c
 func (c *Counter) Increment() {
 	c.Count++
 }
@@ -277,7 +277,7 @@ func CallMethodReceiver() int {
 // TC-T2-5.3: Slice element borrowing conservatively borrows entire slice
 func SliceElementBorrow() {
 	s := []int{1, 2, 3}
-	//gocap:rob
+	//gosree:rob
 	r := &s[0]
 	_ = r
 }
@@ -285,9 +285,9 @@ func SliceElementBorrow() {
 // TC-T2-5.4: Multi-variable simultaneous assignment
 func MultiVarSimultaneousAssign() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	m1 := &x
-	//gocap:mut
+	//gosree:mut
 	m2 := &x // want `BORROW002: cannot borrow 'x' as mutable more than once at a time`
 	*m1 = 20
 	*m2 = 30
@@ -296,7 +296,7 @@ func MultiVarSimultaneousAssign() {
 // TC-T2-5.5: Struct field access through borrow pointer
 func StructFieldThroughBorrow() int {
 	c := Counter{Count: 42}
-	//gocap:rob
+	//gosree:rob
 	r := &c
 	return r.Count
 }
@@ -306,7 +306,7 @@ func LoopCarriedBorrowAliasEscape() {
 	var outer *int
 	for i := 0; i < 3; i++ {
 		x := i
-		//gocap:mut
+		//gosree:mut
 		b := &x
 		alias := b
 		outer = alias // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`

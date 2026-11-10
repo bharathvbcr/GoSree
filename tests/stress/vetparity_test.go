@@ -1,11 +1,11 @@
 package stress_test
 
-// Driver parity: the same analyzers run under the standalone multichecker (`gocap pkgs`, every
-// dependency analysed in one process, facts passed in memory) and under `go vet -vettool=gocap`
+// Driver parity: the same analyzers run under the standalone multichecker (`gosree pkgs`, every
+// dependency analysed in one process, facts passed in memory) and under `go vet -vettool=gosree`
 // (unitchecker: one process per package, facts serialised with gob between them, standard-library
 // facts from vet's own VetxOnly runs). A build gate must not depend on which driver runs it.
 //
-// The tests here build cmd/gocap into a temporary directory and run both drivers over a temporary
+// The tests here build cmd/gosree into a temporary directory and run both drivers over a temporary
 // GOPATH workspace holding copies of the repository's own cross-package fixtures plus generated
 // packages, then compare the findings as (file, line, message) multisets.
 
@@ -51,16 +51,16 @@ func vetRepoRoot(t *testing.T) string {
 	return root
 }
 
-// vetBuildGocap builds cmd/gocap into a test temporary directory and returns its path.
-func vetBuildGocap(t *testing.T) string {
+// vetBuildGosree builds cmd/gosree into a test temporary directory and returns its path.
+func vetBuildGosree(t *testing.T) string {
 	t.Helper()
 	if testing.Short() {
-		t.Skip("needs the gocap binary built from cmd/gocap: skipped in -short mode")
+		t.Skip("needs the gosree binary built from cmd/gosree: skipped in -short mode")
 	}
-	bin := filepath.Join(t.TempDir(), "gocap")
+	bin := filepath.Join(t.TempDir(), "gosree")
 	r := vetRun(t, vetRepoRoot(t), []string{"GOFLAGS=", "GOWORK=off"}, "go", "build", "-o", bin, "./cmd/gosree")
 	if r.code != 0 {
-		t.Fatalf("building cmd/gocap: exit %d\n%s%s", r.code, r.stdout, r.stderr)
+		t.Fatalf("building cmd/gosree: exit %d\n%s%s", r.code, r.stdout, r.stderr)
 	}
 	return bin
 }
@@ -167,12 +167,12 @@ func First(r *Node) *Node { return r.Next }
 
 // Take owns its argument.
 //
-//gocap:iso j
+//gosree:iso j
 func Take(j *Job) { j.ID = 1 }
 
 // Frozen is deeply immutable.
 //
-//gocap:imm
+//gosree:imm
 type Frozen struct{ n int }
 
 func NewFrozen(n int) *Frozen { return &Frozen{n: n} }
@@ -324,7 +324,7 @@ func vetWorkspace(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vetWrite(t, src, map[string]string{"github.com/bharathvbcr/gocap/cap/cap.go": string(capSrc)})
+	vetWrite(t, src, map[string]string{"github.com/bharathvbcr/gosree/cap/cap.go": string(capSrc)})
 	return gp, src
 }
 
@@ -469,7 +469,7 @@ var vetGoodPkgs = []string{"user", "lib", "store", "store/inner", "vetfacts/a", 
 // findings. The packages carry test files, which go vet always analyses and the standalone driver
 // analyses with -test (its default).
 func TestVetParity(t *testing.T) {
-	bin := vetBuildGocap(t)
+	bin := vetBuildGosree(t)
 	gp, src := vetWorkspace(t)
 	env := vetGopathEnv(gp)
 
@@ -503,7 +503,7 @@ func TestVetParity(t *testing.T) {
 	}
 
 	// A diagnostic must carry a position: one without names no file, cannot be suppressed by a
-	// //gocap:unsafe scope, and cannot be reviewed.
+	// //gosree:unsafe scope, and cannot be reviewed.
 	noPos := vetFilter(aFind, func(f vetFinding) bool { return f.line == 0 })
 	vetKnownBug(t, "RB-NOPOS", "BORROW004 is reported with no position (posn \"-\") for the Return of the recover block of a function with a defer:\n"+vetDump(noPos), len(noPos) > 0)
 
@@ -559,7 +559,7 @@ func Common() {}
 // on: findings, none, a package that does not type-check, a missing package, no arguments, -fix,
 // -c, -test=false, cross targets and -tags, in both drivers.
 func TestVetCLIContract(t *testing.T) {
-	bin := vetBuildGocap(t)
+	bin := vetBuildGosree(t)
 	gp, src := vetWorkspace(t)
 	vetWrite(t, src, map[string]string{
 		"vetclean/clean.go":     vetClean,
@@ -595,25 +595,25 @@ func TestVetCLIContract(t *testing.T) {
 	}
 	vet := func(args ...string) []string { return append([]string{"vet", "-vettool=" + bin}, args...) }
 	cases := []tc{
-		{"gocap findings", nil, bin, []string{"vetnotest"}},
-		{"gocap clean", nil, bin, []string{"vetclean"}},
-		{"gocap type error", nil, bin, []string{"vetbad"}},
-		{"gocap syntax error", nil, bin, []string{"vetsyntax"}},
-		{"gocap one broken file", nil, bin, []string{"vetmixed"}},
-		{"gocap missing import", nil, bin, []string{"vetimportmissing"}},
-		{"gocap dependency broken", nil, bin, []string{"vetfacts/c"}},
-		{"gocap type error -json", nil, bin, []string{"-json", "vetbad"}},
-		{"gocap nonexistent", nil, bin, []string{"./nonexistent"}},
-		{"gocap no args", nil, bin, nil},
-		{"gocap -fix", nil, bin, []string{"-fix", "vetnotest"}},
-		{"gocap -c=1", nil, bin, []string{"-c=1", "vetnotest"}},
-		{"gocap -test=false", nil, bin, []string{"-test=false", "vetfacts/b"}},
-		{"gocap -test=true", nil, bin, []string{"vetfacts/b"}},
-		{"gocap GOOS=windows", []string{"GOOS=windows", "GOARCH=amd64"}, bin, []string{"vettarget"}},
-		{"gocap host target", nil, bin, []string{"vettarget"}},
-		{"gocap -tags vettag", nil, bin, []string{"-tags=vettag", "vettarget"}},
-		{"gocap GOFLAGS=-tags", []string{"GOFLAGS=-tags=vettag"}, bin, []string{"vettarget"}},
-		{"gocap nopos text", nil, bin, []string{"vetnopos2"}},
+		{"gosree findings", nil, bin, []string{"vetnotest"}},
+		{"gosree clean", nil, bin, []string{"vetclean"}},
+		{"gosree type error", nil, bin, []string{"vetbad"}},
+		{"gosree syntax error", nil, bin, []string{"vetsyntax"}},
+		{"gosree one broken file", nil, bin, []string{"vetmixed"}},
+		{"gosree missing import", nil, bin, []string{"vetimportmissing"}},
+		{"gosree dependency broken", nil, bin, []string{"vetfacts/c"}},
+		{"gosree type error -json", nil, bin, []string{"-json", "vetbad"}},
+		{"gosree nonexistent", nil, bin, []string{"./nonexistent"}},
+		{"gosree no args", nil, bin, nil},
+		{"gosree -fix", nil, bin, []string{"-fix", "vetnotest"}},
+		{"gosree -c=1", nil, bin, []string{"-c=1", "vetnotest"}},
+		{"gosree -test=false", nil, bin, []string{"-test=false", "vetfacts/b"}},
+		{"gosree -test=true", nil, bin, []string{"vetfacts/b"}},
+		{"gosree GOOS=windows", []string{"GOOS=windows", "GOARCH=amd64"}, bin, []string{"vettarget"}},
+		{"gosree host target", nil, bin, []string{"vettarget"}},
+		{"gosree -tags vettag", nil, bin, []string{"-tags=vettag", "vettarget"}},
+		{"gosree GOFLAGS=-tags", []string{"GOFLAGS=-tags=vettag"}, bin, []string{"vettarget"}},
+		{"gosree nopos text", nil, bin, []string{"vetnopos2"}},
 		{"vet findings", nil, "go", vet("vetnotest")},
 		{"vet clean", nil, "go", vet("vetclean")},
 		{"vet type error", nil, "go", vet("vetbad")},
@@ -633,62 +633,62 @@ func TestVetCLIContract(t *testing.T) {
 	}
 
 	// Findings, clean, and the no-findings contract.
-	vetExpectCode(t, got, "gocap findings", 3)
-	vetExpectCode(t, got, "gocap clean", 0)
+	vetExpectCode(t, got, "gosree findings", 3)
+	vetExpectCode(t, got, "gosree clean", 0)
 	vetExpectCode(t, got, "vet findings", 1)
 	vetExpectCode(t, got, "vet clean", 0)
-	vetExpectCode(t, got, "gocap no args", 1)
+	vetExpectCode(t, got, "gosree no args", 1)
 
 	// Fail-closed on input it cannot analyse: a non-zero exit and no claim of a clean result.
-	for _, name := range []string{"gocap type error", "gocap syntax error", "gocap one broken file", "gocap missing import",
-		"gocap dependency broken", "gocap nonexistent", "vet type error", "vet syntax error", "vet one broken file", "vet nonexistent"} {
+	for _, name := range []string{"gosree type error", "gosree syntax error", "gosree one broken file", "gosree missing import",
+		"gosree dependency broken", "gosree nonexistent", "vet type error", "vet syntax error", "vet one broken file", "vet nonexistent"} {
 		if got[name].code == 0 {
 			t.Errorf("%s: exit 0 on input that could not be analysed: a gate would pass it", name)
 		}
 	}
 	// A load error under -json still exits non-zero (the error is not a diagnostic).
-	vetExpectCode(t, got, "gocap type error -json", 1)
+	vetExpectCode(t, got, "gosree type error -json", 1)
 
-	// -fix: gocap offers no suggested fixes, and the x/tools driver in -fix mode prints no diagnostics
-	// and exits 0 (go/analysis/internal/checker/checker.go:194-219). cmd/gocap therefore refuses the
+	// -fix: gosree offers no suggested fixes, and the x/tools driver in -fix mode prints no diagnostics
+	// and exits 0 (go/analysis/internal/checker/checker.go:194-219). cmd/gosree therefore refuses the
 	// flag (RB-FIX, fixed): exit 2 and a message, instead of a pass for a package with findings.
-	if r := got["gocap -fix"]; r.code != 2 || !strings.Contains(r.stderr, "-fix is not supported") {
-		t.Errorf("RB-FIX: gocap -fix exits %d with stderr %q; want 2 and a refusal", r.code, r.stderr)
+	if r := got["gosree -fix"]; r.code != 2 || !strings.Contains(r.stderr, "-fix is not supported") {
+		t.Errorf("RB-FIX: gosree -fix exits %d with stderr %q; want 2 and a refusal", r.code, r.stderr)
 	}
 
 	// -c prints context and keeps the findings exit code.
-	vetExpectCode(t, got, "gocap -c=1", 3)
+	vetExpectCode(t, got, "gosree -c=1", 3)
 
 	// Cross targets reach the build-constrained files in both drivers.
-	if count(got["gocap GOOS=windows"]) == 0 || count(got["gocap host target"]) != 0 {
-		t.Errorf("GOOS not honoured: windows %d findings, host %d", count(got["gocap GOOS=windows"]), count(got["gocap host target"]))
+	if count(got["gosree GOOS=windows"]) == 0 || count(got["gosree host target"]) != 0 {
+		t.Errorf("GOOS not honoured: windows %d findings, host %d", count(got["gosree GOOS=windows"]), count(got["gosree host target"]))
 	}
-	if count(got["vet GOOS=windows"]) != count(got["gocap GOOS=windows"]) {
-		t.Errorf("drivers disagree under GOOS=windows: vet %d, gocap %d", count(got["vet GOOS=windows"]), count(got["gocap GOOS=windows"]))
+	if count(got["vet GOOS=windows"]) != count(got["gosree GOOS=windows"]) {
+		t.Errorf("drivers disagree under GOOS=windows: vet %d, gosree %d", count(got["vet GOOS=windows"]), count(got["gosree GOOS=windows"]))
 	}
-	// -tags: go vet honours it; the driver of gocap accepts it and ignores it ("no effect
-	// (deprecated)", go/analysis/internal/analysisflags/flags.go:86). cmd/gocap hands it to the go
+	// -tags: go vet honours it; the driver of gosree accepts it and ignores it ("no effect
+	// (deprecated)", go/analysis/internal/analysisflags/flags.go:86). cmd/gosree hands it to the go
 	// command through GOFLAGS (RB-TAGS, fixed), so both drivers analyse the file it guards.
 	// GOFLAGS=-tags=... works for both.
-	if a, v := count(got["gocap -tags vettag"]), count(got["vet -tags vettag"]); a != v || a == 0 || got["gocap -tags vettag"].code == 0 {
-		t.Errorf("RB-TAGS: gocap -tags=vettag: exit %d, %d findings; go vet -tags=vettag: exit %d, %d findings",
-			got["gocap -tags vettag"].code, a, got["vet -tags vettag"].code, v)
+	if a, v := count(got["gosree -tags vettag"]), count(got["vet -tags vettag"]); a != v || a == 0 || got["gosree -tags vettag"].code == 0 {
+		t.Errorf("RB-TAGS: gosree -tags=vettag: exit %d, %d findings; go vet -tags=vettag: exit %d, %d findings",
+			got["gosree -tags vettag"].code, a, got["vet -tags vettag"].code, v)
 	}
-	if count(got["gocap GOFLAGS=-tags"]) != count(got["vet -tags vettag"]) {
-		t.Errorf("GOFLAGS=-tags: gocap %d findings, go vet -tags %d", count(got["gocap GOFLAGS=-tags"]), count(got["vet -tags vettag"]))
+	if count(got["gosree GOFLAGS=-tags"]) != count(got["vet -tags vettag"]) {
+		t.Errorf("GOFLAGS=-tags: gosree %d findings, go vet -tags %d", count(got["gosree GOFLAGS=-tags"]), count(got["vet -tags vettag"]))
 	}
 
 	// Test variants: the text driver de-duplicates the package analysed with and without its tests,
 	// and -test=false drops only the test files' findings.
-	if a, b := count(got["gocap -test=true"]), count(got["vet test variant"]); a != b {
+	if a, b := count(got["gosree -test=true"]), count(got["vet test variant"]); a != b {
 		t.Errorf("standalone (text, -test) reports %d findings for vetfacts/b, go vet %d", a, b)
 	}
-	if a, b := count(got["gocap -test=false"]), count(got["gocap -test=true"]); a >= b {
+	if a, b := count(got["gosree -test=false"]), count(got["gosree -test=true"]); a >= b {
 		t.Errorf("-test=false (%d findings) should drop the test files' findings (-test=true: %d)", a, b)
 	}
 
 	// The position-less BORROW004 prints as "-: ..." in both drivers.
-	for _, name := range []string{"gocap nopos text", "vet nopos text"} {
+	for _, name := range []string{"gosree nopos text", "vet nopos text"} {
 		vetKnownBug(t, "RB-NOPOS", name+" prints a diagnostic with no file position", strings.Contains(got[name].stderr, "\n-: BORROW004") || strings.HasPrefix(got[name].stderr, "-: BORROW004"))
 	}
 }
@@ -724,7 +724,7 @@ func SpawnPtr() {
 // TestVetModuleGoVersion runs both drivers on modules whose go.mod names an older language version
 // (go1.21: per-loop variables), the current one, and a newer one than the toolchain.
 func TestVetModuleGoVersion(t *testing.T) {
-	bin := vetBuildGocap(t)
+	bin := vetBuildGosree(t)
 	findings := map[string]map[vetFinding]int{}
 	for _, ver := range []string{"1.21", "1.27", "1.99"} {
 		dir, err := filepath.EvalSymlinks(t.TempDir())
@@ -745,12 +745,12 @@ func TestVetModuleGoVersion(t *testing.T) {
 			n += c
 		}
 		findings[ver] = a
-		t.Logf("go %s: gocap exit %d, %d findings; go vet exit %d\n%s%s", ver, alone.code, n, vet.code, vetIndent(alone.stderr), vetIndent(vet.stderr))
+		t.Logf("go %s: gosree exit %d, %d findings; go vet exit %d\n%s%s", ver, alone.code, n, vet.code, vetIndent(alone.stderr), vetIndent(vet.stderr))
 		if onlyA, onlyV := vetDiff(a, v); len(onlyA)+len(onlyV) > 0 {
-			t.Errorf("go %s: drivers disagree\nonly gocap: %v\nonly vet: %v", ver, onlyA, onlyV)
+			t.Errorf("go %s: drivers disagree\nonly gosree: %v\nonly vet: %v", ver, onlyA, onlyV)
 		}
 		if ver == "1.99" && (alone.code == 0 || vet.code == 0) {
-			t.Errorf("go 1.99 module under go1.27.3 with GOTOOLCHAIN=local: gocap exit %d, vet exit %d; a gate would pass code it never analysed", alone.code, vet.code)
+			t.Errorf("go 1.99 module under go1.27.3 with GOTOOLCHAIN=local: gosree exit %d, vet exit %d; a gate would pass code it never analysed", alone.code, vet.code)
 		}
 	}
 	has := func(ver string, line int, prefix string) bool {

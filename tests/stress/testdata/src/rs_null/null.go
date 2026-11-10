@@ -1,6 +1,6 @@
 // Package rs_null: Rust has no null. A reference is always valid and absence is Option<T>, which
 // the compiler forces the caller to match. Go has nil pointers, maps, funcs, interfaces, channels
-// and slices, and nothing forces a check. gocap has no nil rule: its docs scope it to goroutine
+// and slices, and nothing forces a check. gosree has no nil rule: its docs scope it to goroutine
 // boundaries ("Inside one goroutine, aliasing is left alone"). go vet's nilness analyzer (not in
 // the default vet set) catches only the deref of a value proven nil on a branch.
 package rs_null

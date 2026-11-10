@@ -1,6 +1,6 @@
 // Package rs_exhaust: Rust's match must cover every variant of an enum and every type a value can
 // take, and a downcast returns Option. Go's switch has no exhaustiveness check, type switches do
-// not either, and x.(T) panics. gocap has no rule for any of it; go vet has none either (the
+// not either, and x.(T) panics. gosree has no rule for any of it; go vet has none either (the
 // "exhaustive" linter is third-party).
 package rs_exhaust
 

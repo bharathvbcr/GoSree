@@ -1,31 +1,31 @@
-// Package annot parses gocap's //gocap: and //safe: directives.
+// Package annot parses gosree's //gosree: and //safe: directives.
 //
 // Directives are ordinary Go line comments with no space after the slashes, so gofmt, gopls and the
 // compiler leave them alone:
 //
-//	//gocap:unsafe <reason>   exempts the statement or declaration it is attached to from every gocap rule
-//	//gocap:iso p, q          on a func: parameters p and q are owned; passing an argument to them moves it
-//	//gocap:imm               on a type: values of the type are deeply immutable
+//	//gosree:unsafe <reason>   exempts the statement or declaration it is attached to from every gosree rule
+//	//gosree:iso p, q          on a func: parameters p and q are owned; passing an argument to them moves it
+//	//gosree:imm               on a type: values of the type are deeply immutable
 //	//safe:guarded_by mu      on a struct field, package variable or local: every access must hold mu, a
 //	                          sibling field, package variable or local in scope of type sync.Mutex or sync.RWMutex
 //	//safe:holds mu           on a func: callers must hold mu (a receiver field or package variable)
-//	//gocap:mub p, q          on a func: parameters p and q are mutable second-class borrows (\mub / &mut T)
-//	//gocap:rob p, q          on a func: parameters p and q are read-only second-class borrows (\rob / &T)
-//	//gocap:mut               on a local assignment b := &x: marks b as an active mutable borrow
-//	//gocap:rob               on a local assignment b := &x: marks b as an active read-only borrow
+//	//gosree:mub p, q          on a func: parameters p and q are mutable second-class borrows (\mub / &mut T)
+//	//gosree:rob p, q          on a func: parameters p and q are read-only second-class borrows (\rob / &T)
+//	//gosree:mut               on a local assignment b := &x: marks b as an active mutable borrow
+//	//gosree:rob               on a local assignment b := &x: marks b as an active read-only borrow
 //
-// Legacy //safe:* directives and inline comment forms (/*gocap:mut*/, /*gocap:rob*/) are supported.
+// Legacy //safe:* directives and inline comment forms (/*gosree:mut*/, /*gosree:rob*/) are supported.
 // A directive attaches to the declaration whose doc comment it is in, to the statement, spec or
 // struct field on the line that follows the comment group, or to the one on the same line. Lines are
 // physical lines: a //line directive does not move a directive. Inside a function's parameter list a
-// borrow or iso directive goes directly after a parameter's type, func f(p *T /*gocap:mub*/), and
+// borrow or iso directive goes directly after a parameter's type, func f(p *T /*gosree:mub*/), and
 // applies to every name declared with that type.
 //
 // A directive is applied, or reported as SAFE007, never dropped: a malformed directive has no effect
-// at all, and a comment that reads as a directive but is not one (// gocap:iso p, //Safe:holds mu,
-// /* gocap:mut */) is reported too; see nearMiss for the rule that tells it from prose.
+// at all, and a comment that reads as a directive but is not one (// gosree:iso p, //Safe:holds mu,
+// /* gosree:mut */) is reported too; see nearMiss for the rule that tells it from prose.
 //
-// A //gocap:unsafe hatch covers the code written under it: on its own line above a statement, or in
+// A //gosree:unsafe hatch covers the code written under it: on its own line above a statement, or in
 // a declaration's doc comment, the whole statement or declaration (doc comment included); on the same
 // line as code, that line's statement except the bodies of blocks in it that span several lines.
 package annot
@@ -48,13 +48,13 @@ const SreePrefix = "//gosree:"
 // ShortSreePrefix starts short GoSree directives.
 const ShortSreePrefix = "//sree:"
 
-// CanonicalPrefix starts modern gocap directives.
-const CanonicalPrefix = "//gocap:"
+// CanonicalPrefix starts modern gosree directives.
+const CanonicalPrefix = "//gosree:"
 
 // LegacyPrefix starts legacy directives for backward compatibility.
 const LegacyPrefix = "//safe:"
 
-// Prefix starts modern gocap directives (alias for CanonicalPrefix).
+// Prefix starts modern gosree directives (alias for CanonicalPrefix).
 const Prefix = CanonicalPrefix
 
 // BorrowKind classifies second-class borrows.
@@ -80,25 +80,25 @@ func (k BorrowKind) String() string {
 	}
 }
 
-// CategoryMalformed is the diagnostic category for directives gocap cannot apply.
+// CategoryMalformed is the diagnostic category for directives gosree cannot apply.
 const CategoryMalformed = "SAFE007"
 
 type span struct{ start, end token.Pos }
 
 // Index holds the directives of one package.
 type Index struct {
-	// hatches are the //gocap:unsafe scopes, in source order.
+	// hatches are the //gosree:unsafe scopes, in source order.
 	hatches []*hatch
 	// used marks the //safe:unsafe scopes that muted at least one finding. Every pass that requires
 	// this analyzer shares the Index and may run concurrently, so mu guards it.
 	mu   sync.Mutex
 	used map[int]bool
-	// IsoVars holds the parameters named by //gocap:iso (or //safe:iso).
+	// IsoVars holds the parameters named by //gosree:iso (or //safe:iso).
 	IsoVars map[*types.Var]bool
-	// ImmTypes holds the types annotated //gocap:imm (or //safe:imm). They are candidates: the ownership pass decides
+	// ImmTypes holds the types annotated //gosree:imm (or //safe:imm). They are candidates: the ownership pass decides
 	// whether each one actually satisfies the imm rules.
 	ImmTypes map[*types.TypeName]token.Pos
-	// ImmPrefix records whether the annotation was //gocap: or //safe: for each candidate type.
+	// ImmPrefix records whether the annotation was //gosree: or //safe: for each candidate type.
 	ImmPrefix map[*types.TypeName]string
 	// Guarded maps a struct field, package variable or local variable annotated //safe:guarded_by to
 	// the mutex that guards it.
@@ -122,14 +122,14 @@ func (ix *Index) HoldsDirectives() int {
 	return n
 }
 
-// ImmPrefixOf returns the directive prefix ("//gocap:" or "//safe:") used for tn, defaulting to "//gocap:".
+// ImmPrefixOf returns the directive prefix ("//gosree:" or "//safe:") used for tn, defaulting to "//gosree:".
 func (ix *Index) ImmPrefixOf(tn *types.TypeName) string {
 	if ix.ImmPrefix != nil {
 		if p, ok := ix.ImmPrefix[tn]; ok && p != "" {
 			return p
 		}
 	}
-	return "//gocap:"
+	return "//gosree:"
 }
 
 // IsMub reports whether v is marked as a mutable borrow variable.
@@ -155,7 +155,7 @@ func (ix *Index) BorrowAt(pos token.Pos) BorrowKind {
 	return ix.Borrows[pos]
 }
 
-// Suppressed reports whether pos lies inside a //safe:unsafe or //gocap:unsafe scope. It only asks;
+// Suppressed reports whether pos lies inside a //safe:unsafe or //gosree:unsafe scope. It only asks;
 // a pass that mutes a finding because of the scope calls Mute, so the scope is not counted as stale.
 func (ix *Index) Suppressed(pos token.Pos) bool { return ix.scope(pos) >= 0 }
 
@@ -194,7 +194,7 @@ func (ix *Index) StaleScopes() int {
 	return len(ix.hatches) - len(ix.used)
 }
 
-// StaleHatches returns, in source order, the //gocap:unsafe directives that have muted nothing so far.
+// StaleHatches returns, in source order, the //gosree:unsafe directives that have muted nothing so far.
 // Like StaleScopes, it is the final answer only once every pass that can mute has run on the package.
 func (ix *Index) StaleHatches() []Hatch {
 	ix.mu.Lock()
@@ -208,13 +208,13 @@ func (ix *Index) StaleHatches() []Hatch {
 	return stale
 }
 
-// ReportStale reports each stale //gocap:unsafe directive as SAFE007, at the directive. Call it from
+// ReportStale reports each stale //gosree:unsafe directive as SAFE007, at the directive. Call it from
 // an analyzer that requires every analyzer that mutes findings through this Index, so that it runs
 // after all of them.
 func (ix *Index) ReportStale(pass *analysis.Pass) {
 	for _, h := range ix.StaleHatches() {
 		pass.Report(analysis.Diagnostic{Pos: h.Pos, End: h.End, Category: CategoryMalformed,
-			Message: CategoryMalformed + ": stale escape hatch: this //gocap:unsafe mutes no finding of any rule; remove it"})
+			Message: CategoryMalformed + ": stale escape hatch: this //gosree:unsafe mutes no finding of any rule; remove it"})
 	}
 }
 
@@ -224,7 +224,7 @@ func (ix *Index) UnsafeScopes() int { return len(ix.hatches) }
 // Analyzer parses the directives and reports the malformed ones.
 var Analyzer = &analysis.Analyzer{
 	Name:       "safeannot",
-	Doc:        "parse //gocap: and //safe: directives (reports malformed ones as " + CategoryMalformed + ")",
+	Doc:        "parse //gosree: and //safe: directives (reports malformed ones as " + CategoryMalformed + ")",
 	Run:        run,
 	ResultType: reflect.TypeFor[*Index](),
 }
@@ -255,10 +255,10 @@ func run(pass *analysis.Pass) (any, error) {
 				if _, _, _, ok := parseDirective(c.Text); ok {
 					dirs = append(dirs, c)
 				} else if written, meant, near := nearMiss(c.Text); near {
-					// A comment a reader takes for a directive but gocap does not is reported, never
+					// A comment a reader takes for a directive but gosree does not is reported, never
 					// applied: whatever check it asks for is not running.
 					a.c = c
-					a.malformed("%q is not a gocap directive, so it has no effect: write it as %s (no space after the slashes, lower case)", written, meant)
+					a.malformed("%q is not a gosree directive, so it has no effect: write it as %s (no space after the slashes, lower case)", written, meant)
 				}
 			}
 		}
@@ -309,9 +309,9 @@ func parseDirective(raw string) (lead, verb, args string, ok bool) {
 	case strings.HasPrefix(text, "//sree:"):
 		lead = "//sree:"
 		body = text[len("//sree:"):]
-	case strings.HasPrefix(text, "//gocap:"):
-		lead = "//gocap:"
-		body = text[len("//gocap:"):]
+	case strings.HasPrefix(text, "//gosree:"):
+		lead = "//gosree:"
+		body = text[len("//gosree:"):]
 	case strings.HasPrefix(text, "//safe:"):
 		lead = "//safe:"
 		body = text[len("//safe:"):]
@@ -321,9 +321,9 @@ func parseDirective(raw string) (lead, verb, args string, ok bool) {
 	case strings.HasPrefix(text, "/*sree:"):
 		lead = "//sree:"
 		body = strings.TrimSuffix(text[len("/*sree:"):], "*/")
-	case strings.HasPrefix(text, "/*gocap:"):
-		lead = "//gocap:"
-		body = strings.TrimSuffix(text[len("/*gocap:"):], "*/")
+	case strings.HasPrefix(text, "/*gosree:"):
+		lead = "//gosree:"
+		body = strings.TrimSuffix(text[len("/*gosree:"):], "*/")
 	case strings.HasPrefix(text, "/*safe:"):
 		lead = "//safe:"
 		body = strings.TrimSuffix(text[len("/*safe:"):], "*/")
@@ -405,7 +405,7 @@ func (a *applier) apply(cg *ast.CommentGroup, lead, verb, args string, target as
 	}
 }
 
-// applyHatch installs a //gocap:unsafe scope.
+// applyHatch installs a //gosree:unsafe scope.
 func (a *applier) applyHatch(cg *ast.CommentGroup, lead, verb, args string, target ast.Node, inline bool) {
 	if target == nil {
 		a.malformed("%s%s is not attached to a statement or declaration", lead, verb)
@@ -427,7 +427,7 @@ func (a *applier) applyHatch(cg *ast.CommentGroup, lead, verb, args string, targ
 	key := span{h.start, h.end}
 	for _, o := range a.scopes[key] {
 		if o.sameScope(h) {
-			a.malformed("%s%s repeats a //gocap:unsafe that already covers exactly this code", lead, verb)
+			a.malformed("%s%s repeats a //gosree:unsafe that already covers exactly this code", lead, verb)
 			return
 		}
 	}
@@ -585,7 +585,7 @@ func (a *applier) applyBorrow(lead, verb, args string, target ast.Node, kind Bor
 		if prev == kind {
 			a.malformed("%s%s repeats the borrow directive already on this statement", lead, verb)
 		} else {
-			a.malformed("%s%s conflicts with the //gocap:%s directive already on this statement: a binding is a mutable or a read-only borrow, not both", lead, verb, prev)
+			a.malformed("%s%s conflicts with the //gosree:%s directive already on this statement: a binding is a mutable or a read-only borrow, not both", lead, verb, prev)
 		}
 		return
 	}
@@ -733,7 +733,6 @@ func isCapPkg(pkg *types.Package) bool {
 	}
 	path := pkg.Path()
 	return path == "github.com/bharathvbcr/gosree/cap" ||
-		path == "github.com/bharathvbcr/gocap/cap" ||
 		strings.HasSuffix(path, "/cap") ||
 		pkg.Name() == "cap"
 }
@@ -955,7 +954,7 @@ func scanCapMarkers(pass *analysis.Pass, ix *Index, file *ast.File) {
 						if sym == "Imm" {
 							if tn, ok := pass.TypesInfo.Defs[ts.Name].(*types.TypeName); ok && tn != nil {
 								ix.ImmTypes[tn] = ts.Pos()
-								ix.ImmPrefix[tn] = "//gocap:"
+								ix.ImmPrefix[tn] = "//gosree:"
 							}
 						}
 					}

@@ -18,7 +18,7 @@ func victim(p *int) uintptr {
 func trailing() int {
 	x := 1
 //line line.go:300
-	return x //gocap:unsafe returning a local by value is fine
+	return x //gosree:unsafe returning a local by value is fine
 }
 
 // A doc-comment hatch whose comment is renumbered so that the line after it is the victim's.
@@ -28,7 +28,7 @@ func victim2(p *int) uintptr {
 }
 
 //line line.go:399
-//gocap:unsafe nothing in this function needs it
+//gosree:unsafe nothing in this function needs it
 func harmless() int { return 1 }
 
 // An inline /*line*/ directive in the middle of a line.
@@ -38,7 +38,7 @@ func victim3(p *int) uintptr {
 
 func inlineLine() int {
 	y := 2
-	/*line line.go:499:1*/ //gocap:unsafe reviewed
+	/*line line.go:499:1*/ //gosree:unsafe reviewed
 	return y
 }
 

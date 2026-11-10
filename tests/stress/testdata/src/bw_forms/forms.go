@@ -3,15 +3,15 @@
 // spellings are documented as equivalent (docs/DIRECTIVES.md), so each pair must behave alike.
 package bw_forms
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 var global *int // HIT(SAFE006)
 
 // 1. trailing line comment.
 func lineComment() {
 	x := 0
-	b1 := &x //gocap:mut
-	b2 := &x //gocap:mut // HIT(BORROW002)
+	b1 := &x //gosree:mut
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	*b1 = 2
 }
@@ -19,8 +19,8 @@ func lineComment() {
 // 2. inline block comment before the operand.
 func blockBefore() {
 	x := 0
-	b1 := /*gocap:mut*/ &x
-	b2 := /*gocap:mut*/ &x // HIT(BORROW002)
+	b1 := /*gosree:mut*/ &x
+	b2 := /*gosree:mut*/ &x // HIT(BORROW002)
 	*b2 = 1
 	*b1 = 2
 }
@@ -28,9 +28,9 @@ func blockBefore() {
 // 3. directive on the line above the assignment.
 func lineAbove() {
 	x := 0
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:mut
+	//gosree:mut
 	b2 := &x // HIT(BORROW002)
 	*b2 = 1
 	*b1 = 2
@@ -77,28 +77,28 @@ func legacyPrefix() {
 func mixed() {
 	x := 0
 	b1 := cap.BorrowMut(&x)
-	b2 := &x //gocap:mut // HIT(BORROW002)
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	*b1 = 2
 }
 
 // 9-12. parameter spellings, each storing the borrow in a package variable.
 
-//gocap:mub b
+//gosree:mub b
 func paramDirective(b *int) {
 	global = b // HIT(BORROW001)
 }
 
 // documented inline form: the block comment after the type, exactly as docs/DIRECTIVES.md:91
-// (`func Increment(val *int /*gocap:mub*/)`) and docs/RULES.md:400/516 write it. Until 2026-11-10
+// (`func Increment(val *int /*gosree:mub*/)`) and docs/RULES.md:400/516 write it. Until 2026-11-10
 // annot attached the comment to the FuncDecl on its line and rejected it for naming no parameter.
-func paramInline(b *int /*gocap:mub*/) {
+func paramInline(b *int /*gosree:mub*/) {
 	global = b // HIT(BORROW001) b is a \mub borrow by the documented inline form
 }
 
 // the same block comment between the name and the type (not a documented position) is rejected as
 // malformed, with a message that says where it goes.
-func paramInlineBeforeType(b /*gocap:mub*/ *int) { // HIT(SAFE007)
+func paramInlineBeforeType(b /*gosree:mub*/ *int) { // HIT(SAFE007)
 	global = b
 }
 

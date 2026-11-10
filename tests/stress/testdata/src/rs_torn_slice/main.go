@@ -1,6 +1,6 @@
 // WITNESS: panic
 //
-// An out-of-bounds read in Go with no unsafe, no cgo and no reflection, in a program gocap
+// An out-of-bounds read in Go with no unsafe, no cgo and no reflection, in a program gosree
 // accepts without a word.
 //
 // A slice is three words: pointer, length, capacity. The router is published through an
@@ -9,7 +9,7 @@
 // is half-written gets the 1-element slice's pointer with the 4096-element slice's length: the
 // bounds check passes and routes[len(routes)-1] reads 32 KiB past the end of an 8-byte
 // allocation. Rust rejects the program at compile time (the router is written while shared);
-// the Go compiler accepts it; so does gocap.
+// the Go compiler accepts it; so does gosree.
 //
 // The atomic makes swapping the pointer safe, not writing what it points to. To the checker, Load
 // is an ordinary method call returning a pointer nobody else is known to hold.

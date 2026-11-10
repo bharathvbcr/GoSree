@@ -68,7 +68,7 @@ func fieldListsOf(file *ast.File, dirs []*ast.Comment) map[*ast.Comment]*fieldLi
 
 // applyInField applies a directive written inside a function's field list. The one accepted place is
 // directly after a parameter's or receiver's type, before the comma or closing parenthesis:
-// func f(p *T /*gocap:mub*/). It then applies to every name of that field, as the type does; args,
+// func f(p *T /*gosree:mub*/). It then applies to every name of that field, as the type does; args,
 // if any, choose among them. Anywhere else in a field list the directive is reported.
 func (a *applier) applyInField(c *ast.Comment, lead, verb, args string, l *fieldList) {
 	switch verb {

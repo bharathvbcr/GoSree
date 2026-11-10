@@ -1,15 +1,15 @@
-// Command gocap-erase transforms Go source files containing gocap directives,
+// Command gosree-erase transforms Go source files containing gosree directives,
 // marker types, and helper expressions into 100% standard Go code.
 //
 // Usage:
 //
-//	gocap-erase [flags] [path ...]
+//	gosree-erase [flags] [path ...]
 //
 // Flags:
 //
 //	-w        write result to (source) file instead of stdout
 //	-o string write result to named file (single input only)
-//	-l        list files whose formatting differs from gocap-erase
+//	-l        list files whose formatting differs from gosree-erase
 //	-d        display diffs instead of rewriting files
 //
 // A path is a Go file, a directory (walked recursively), or dir/... (the same
@@ -62,14 +62,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 func runWith(args []string, stdin io.Reader, stdout, stderr io.Writer, erase eraseFunc) int {
 	o := &options{stdin: stdin, stdout: stdout, stderr: stderr, erase: erase}
-	flags := flag.NewFlagSet("gocap-erase", flag.ContinueOnError)
+	flags := flag.NewFlagSet("gosree-erase", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.BoolVar(&o.write, "w", false, "write result to (source) file instead of stdout")
 	flags.StringVar(&o.outPath, "o", "", "write result to named file (single input only)")
-	flags.BoolVar(&o.list, "l", false, "list files whose formatting differs from gocap-erase")
+	flags.BoolVar(&o.list, "l", false, "list files whose formatting differs from gosree-erase")
 	flags.BoolVar(&o.diff, "d", false, "display diffs instead of rewriting files")
 	flags.Usage = func() {
-		fmt.Fprintf(stderr, "Usage: gocap-erase [flags] [path ...]\n\nFlags:\n")
+		fmt.Fprintf(stderr, "Usage: gosree-erase [flags] [path ...]\n\nFlags:\n")
 		flags.PrintDefaults()
 		fmt.Fprintf(stderr, `
 Paths: a Go file, a directory (walked recursively) or dir/... (the same walk).
@@ -250,7 +250,7 @@ func (o *options) walk(root string, add func(target)) error {
 			return nil
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
-			o.errorf("gocap-erase: skipping symbolic link %s", path)
+			o.errorf("gosree-erase: skipping symbolic link %s", path)
 			return nil
 		}
 		if d.IsDir() {
@@ -383,7 +383,7 @@ func (o *options) writeAll(targets []target, ok bool) int {
 		}
 	}
 	if failures > 0 || !ok {
-		o.errorf("gocap-erase: nothing was written (%d file(s) could not be erased, %d path(s) were unusable)", failures, boolInt(!ok))
+		o.errorf("gosree-erase: nothing was written (%d file(s) could not be erased, %d path(s) were unusable)", failures, boolInt(!ok))
 		return 1
 	}
 	var changed []result
@@ -393,7 +393,7 @@ func (o *options) writeAll(targets []target, ok bool) int {
 		}
 	}
 	if err := o.commit(changed); err != nil {
-		o.errorf("gocap-erase: %v", err)
+		o.errorf("gosree-erase: %v", err)
 		return 1
 	}
 	return 0
@@ -414,7 +414,7 @@ func writable(path string) error {
 		return fmt.Errorf("not writable: %w", err)
 	}
 	f.Close()
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".gocap-erase-probe-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".gosree-erase-probe-*.tmp")
 	if err != nil {
 		return fmt.Errorf("cannot create a temporary file beside it: %w", err)
 	}
@@ -453,7 +453,7 @@ func (o *options) commit(changed []result) error {
 // directory, keeping the permission bits, so a crash cannot leave a truncated
 // source file.
 func writeAtomic(path string, data []byte, mode fs.FileMode) (err error) {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".gocap-erase-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".gosree-erase-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -485,16 +485,16 @@ type span struct {
 	end   int
 }
 
-// isDirective reports whether text is a gosree, gocap, or legacy safe directive comment.
+// isDirective reports whether text is a gosree, gosree, or legacy safe directive comment.
 func isDirective(text string) bool {
 	t := strings.TrimSpace(text)
 	return strings.HasPrefix(t, "//gosree:") || strings.HasPrefix(t, "//sree:") ||
-		strings.HasPrefix(t, "//gocap:") || strings.HasPrefix(t, "//safe:") ||
+		strings.HasPrefix(t, "//gosree:") || strings.HasPrefix(t, "//safe:") ||
 		strings.HasPrefix(t, "/*gosree:") || strings.HasPrefix(t, "/*sree:") ||
-		strings.HasPrefix(t, "/*gocap:") || strings.HasPrefix(t, "/*safe:")
+		strings.HasPrefix(t, "/*gosree:") || strings.HasPrefix(t, "/*safe:")
 }
 
-// stripDirectives removes all //gocap: and //safe: directive comments cleanly
+// stripDirectives removes all //gosree: and //safe: directive comments cleanly
 // using exact AST token byte offsets without corrupting doc comments.
 func stripDirectives(src []byte) []byte {
 	fset := token.NewFileSet()

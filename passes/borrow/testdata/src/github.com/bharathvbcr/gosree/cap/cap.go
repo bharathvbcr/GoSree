@@ -1,5 +1,5 @@
 // Package cap provides zero-cost generic marker type aliases and helper intrinsics
-// for gocap's reference capabilities and second-class borrow checker.
+// for gosree's reference capabilities and second-class borrow checker.
 //
 // All type aliases in this package expand directly to standard Go pointer types (*T)
 // at compile time with zero runtime memory, indirection, or instruction overhead.

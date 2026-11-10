@@ -6,7 +6,7 @@ package adversarial_m2
 
 // 1.1 Primitive fields only (Clean Pass)
 //
-//gocap:imm
+//gosree:imm
 type PrimConfig struct { // want PrimConfig:"imm"
 	host string
 	port int
@@ -20,12 +20,12 @@ func newPrimConfig() *PrimConfig {
 
 // 1.2 Transitive immutability: pointing to another verified imm struct (Clean Pass)
 //
-//gocap:imm
+//gosree:imm
 type ChildConfig struct { // want ChildConfig:"imm"
 	secret string
 }
 
-//gocap:imm
+//gosree:imm
 type ParentConfig struct { // want ParentConfig:"imm"
 	child *ChildConfig
 	count int
@@ -33,7 +33,7 @@ type ParentConfig struct { // want ParentConfig:"imm"
 
 // 1.3 Recursive immutability: tree-like struct pointing to itself (Clean Pass)
 //
-//gocap:imm
+//gosree:imm
 type TreeNode struct { // want TreeNode:"imm"
 	val   int
 	left  *TreeNode
@@ -42,13 +42,13 @@ type TreeNode struct { // want TreeNode:"imm"
 
 // 1.4 Mutually recursive immutability: A points to B, B points to A (Clean Pass)
 //
-//gocap:imm
+//gosree:imm
 type NodeA struct { // want NodeA:"imm"
 	b   *NodeB
 	val int
 }
 
-//gocap:imm
+//gosree:imm
 type NodeB struct { // want NodeB:"imm"
 	a   *NodeA
 	val int
@@ -56,7 +56,7 @@ type NodeB struct { // want NodeB:"imm"
 
 // 1.5 Array of verified imm pointers & array of primitives (Clean Pass)
 //
-//gocap:imm
+//gosree:imm
 type ArrayConfig struct { // want ArrayConfig:"imm"
 	tags  [4]byte
 	nodes [2]*ChildConfig
@@ -64,8 +64,8 @@ type ArrayConfig struct { // want ArrayConfig:"imm"
 
 // 1.6 Unexported field enforcement: exported primitive field rejected (SAFE005)
 //
-//gocap:imm
-type ExportedFieldStruct struct { // want `SAFE005: //gocap:imm type ExportedFieldStruct is not immutable: field Exported is exported`
+//gosree:imm
+type ExportedFieldStruct struct { // want `SAFE005: //gosree:imm type ExportedFieldStruct is not immutable: field Exported is exported`
 	Exported int
 	internal string
 }
@@ -75,54 +75,54 @@ type MutablePayload struct {
 	data int
 }
 
-//gocap:imm
-type NonImmPointerStruct struct { // want `SAFE005: //gocap:imm type NonImmPointerStruct is not immutable: field payload has type \*adversarial_m2.MutablePayload`
+//gosree:imm
+type NonImmPointerStruct struct { // want `SAFE005: //gosree:imm type NonImmPointerStruct is not immutable: field payload has type \*adversarial_m2.MutablePayload`
 	payload *MutablePayload
 }
 
 // 1.8 Slice field rejected (SAFE005)
 //
-//gocap:imm
-type SliceFieldStruct struct { // want `SAFE005: //gocap:imm type SliceFieldStruct is not immutable: field items has type \[\]int`
+//gosree:imm
+type SliceFieldStruct struct { // want `SAFE005: //gosree:imm type SliceFieldStruct is not immutable: field items has type \[\]int`
 	items []int
 }
 
 // 1.9 Map field rejected (SAFE005)
 //
-//gocap:imm
-type MapFieldStruct struct { // want `SAFE005: //gocap:imm type MapFieldStruct is not immutable: field lookup has type map\[string\]int`
+//gosree:imm
+type MapFieldStruct struct { // want `SAFE005: //gosree:imm type MapFieldStruct is not immutable: field lookup has type map\[string\]int`
 	lookup map[string]int
 }
 
 // 1.10 Func field rejected (SAFE005)
 //
-//gocap:imm
-type FuncFieldStruct struct { // want `SAFE005: //gocap:imm type FuncFieldStruct is not immutable: field callback has type func\(\)`
+//gosree:imm
+type FuncFieldStruct struct { // want `SAFE005: //gosree:imm type FuncFieldStruct is not immutable: field callback has type func\(\)`
 	callback func()
 }
 
 // 1.11 Interface field rejected (SAFE005)
 //
-//gocap:imm
-type InterfaceFieldStruct struct { // want `SAFE005: //gocap:imm type InterfaceFieldStruct is not immutable: field anyVal has type any`
+//gosree:imm
+type InterfaceFieldStruct struct { // want `SAFE005: //gosree:imm type InterfaceFieldStruct is not immutable: field anyVal has type any`
 	anyVal any
 }
 
 // 1.12 Array of pointers to non-imm struct rejected (SAFE005)
 //
-//gocap:imm
-type ArrayNonImmStruct struct { // want `SAFE005: //gocap:imm type ArrayNonImmStruct is not immutable: field ptrs has type \[2\]\*int`
+//gosree:imm
+type ArrayNonImmStruct struct { // want `SAFE005: //gosree:imm type ArrayNonImmStruct is not immutable: field ptrs has type \[2\]\*int`
 	ptrs [2]*int
 }
 
 // 1.13 Rejection of mutable borrows on immutable fields (SAFE005)
 //
-//gocap:mub p
+//gosree:mub p
 func takesMutBorrow(p *int) {}
 
 func testImmBorrowRejections(cfg *PrimConfig) {
-	// Taking a local //gocap:mut borrow of immutable struct field
-	//gocap:mut
+	// Taking a local //gosree:mut borrow of immutable struct field
+	//gosree:mut
 	b := &cfg.port // want `SAFE005: cannot borrow field of immutable type PrimConfig as mutable`
 	_ = b
 
@@ -130,7 +130,7 @@ func testImmBorrowRejections(cfg *PrimConfig) {
 	takesMutBorrow(&cfg.port) // want `SAFE005: cannot borrow field of immutable type PrimConfig as mutable`
 
 	// Read-only borrow of immutable field is PERMITTED (Clean Pass)
-	//gocap:rob
+	//gosree:rob
 	r := &cfg.port
 	_ = *r
 
@@ -140,13 +140,13 @@ func testImmBorrowRejections(cfg *PrimConfig) {
 
 func testNestedImmBorrowRejections(p *ParentConfig) {
 	// Taking mutable borrow on nested imm field
-	//gocap:mut
+	//gosree:mut
 	b := &p.child.secret // want `SAFE005: cannot borrow field of immutable type ChildConfig as mutable`
 	_ = b
 }
 
 func testImmMutBorrowDirect(cfg *PrimConfig) {
-	//gocap:mut
+	//gosree:mut
 	b := cfg // want `SAFE005: cannot borrow immutable type PrimConfig as mutable`
 	_ = b
 }
@@ -182,47 +182,47 @@ func dummyReader(p *int) {}
 
 // 2.1 Channel sends of stack-scoped borrows rejected (CAP003)
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubParamChannel(ch chan *int, b *int) {
 	ch <- b // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 }
 
-//gocap:rob r
+//gosree:rob r
 func escapeRobParamChannel(ch chan *int, r *int) {
 	ch <- r // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be sent on a channel`
 }
 
 func escapeMubLocalChannel(ch chan *int) {
 	x := 100
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	ch <- b // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 }
 
 func escapeRobLocalChannel(ch chan *int) {
 	x := 100
-	//gocap:rob
+	//gosree:rob
 	r := &x
 	ch <- r // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be sent on a channel`
 }
 
 // 2.2 Select statements: blocking & non-blocking
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubSelectBlocking(ch chan *int, b *int) {
 	select {
 	case ch <- b: // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	}
 }
 
-//gocap:rob r
+//gosree:rob r
 func escapeRobSelectBlocking(ch chan *int, r *int) {
 	select {
 	case ch <- r: // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be sent on a channel`
 	}
 }
 
-//gocap:mub b
+//gosree:mub b
 func escapeMubSelectNonBlocking(ch chan *int, b *int) {
 	select { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch <- b:
@@ -230,7 +230,7 @@ func escapeMubSelectNonBlocking(ch chan *int, b *int) {
 	}
 }
 
-//gocap:rob r
+//gosree:rob r
 func escapeRobSelectNonBlocking(ch chan *int, r *int) {
 	select { // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch <- r:
@@ -240,14 +240,14 @@ func escapeRobSelectNonBlocking(ch chan *int, r *int) {
 
 // 2.3 Goroutine closures: capturing borrows rejected (CAP003)
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubParamGoClosure(b *int) {
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		*b = 99
 	}()
 }
 
-//gocap:rob r
+//gosree:rob r
 func escapeRobParamGoClosure(r *int) {
 	go func() { // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		println(*r)
@@ -256,7 +256,7 @@ func escapeRobParamGoClosure(r *int) {
 
 func escapeMubLocalGoClosure() {
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		*b = 50
@@ -265,7 +265,7 @@ func escapeMubLocalGoClosure() {
 
 func escapeRobLocalGoClosure() {
 	x := 42
-	//gocap:rob
+	//gosree:rob
 	r := &x
 	go func() { // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		println(*r)
@@ -274,7 +274,7 @@ func escapeRobLocalGoClosure() {
 
 // Nested closure inside go statement capturing borrow rejected
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubNestedGoClosure(b *int) {
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		func() {
@@ -285,33 +285,33 @@ func escapeMubNestedGoClosure(b *int) {
 
 // 2.4 Goroutine arguments: passing borrows as arguments to go rejected (CAP003)
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubParamGoArg(b *int) {
 	go dummyWorker(b) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
 
-//gocap:rob r
+//gosree:rob r
 func escapeRobParamGoArg(r *int) {
 	go dummyReader(r) // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
 
 func escapeMubLocalGoArg() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go dummyWorker(b) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
 
 func escapeRobLocalGoArg() {
 	x := 10
-	//gocap:rob
+	//gosree:rob
 	r := &x
 	go dummyReader(r) // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
 
 // Anonymous goroutine argument
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubAnonGoArg(b *int) {
 	go func(p *int) { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 		*p = 10
@@ -325,7 +325,7 @@ func escapeMubAnonGoArg(b *int) {
 
 // 3.1 Directly invoked synchronous closure mutating \mub parameter (Clean Pass)
 //
-//gocap:mub b
+//gosree:mub b
 func syncClosureMutParam(b *int) {
 	func() {
 		*b = 50
@@ -334,7 +334,7 @@ func syncClosureMutParam(b *int) {
 
 // 3.2 Directly invoked synchronous closure reading \rob parameter (Clean Pass)
 //
-//gocap:rob r
+//gosree:rob r
 func syncClosureRobParam(r *int) int {
 	var res int
 	func() {
@@ -346,7 +346,7 @@ func syncClosureRobParam(r *int) int {
 // 3.3 Synchronous closure mutating local \mub (Clean Pass)
 func syncClosureMutLocal() int {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	func() {
 		*b = 50
@@ -356,7 +356,7 @@ func syncClosureMutLocal() int {
 
 // 3.4 Nested synchronous closures mutating \mub (Clean Pass)
 //
-//gocap:mub b
+//gosree:mub b
 func syncNestedClosures(b *int) {
 	func() {
 		func() {
@@ -367,7 +367,7 @@ func syncNestedClosures(b *int) {
 
 // 3.5 Synchronous closure with argument (Clean Pass)
 //
-//gocap:mub b
+//gosree:mub b
 func syncClosureWithArg(b *int) {
 	func(p *int) {
 		*p = 77
@@ -380,7 +380,7 @@ func syncClosureWithArg(b *int) {
 
 // 4.1 Multi-case select statement
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubSelectMultiCase(ch1 chan int, ch2 chan *int, b *int) {
 	select { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch1 <- 1:
@@ -390,14 +390,14 @@ func escapeMubSelectMultiCase(ch1 chan int, ch2 chan *int, b *int) {
 
 // 4.2 Multi-arg go statement: non-borrow argument followed by borrow argument
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubSecondArg(b *int) {
 	go func(val int, ptr *int) {}(42, b) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
 
 // 4.3 Closure assigned to variable and started with go
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubClosureVar(b *int) {
 	fn := func() {
 		*b = 100
@@ -414,7 +414,7 @@ func (c *counter) inc() {
 	c.val++
 }
 
-//gocap:mub c
+//gosree:mub c
 func escapeMubReceiver(c *counter) {
 	go c.inc() // want `CAP003: stack-scoped borrow 'c' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
@@ -422,14 +422,14 @@ func escapeMubReceiver(c *counter) {
 // 4.5 Local borrow receiver in go statement
 func escapeMubLocalReceiver() {
 	cnt := counter{val: 0}
-	//gocap:mut
+	//gosree:mut
 	c := &cnt
 	go c.inc() // want `CAP003: stack-scoped borrow 'c' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
 
 // 4.6 Reassigned borrow escaping on channel
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubReassignedChannel(ch chan *int, b *int) {
 	c := b
 	ch <- c // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
@@ -437,7 +437,7 @@ func escapeMubReassignedChannel(ch chan *int, b *int) {
 
 // 4.7 Reassigned borrow captured in go closure
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubReassignedClosure(b *int) {
 	c := b
 	go func() { // want `SAFE002: the closure is captured by a goroutine but is not owned here: it may alias parameter b`
@@ -447,7 +447,7 @@ func escapeMubReassignedClosure(b *int) {
 
 // 4.8 Reassigned borrow passed as go arg
 //
-//gocap:mub b
+//gosree:mub b
 func escapeMubReassignedGoArg(b *int) {
 	c := b
 	go dummyWorker(c) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
@@ -455,7 +455,7 @@ func escapeMubReassignedGoArg(b *int) {
 
 // 4.9 Synchronous closure sending borrow on channel
 //
-//gocap:mub b
+//gosree:mub b
 func syncClosureSend(ch chan *int, b *int) {
 	func() {
 		ch <- b // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
@@ -465,7 +465,7 @@ func syncClosureSend(ch chan *int, b *int) {
 // 4.10 Multiline channel send of local borrow
 func escapeMubMultilineSend(ch chan *int) {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	ch <- // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 		b
@@ -476,19 +476,19 @@ type plainSub struct {
 	value int
 }
 
-//gocap:imm
+//gosree:imm
 type ImmHolder struct { // want ImmHolder:"imm"
 	sub plainSub
 }
 
-//gocap:mub p
+//gosree:mub p
 func mutateInt(p *int) {
 	*p = 999
 }
 
 func attackSubField(h *ImmHolder) {
 	// Taking mutable borrow on sub-field of immutable struct
-	//gocap:mut
+	//gosree:mut
 	b := &h.sub.value // want `SAFE005: cannot borrow field of immutable type ImmHolder as mutable`
 	_ = b
 

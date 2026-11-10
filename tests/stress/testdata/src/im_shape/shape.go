@@ -14,14 +14,14 @@ func (c *counter) Error() string { return "e" }
 
 // ErrHolder holds an error interface; the override table assumes error values are never mutated.
 //
-//gocap:imm
+//gosree:imm
 type ErrHolder struct {
 	err error
 }
 
 // FuncHolder holds a func: classifier rejects funcs.
 //
-//gocap:imm
+//gosree:imm
 type FuncHolder struct { // HIT(SAFE005)
 	f func() int
 }
@@ -29,56 +29,56 @@ type FuncHolder struct { // HIT(SAFE005)
 // ChanChan holds a channel of channels of pointers. Locked: the channel element check is applied
 // to the nested channel too.
 //
-//gocap:imm
+//gosree:imm
 type ChanChan struct { // HIT(SAFE005)
 	ch chan chan *counter
 }
 
 // Control: a channel of mutable pointers is rejected.
 //
-//gocap:imm
+//gosree:imm
 type ChanPtr struct { // HIT(SAFE005)
 	ch chan *counter
 }
 
 // MuHolder holds a sync.Mutex value (pointer-free struct): accepted.
 //
-//gocap:imm
+//gosree:imm
 type MuHolder struct {
 	mu sync.Mutex
 }
 
 // BufHolder holds a bytes.Buffer value, which contains a []byte.
 //
-//gocap:imm
+//gosree:imm
 type BufHolder struct { // HIT(SAFE005)
 	b bytes.Buffer
 }
 
 // BuilderHolder holds a strings.Builder value, which contains a pointer and a []byte.
 //
-//gocap:imm
+//gosree:imm
 type BuilderHolder struct { // HIT(SAFE005)
 	b strings.Builder
 }
 
 // Pair is a generic imm type whose type parameter is constrained to pointer-free types.
 //
-//gocap:imm
+//gosree:imm
 type Pair[T int | string] struct { // FP(SAFE005): T is constrained to int|string, so every instantiation is pointer-free; the classifier rejects every type parameter
 	a, b T
 }
 
 // Box is a generic imm type over any T.
 //
-//gocap:imm
+//gosree:imm
 type Box[T any] struct { // HIT(SAFE005)
 	v T
 }
 
 // Rec is recursive through a pointer to itself: accepted to fixpoint.
 //
-//gocap:imm
+//gosree:imm
 type Rec struct {
 	next *Rec
 	v    int
@@ -86,7 +86,7 @@ type Rec struct {
 
 // NotStruct annotated imm: a named slice.
 //
-//gocap:imm
+//gosree:imm
 type Tags []string // HIT(SAFE005)
 
 func errMutate(h *ErrHolder) {

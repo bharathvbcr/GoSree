@@ -9,7 +9,7 @@ package stress_test
 // -short mode.
 //
 //	go test ./tests/stress -run TestScale -v                       committed sizes
-//	GOCAP_SCALE_EXPLORE=4 go test ./tests/stress -run TestScaleExplore -v -timeout 60m
+//	GOSREE_SCALE_EXPLORE=4 go test ./tests/stress -run TestScaleExplore -v -timeout 60m
 //	                                                               sizes x4, logs the table only
 
 import (
@@ -30,7 +30,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/packages"
 
-	"github.com/bharathvbcr/gocap/passes/ownership"
+	"github.com/bharathvbcr/gosree/passes/ownership"
 )
 
 // scaleKnownBug records a measured blowup that is present today; once it is gone the test fails and
@@ -231,11 +231,11 @@ func scaleShapes() []scaleShape {
 			b.WriteString("func Use(ch chan *Job) {\n\tj := &Job{}\n\tF0(j, 3)\n\tch <- j\n}\n")
 			return scaleOne(b.String())
 		}},
-		{name: "N live //gocap:mut borrows", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
+		{name: "N live //gosree:mut borrows", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
 			var b strings.Builder
 			b.WriteString("func F() int {\n")
 			for i := range n {
-				fmt.Fprintf(&b, "\tx%d := %d\n\t//gocap:mut\n\tp%d := &x%d\n", i, i, i, i)
+				fmt.Fprintf(&b, "\tx%d := %d\n\t//gosree:mut\n\tp%d := &x%d\n", i, i, i, i)
 			}
 			b.WriteString("\ts := 0\n")
 			for i := range n {
@@ -306,10 +306,10 @@ func scaleShapes() []scaleShape {
 			}
 			return files
 		}},
-		{name: "N //gocap:unsafe scopes each muting a finding", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
+		{name: "N //gosree:unsafe scopes each muting a finding", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
 			var b strings.Builder
 			for i := range n {
-				fmt.Fprintf(&b, "func F%d(ch chan *Job) {\n\tj := &Job{}\n\tch <- j\n\t//gocap:unsafe scale test\n\tj.ID = 1\n}\n\n", i)
+				fmt.Fprintf(&b, "func F%d(ch chan *Job) {\n\tj := &Job{}\n\tch <- j\n\t//gosree:unsafe scale test\n\tj.ID = 1\n}\n\n", i)
 			}
 			return scaleOne(b.String())
 		}},
@@ -347,7 +347,7 @@ func scaleChain(n int, calleeFirst bool) string {
 // scaleRow is the measurement of one shape at one size.
 type scaleRow struct {
 	n             int
-	gocap, ssa    time.Duration // gocap's analyzers; buildssa alone (its prerequisite) on the same packages
+	gosree, ssa   time.Duration // gosree's analyzers; buildssa alone (its prerequisite) on the same packages
 	alloc         uint64
 	diags, rounds int
 }
@@ -360,14 +360,14 @@ func scaleMeasureShape(t *testing.T, sh scaleShape, sizes []int, reps int) []sca
 		pkgs := scaleLoad(t, scaleModule(t, sh.gen(n)))
 		g := scaleMin(t, cliAnalyzers(), pkgs, reps)
 		s := scaleMin(t, []*analysis.Analyzer{buildssa.Analyzer}, pkgs, reps)
-		rows = append(rows, scaleRow{n: n, gocap: g.dur, ssa: s.dur, alloc: g.alloc, diags: g.diags})
+		rows = append(rows, scaleRow{n: n, gosree: g.dur, ssa: s.dur, alloc: g.alloc, diags: g.diags})
 	}
 	return rows
 }
 
 // scaleExponent is the growth exponent between two rows, on time above the SSA baseline.
 func scaleExponent(a, b scaleRow) float64 {
-	ta, tb := float64(a.gocap-a.ssa), float64(b.gocap-b.ssa)
+	ta, tb := float64(a.gosree-a.ssa), float64(b.gosree-b.ssa)
 	if ta <= 0 || tb <= 0 {
 		return math.NaN()
 	}
@@ -376,13 +376,13 @@ func scaleExponent(a, b scaleRow) float64 {
 
 func scaleTable(name string, rows []scaleRow) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n  %8s %12s %12s %12s %8s %8s\n", name, "N", "gocap", "buildssa", "alloc MB", "diags", "exp")
+	fmt.Fprintf(&b, "%s\n  %8s %12s %12s %12s %8s %8s\n", name, "N", "gosree", "buildssa", "alloc MB", "diags", "exp")
 	for i, r := range rows {
 		exp := "-"
 		if i > 0 {
 			exp = strconv.FormatFloat(scaleExponent(rows[i-1], r), 'f', 2, 64)
 		}
-		fmt.Fprintf(&b, "  %8d %12s %12s %12.1f %8d %8s\n", r.n, r.gocap.Round(time.Millisecond), r.ssa.Round(time.Millisecond),
+		fmt.Fprintf(&b, "  %8d %12s %12s %12.1f %8d %8s\n", r.n, r.gosree.Round(time.Millisecond), r.ssa.Round(time.Millisecond),
 			float64(r.alloc)/(1<<20), r.diags, exp)
 	}
 	return b.String()
@@ -413,7 +413,7 @@ func TestScale(t *testing.T) {
 				t.Errorf("%s: allocation grows with exponent %.2f from N=%d to N=%d (bound 2.6)", sh.name, allocExp, a.n, b.n)
 			}
 			// Bound the ratio of time above the SSA baseline; tiny absolute times are noise.
-			above := func(r scaleRow) time.Duration { return max(r.gocap-r.ssa, 20*time.Millisecond) }
+			above := func(r scaleRow) time.Duration { return max(r.gosree-r.ssa, 20*time.Millisecond) }
 			ratio := float64(above(b)) / float64(above(a))
 			if ratio > sh.maxRatio {
 				// Wall time on a busy machine overshoots; a real blowup overshoots again. Measure the
@@ -429,19 +429,19 @@ func TestScale(t *testing.T) {
 	}
 }
 
-// TestScaleExplore runs the shapes at larger sizes (multiplied by GOCAP_SCALE_EXPLORE) and only logs
+// TestScaleExplore runs the shapes at larger sizes (multiplied by GOSREE_SCALE_EXPLORE) and only logs
 // the table. It is the instrument for finding the size at which a shape blows up.
 func TestScaleExplore(t *testing.T) {
-	mult, _ := strconv.Atoi(os.Getenv("GOCAP_SCALE_EXPLORE"))
+	mult, _ := strconv.Atoi(os.Getenv("GOSREE_SCALE_EXPLORE"))
 	if mult <= 0 {
-		t.Skip("set GOCAP_SCALE_EXPLORE to a size multiplier")
+		t.Skip("set GOSREE_SCALE_EXPLORE to a size multiplier")
 	}
-	only := os.Getenv("GOCAP_SCALE_ONLY")
+	only := os.Getenv("GOSREE_SCALE_ONLY")
 	for _, sh := range scaleShapes() {
 		if only != "" && !strings.Contains(sh.name, only) {
 			continue
 		}
-		maxN, _ := strconv.Atoi(os.Getenv("GOCAP_SCALE_MAXN"))
+		maxN, _ := strconv.Atoi(os.Getenv("GOSREE_SCALE_MAXN"))
 		var sizes []int
 		for _, n := range sh.sizes {
 			if maxN > 0 && n*mult > maxN {
@@ -581,7 +581,7 @@ type Imm%[1]d struct {
 	b *Imm%[1]dB
 }
 
-//gocap:imm
+//gosree:imm
 type Imm%[1]dB struct {
 	c *Imm%[1]d
 	d []int
@@ -685,10 +685,10 @@ func TestScaleDeterminism(t *testing.T) {
 	}
 }
 
-// TestScaleDeterminismProcesses runs the built gocap binary ten times, each a fresh process, over the
+// TestScaleDeterminismProcesses runs the built gosree binary ten times, each a fresh process, over the
 // rich program and requires byte-identical output and exit codes.
 func TestScaleDeterminismProcesses(t *testing.T) {
-	bin := vetBuildGocap(t)
+	bin := vetBuildGosree(t)
 	dir := scaleModule(t, scaleRich(40))
 	env := []string{"GO111MODULE=on", "GOFLAGS=-mod=mod", "GOPROXY=off", "GOWORK=off", "GOTOOLCHAIN=local"}
 	var first vetResult
@@ -713,13 +713,13 @@ func TestScaleDeterminismProcesses(t *testing.T) {
 		}
 	}
 	// The text driver prints each action's diagnostics in emission order, so the map-ordered SAFE005
-	// findings make the CLI's output differ byte for byte between runs: a CI step that diffs gocap's
+	// findings make the CLI's output differ byte for byte between runs: a CI step that diffs gosree's
 	// output against a baseline flakes even though the set is stable.
 	scaleKnownBug(t, "RB-ORDER", fmt.Sprintf("%d of 9 fresh processes printed the same findings in a different order from the first", reordered), reordered > 0)
 }
 
 // TestScaleUnsafeStaleBorrow checks the stale-hatch count (ownership Stats.UnsafeStale) when a
-// //gocap:unsafe scope mutes only a borrow-pass finding. The borrow pass asks Suppressed and never
+// //gosree:unsafe scope mutes only a borrow-pass finding. The borrow pass asks Suppressed and never
 // calls Mute (passes/borrow/check.go:183, storage.go:63), so the scope is counted as stale although
 // it hides a BORROW004; docs/DIRECTIVES.md says a stale directive is one that suppresses nothing.
 func TestScaleUnsafeStaleBorrow(t *testing.T) {
@@ -728,14 +728,14 @@ func TestScaleUnsafeStaleBorrow(t *testing.T) {
 	}
 	pkgs := scaleLoad(t, scaleModule(t, scaleOne(`func Dangling() *int {
 	x := 1
-	//gocap:unsafe hides a BORROW004
+	//gosree:unsafe hides a BORROW004
 	return &x
 }
 
 func Moved(ch chan *Job) {
 	j := &Job{}
 	ch <- j
-	//gocap:unsafe hides a SAFE003
+	//gosree:unsafe hides a SAFE003
 	j.ID = 1
 }
 
@@ -770,7 +770,7 @@ func Dangling2() *int {
 	if stats.UnsafeScope != 2 {
 		t.Fatalf("UnsafeScope = %d, want 2", stats.UnsafeScope)
 	}
-	scaleKnownBug(t, "RB-STALE", fmt.Sprintf("a //gocap:unsafe that mutes a BORROW004 is counted stale (UnsafeStale = %d of %d scopes)", stats.UnsafeStale, stats.UnsafeScope),
+	scaleKnownBug(t, "RB-STALE", fmt.Sprintf("a //gosree:unsafe that mutes a BORROW004 is counted stale (UnsafeStale = %d of %d scopes)", stats.UnsafeStale, stats.UnsafeScope),
 		stats.UnsafeStale == 1)
 }
 

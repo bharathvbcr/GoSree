@@ -423,7 +423,7 @@ func invalidJoinChannelSelect() int {
 // 4.1 Stack borrow (\mub) sent on channel in select (on same line as select)
 func mubSelectSendSameLine(ch chan *int) {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	select { case ch <- b: default: } // want `CAP003: stack-scoped borrow 'b' .* cannot cross goroutine boundary: cannot be sent on a channel`
 }
@@ -431,7 +431,7 @@ func mubSelectSendSameLine(ch chan *int) {
 // 4.2 Stack borrow (\rob) sent on channel in select (on same line as select)
 func robSelectSendSameLine(ch chan *int) {
 	x := 10
-	//gocap:rob
+	//gosree:rob
 	r := &x
 	select { case ch <- r: default: } // want `CAP003: stack-scoped borrow 'r' .* cannot cross goroutine boundary: cannot be sent on a channel`
 }
@@ -443,7 +443,7 @@ func robSelectSendSameLine(ch chan *int) {
 // ast.CommClause.Pos() is the line of 'case'. Thus CAP003 is silently missed here!
 func mubSelectSendMultiline(ch chan *int) {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	select { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch <- b:
@@ -454,7 +454,7 @@ func mubSelectSendMultiline(ch chan *int) {
 // 4.4 Synchronous closure calling borrow passes cleanly
 func syncClosureNoEscape() int {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	func() {
 		*b = 42

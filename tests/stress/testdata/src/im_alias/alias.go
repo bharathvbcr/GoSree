@@ -9,7 +9,7 @@ import (
 
 // Config is a valid imm type: unexported pointer-free fields only.
 //
-//gocap:imm
+//gosree:imm
 type Config struct {
 	port int
 	n    int64

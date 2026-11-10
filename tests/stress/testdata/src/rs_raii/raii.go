@@ -1,6 +1,6 @@
 // Package rs_raii: Rust releases every resource in Drop, so a file, a lock guard, a timer or a
 // thread handle is released on every path, early returns and panics included. Go relies on the
-// programmer writing defer. gocap has no resource rule. go vet's lostcancel catches only a
+// programmer writing defer. gosree has no resource rule. go vet's lostcancel catches only a
 // context cancel func that is never called; SAFE009's lockset tracks what is held for guarded
 // memory, but nothing reports a function that returns still holding a lock.
 package rs_raii

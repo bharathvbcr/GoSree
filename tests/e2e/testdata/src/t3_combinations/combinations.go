@@ -13,7 +13,7 @@ type Item struct {
 // Sub-test 1A: Local borrow taken from \iso object; finishes borrow (NLL); then transfers \iso (Clean Pass)
 func IsoBorrowThenTransfer(ch chan *Item) {
 	it := &Item{Val: 10}
-	//gocap:mut
+	//gosree:mut
 	b := &it.Val
 	*b = 20 // borrow ends here
 	ch <- it // Valid: no active borrow at transfer point
@@ -22,7 +22,7 @@ func IsoBorrowThenTransfer(ch chan *Item) {
 // Sub-test 1B: Attempting to send \iso over channel while local mutable borrow is still active (BORROW003 / SAFE003)
 func IsoTransferDuringActiveBorrow(ch chan *Item) {
 	it := &Item{Val: 10}
-	//gocap:mut
+	//gosree:mut
 	b := &it.Val
 	ch <- it // want `BORROW003: cannot move 'it' because it is borrowed`
 	*b = 30  // want `SAFE003: composite literal is used after it was sent on a channel`
@@ -32,12 +32,12 @@ func IsoTransferDuringActiveBorrow(ch chan *Item) {
 // Pair 2: \imm with Methods & Second-Class Read-Only Borrows
 // =========================================================================
 
-//gocap:imm
+//gosree:imm
 type AppConfig struct {
 	timeoutMs int
 }
 
-//gocap:rob c
+//gosree:rob c
 func (c *AppConfig) GetTimeout() int {
 	return c.timeoutMs
 }
@@ -45,7 +45,7 @@ func (c *AppConfig) GetTimeout() int {
 // Sub-test 2A: Calling read-only method on \imm via read-only borrow (Clean Pass)
 func ValidImmReadBorrow() int {
 	cfg := &AppConfig{timeoutMs: 5000}
-	//gocap:rob
+	//gosree:rob
 	r := cfg
 	return r.GetTimeout()
 }
@@ -53,9 +53,9 @@ func ValidImmReadBorrow() int {
 // Sub-test 2B: Attempting mutable borrow on \imm struct (SAFE005 / BORROW002)
 func RejectMutBorrowOnImm() {
 	cfg := &AppConfig{timeoutMs: 5000}
-	//gocap:mut
+	//gosree:mut
 	m := &cfg.timeoutMs // want `SAFE005: cannot borrow field of immutable type AppConfig as mutable`
-	*m = 1000           // want `SAFE005: write to a field of AppConfig, which is //gocap:imm`
+	*m = 1000           // want `SAFE005: write to a field of AppConfig, which is //gosree:imm`
 }
 
 // =========================================================================
@@ -88,16 +88,16 @@ type PairRef struct {
 	Second *int
 }
 
-//gocap:mut p
+//gosree:mut p
 func SumPairRef(p *PairRef) int {
 	return *p.First + *p.Second
 }
 
 func TransientTupleWithBorrowParams() int {
 	a, b := 10, 20
-	//gocap:mut
+	//gosree:mut
 	ma := &a
-	//gocap:mut
+	//gosree:mut
 	mb := &b
 	pair := PairRef{First: ma, Second: mb}
 	return SumPairRef(&pair)
@@ -107,8 +107,8 @@ func TransientTupleWithBorrowParams() int {
 // Pair 5: Multiple Goroutines Sharing \imm While Transferring Disjoint \iso Tokens
 // =========================================================================
 
-//gocap:iso item1
-//gocap:iso item2
+//gosree:iso item1
+//gosree:iso item2
 func SharedImmWithDisjointIso(cfg *AppConfig, item1 *Item, item2 *Item, out chan *Item) {
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -137,12 +137,12 @@ type Accumulator struct {
 	Total int
 }
 
-//gocap:mut a
+//gosree:mut a
 func (a *Accumulator) Add(v int) {
 	a.Total += v
 }
 
-//gocap:rob a
+//gosree:rob a
 func (a *Accumulator) Current() int {
 	return a.Total
 }
@@ -161,7 +161,7 @@ func SequentialMethodBorrows() int {
 // Sub-test 7A: Synchronous closure verifying local borrow inline (Clean Pass)
 func SyncClosureBorrow() int {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	func() {
 		*b = 50
@@ -172,7 +172,7 @@ func SyncClosureBorrow() int {
 // Sub-test 7B: Asynchronous goroutine closure attempting to capture local borrow (CAP003)
 func AsyncClosureBorrowEscape() {
 	x := 10
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' .* cannot cross goroutine boundary`
 		*b = 50

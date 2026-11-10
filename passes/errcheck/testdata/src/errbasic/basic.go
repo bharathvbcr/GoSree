@@ -284,7 +284,7 @@ func err005CleanHandledClose(path string) (retErr error) {
 // --- Annotation suppression ---
 
 func suppressedUnsafe() {
-	//gocap:unsafe reason="best-effort fire-and-forget in test"
+	//gosree:unsafe reason="best-effort fire-and-forget in test"
 	doStep()
 	//gosree:unsafe reason="explicitly tolerated"
 	doStep()

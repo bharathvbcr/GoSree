@@ -6,7 +6,7 @@ package challenger_m4
 
 // 1.1 Self-recursive immutable binary tree
 //
-//gocap:imm
+//gosree:imm
 type RecTree struct { // want RecTree:"imm"
 	val   int
 	left  *RecTree
@@ -23,13 +23,13 @@ func newRecTree() *RecTree {
 
 // 1.2 Mutually recursive immutable structs (both valid)
 //
-//gocap:imm
+//gosree:imm
 type MutRecA struct { // want MutRecA:"imm"
 	val int
 	b   *MutRecB
 }
 
-//gocap:imm
+//gosree:imm
 type MutRecB struct { // want MutRecB:"imm"
 	val int
 	a   *MutRecA
@@ -46,13 +46,13 @@ func newMutCycle() *MutRecA {
 
 // 1.3 Mutually recursive structs with invalid field in one (fixpoint propagation)
 //
-//gocap:imm
-type BadCycleA struct { // want `SAFE005: //gocap:imm type BadCycleA is not immutable: field b has type \*challenger_m4.BadCycleB`
+//gosree:imm
+type BadCycleA struct { // want `SAFE005: //gosree:imm type BadCycleA is not immutable: field b has type \*challenger_m4.BadCycleB`
 	b *BadCycleB
 }
 
-//gocap:imm
-type BadCycleB struct { // want `SAFE005: //gocap:imm type BadCycleB is not immutable: field leak has type \[\]int`
+//gosree:imm
+type BadCycleB struct { // want `SAFE005: //gosree:imm type BadCycleB is not immutable: field leak has type \[\]int`
 	a    *BadCycleA
 	leak []int
 }
@@ -69,7 +69,7 @@ func overwriteRecTreeChild(t *RecTree) {
 
 // 1.6 Mutable borrow of nested field of recursive immutable tree
 func borrowRecTreeField(t *RecTree) {
-	//gocap:mut
+	//gosree:mut
 	b := &t.left.val // want `SAFE005: cannot borrow field of immutable type RecTree as mutable`
 	_ = b
 }
@@ -83,7 +83,7 @@ func localImmValueRead() int {
 // 1.8 Local value declaration of imm struct with write to field
 func localImmValueWrite() {
 	var c RecTree
-	c.val = 10 // want `SAFE005: taking the address of variable c, a variable of //gocap:imm type RecTree` `SAFE005: write to a field of RecTree`
+	c.val = 10 // want `SAFE005: taking the address of variable c, a variable of //gosree:imm type RecTree` `SAFE005: write to a field of RecTree`
 }
 
 // 1.9 Taking address of immutable local value
@@ -127,7 +127,7 @@ func switchMubGoroutineCapture(mode int) {
 	val := 42
 	switch mode {
 	case 1:
-		//gocap:mut
+		//gosree:mut
 		b := &val
 		go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 			*b = 100
@@ -153,7 +153,7 @@ func selectRobGoroutineCapture(ch <-chan int) {
 	val := 10
 	select {
 	case <-ch:
-		//gocap:rob
+		//gosree:rob
 		r := &val
 		go func() { // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 			println(*r)
@@ -166,7 +166,7 @@ func selectGoArgBorrow(ch <-chan int) {
 	val := 55
 	select {
 	case <-ch:
-		//gocap:mut
+		//gosree:mut
 		b := &val
 		go worker(b) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 	}
@@ -175,7 +175,7 @@ func selectGoArgBorrow(ch <-chan int) {
 // 2.6 Method receiver started as goroutine with stack-scoped borrow
 func methodReceiverBorrowGoroutine() {
 	var s service
-	//gocap:mut
+	//gosree:mut
 	m := &s
 	go m.run() // want `CAP003: stack-scoped borrow 'm' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
@@ -183,7 +183,7 @@ func methodReceiverBorrowGoroutine() {
 // 2.7 Read-only borrow method receiver started as goroutine
 func methodReceiverRobGoroutine() {
 	var s service
-	//gocap:rob
+	//gosree:rob
 	r := &s
 	go r.run() // want `CAP003: stack-scoped borrow 'r' \(\\rob\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
@@ -208,9 +208,9 @@ func selectMultiSendUseInside(ch1, ch2 chan *packet) {
 func selectMultiBorrowSend(ch1, ch2 chan *int) {
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	select { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch1 <- b1:

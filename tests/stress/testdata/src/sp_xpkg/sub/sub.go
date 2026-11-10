@@ -7,7 +7,7 @@ type Job struct{ ID int }
 
 // Submit owns its argument and starts a goroutine with it: callers' arguments move.
 //
-//gocap:iso j
+//gosree:iso j
 func Submit(j *Job) {
 	go func() { j.ID++ }()
 }
@@ -15,7 +15,7 @@ func Submit(j *Job) {
 // Worker submits through a method with the same contract.
 type Worker struct{}
 
-//gocap:iso j
+//gosree:iso j
 func (Worker) Submit(j *Job) {
 	go func() { j.ID++ }()
 }
@@ -48,14 +48,14 @@ func Spawn(f func()) {
 
 // SpawnIso claims its callback.
 //
-//gocap:iso f
+//gosree:iso f
 func SpawnIso(f func()) {
 	go f()
 }
 
 // Go is a generic spawner that claims its value.
 //
-//gocap:iso v, f
+//gosree:iso v, f
 func Go[T any](v T, f func(T)) {
 	go f(v)
 }

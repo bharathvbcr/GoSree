@@ -7,7 +7,7 @@
 // as clean controls that lock that change in.
 package mv_marker
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 type Job struct{ ID int }
 

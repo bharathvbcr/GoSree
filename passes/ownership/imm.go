@@ -8,8 +8,8 @@ import (
 
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
-	"github.com/bharathvbcr/gocap/internal/kinds"
+	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/kinds"
 )
 
 // validateImm decides which //safe:imm annotations hold. An imm type must be a struct whose fields
@@ -136,7 +136,7 @@ func (st *state) immPrefixOf(t types.Type) string {
 			return st.ix.ImmPrefixOf(tn) + "imm"
 		}
 	}
-	return "//gocap:imm"
+	return "//gosree:imm"
 }
 
 // checkImmStores reports SAFE005 for writes into imm memory outside its composite literal, for

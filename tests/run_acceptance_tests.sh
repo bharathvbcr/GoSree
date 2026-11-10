@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Master E2E Acceptance Test Runner: gocap
+# Master E2E Acceptance Test Runner: gosree
 # Dual-Track 4-Tier Verification Architecture
 # ==============================================================================
 set -euo pipefail
@@ -74,7 +74,7 @@ esac
 
 if [ "${JSON_OUTPUT}" = false ]; then
   echo -e "${BOLD}${BLUE}==============================================================================${NC}"
-  echo -e "${BOLD}${CYAN}   gocap Acceptance Test Runner — Dual-Track 4-Tier Verification   ${NC}"
+  echo -e "${BOLD}${CYAN}   gosree Acceptance Test Runner — Dual-Track 4-Tier Verification   ${NC}"
   echo -e "${BOLD}${BLUE}==============================================================================${NC}"
   echo -e "Executing target: ${BOLD}${REPO_DIR}/tests/e2e${NC}"
   echo -e "Tier filter:      ${BOLD}${TIER}${NC} (Pattern: ${TEST_FILTER})"
@@ -87,9 +87,9 @@ START_TIME=$(python3 -c 'import time; print(int(time.time() * 1000))')
 # Run Go tests
 GO_TEST_ARGS=("-v" "-run" "${TEST_FILTER}" "./tests/e2e/...")
 if [ "${VERBOSE}" = true ]; then
-  go test "${GO_TEST_ARGS[@]}" 2>&1 | tee /tmp/gocap_e2e_out.txt
+  go test "${GO_TEST_ARGS[@]}" 2>&1 | tee /tmp/gosree_e2e_out.txt
 else
-  go test "${GO_TEST_ARGS[@]}" > /tmp/gocap_e2e_out.txt 2>&1
+  go test "${GO_TEST_ARGS[@]}" > /tmp/gosree_e2e_out.txt 2>&1
 fi
 TEST_EXIT_CODE=$?
 
@@ -97,9 +97,9 @@ END_TIME=$(python3 -c 'import time; print(int(time.time() * 1000))')
 DURATION_MS=$((END_TIME - START_TIME))
 
 # Parse results
-PASSED_SUITES=$(grep -c "^--- PASS:" /tmp/gocap_e2e_out.txt || true)
-SKIPPED_SUITES=$(grep -c "^--- SKIP:" /tmp/gocap_e2e_out.txt || true)
-FAILED_SUITES=$(grep -c "^--- FAIL:" /tmp/gocap_e2e_out.txt || true)
+PASSED_SUITES=$(grep -c "^--- PASS:" /tmp/gosree_e2e_out.txt || true)
+SKIPPED_SUITES=$(grep -c "^--- SKIP:" /tmp/gosree_e2e_out.txt || true)
+FAILED_SUITES=$(grep -c "^--- FAIL:" /tmp/gosree_e2e_out.txt || true)
 
 # Total individual test cases inventoried across tiers
 TOTAL_INVENTORIED_CASES=102
@@ -164,6 +164,6 @@ if [ "${STATUS}" = "PASSED" ]; then
   exit 0
 else
   echo -e "${RED}${BOLD}✗ ACCEPTANCE TESTS FAILED (Exit Code: ${TEST_EXIT_CODE})${NC}"
-  cat /tmp/gocap_e2e_out.txt
+  cat /tmp/gosree_e2e_out.txt
   exit "${TEST_EXIT_CODE}"
 fi

@@ -19,13 +19,13 @@ func TestChallengerM4_StructTagsAndCommentsErasure(t *testing.T) {
 
 import (
 	"fmt"
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type Config struct {
 	// Primary worker pool configuration
-	Workers cap.Mut[int] ` + "`json:\"workers\" db:\"workers\"`" + ` //gocap:mub
-	Timeout /*gocap:rob*/ cap.Ref[int] /* inline */ ` + "`json:\"timeout\"`" + `
+	Workers cap.Mut[int] ` + "`json:\"workers\" db:\"workers\"`" + ` //gosree:mub
+	Timeout /*gosree:rob*/ cap.Ref[int] /* inline */ ` + "`json:\"timeout\"`" + `
 	Secret  cap.Iso[string] ` + "`yaml:\"secret,omitempty\"`" + ` //safe:iso
 	// Doc comment for metadata
 	Metadata cap.Imm[string] ` + "`json:\"metadata\"`" + `
@@ -56,12 +56,12 @@ func main() {
 	erasedStr := string(erased)
 
 	// Verify directives are completely gone
-	if strings.Contains(erasedStr, "//gocap:") || strings.Contains(erasedStr, "/*gocap:") || strings.Contains(erasedStr, "//safe:") {
+	if strings.Contains(erasedStr, "//gosree:") || strings.Contains(erasedStr, "/*gosree:") || strings.Contains(erasedStr, "//safe:") {
 		t.Errorf("Directives survived erasure:\n%s", erasedStr)
 	}
 
 	// Verify cap import was cleaned up
-	if strings.Contains(erasedStr, "github.com/bharathvbcr/gocap/cap") {
+	if strings.Contains(erasedStr, "github.com/bharathvbcr/gosree/cap") {
 		t.Errorf("cap import was not cleaned up:\n%s", erasedStr)
 	}
 
@@ -110,7 +110,7 @@ func TestChallengerM4_ComplexGenericsErasure(t *testing.T) {
 
 import (
 	"fmt"
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type Result[T any, E error] struct {
@@ -168,7 +168,7 @@ func main() {
 
 	erasedStr := string(erased)
 
-	if strings.Contains(erasedStr, "github.com/bharathvbcr/gocap/cap") {
+	if strings.Contains(erasedStr, "github.com/bharathvbcr/gosree/cap") {
 		t.Errorf("cap import survived in erased code:\n%s", erasedStr)
 	}
 
@@ -200,7 +200,7 @@ func TestChallengerM4_ControlFlowErasure(t *testing.T) {
 import (
 	"fmt"
 	"sync"
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type Task struct {

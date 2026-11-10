@@ -9,7 +9,7 @@ func (c *Counter) Set(n int) { c.N = n }
 // 1. control: direct assignment while borrowed.
 func directAssign() {
 	x := 0
-	b := &x //gocap:rob
+	b := &x //gosree:rob
 	x = 1   // HIT(BORROW003)
 	_ = *b
 }
@@ -18,7 +18,7 @@ func directAssign() {
 // `c.set(1)` while `&c.n` is live (E0502).
 func methodReceiver() {
 	var c Counter
-	b := &c.N //gocap:rob
+	b := &c.N //gosree:rob
 	c.Set(1)  // HIT(BORROW003): Set takes &c and writes c.N while b reads it
 	_ = *b
 }
@@ -27,7 +27,7 @@ func methodReceiver() {
 func writeThroughAlias() {
 	x := 0
 	p := &x
-	b := &x //gocap:rob
+	b := &x //gosree:rob
 	*p = 1  // HIT(BORROW003): p == &x, so x changes under the read-only borrow b
 	_ = *b
 }
@@ -35,7 +35,7 @@ func writeThroughAlias() {
 // 4. control: `*(&x) = ` is caught, through the address-take.
 func derefAddr() {
 	x := 0
-	b := &x   //gocap:rob
+	b := &x   //gosree:rob
 	*(&x) = 1 // HIT(BORROW003)
 	_ = *b
 }
@@ -43,7 +43,7 @@ func derefAddr() {
 // 5. copy into the borrowed slice by name: caught.
 func copyByName(src []int) {
 	s := make([]int, 4)
-	b := &s[0]   //gocap:rob
+	b := &s[0]   //gosree:rob
 	copy(s, src) // HIT(BORROW003)
 	_ = *b
 }
@@ -51,7 +51,7 @@ func copyByName(src []int) {
 // 6. copy into a reslice of the borrowed slice.
 func copyBySlice(src []int) {
 	s := make([]int, 4)
-	b := &s[0]      //gocap:rob
+	b := &s[0]      //gosree:rob
 	copy(s[:], src) // HIT(BORROW003): s[:] is s, so s[0] is overwritten under the read-only borrow b
 	_ = *b
 }
@@ -59,7 +59,7 @@ func copyBySlice(src []int) {
 // 7. clear through a reslice.
 func clearBySlice() {
 	s := []int{1, 2, 3}
-	b := &s[0]  //gocap:rob
+	b := &s[0]  //gosree:rob
 	clear(s[:]) // HIT(BORROW003): clear zeroes s[0] while b is live
 	_ = *b
 }
@@ -68,7 +68,7 @@ func clearBySlice() {
 // into s[1].
 func appendIntoCapacity() {
 	s := make([]int, 2, 4)
-	b := &s[1]           //gocap:rob
+	b := &s[1]           //gosree:rob
 	_ = append(s[:1], 9) // HIT(BORROW003): writes s[1] in place (cap 4 >= 2), so *b changes to 9 under a read-only borrow
 	_ = *b
 }
@@ -77,7 +77,7 @@ func appendIntoCapacity() {
 // pointing at the old array.
 func appendRealloc() int {
 	s := []int{1}
-	p := &s[0]       //gocap:rob
+	p := &s[0]       //gosree:rob
 	s = append(s, 2) // HIT(BORROW003)
 	s[0] = 100       // HIT(BORROW003)
 	return *p
@@ -86,7 +86,7 @@ func appendRealloc() int {
 // 10. range assigns to an existing owner variable.
 func rangeReassign() {
 	x := 0
-	b := &x           //gocap:rob
+	b := &x           //gosree:rob
 	for x = range 3 { // HIT(BORROW003): each iteration assigns x while b is still read below
 		_ = *b
 	}
@@ -98,7 +98,7 @@ func runIt(f func()) { f() }
 func closureViaHelper() {
 	x := 0
 	m := func() { x = 9 }
-	b := &x  //gocap:rob
+	b := &x  //gosree:rob
 	runIt(m) // HIT(BORROW003): runIt calls m, which assigns x while b is live
 	_ = *b
 }
@@ -107,7 +107,7 @@ func closureViaHelper() {
 func closureDirect() {
 	x := 0
 	m := func() { x = 9 }
-	b := &x //gocap:rob
+	b := &x //gosree:rob
 	m()     // HIT(BORROW003)
 	_ = *b
 }
@@ -116,7 +116,7 @@ func closureDirect() {
 // literal is reported at the literal, which matches Rust (the closure captures x by &mut).
 func closureMadeWhileBorrowed() {
 	x := 0
-	b := &x               //gocap:rob
+	b := &x               //gosree:rob
 	m := func() { x = 9 } // HIT(BORROW003)
 	m()                   // HIT(BORROW003)
 	_ = *b
@@ -128,7 +128,7 @@ type hook struct{ f func() }
 func closureInField() {
 	x := 0
 	h := hook{f: func() { x = 9 }}
-	b := &x //gocap:rob
+	b := &x //gosree:rob
 	h.f()   // HIT(BORROW003): h.f assigns x while b is live
 	_ = *b
 }
@@ -138,7 +138,7 @@ func setVia(p *int) { *p = 7 }
 
 func calleeWritesOwner() {
 	x := 0
-	b := &x    //gocap:rob
+	b := &x    //gosree:rob
 	setVia(&x) // HIT(BORROW003)
 	_ = *b
 }
@@ -147,7 +147,7 @@ func calleeWritesOwner() {
 func calleeWritesAlias() {
 	x := 0
 	p := &x
-	b := &x   //gocap:rob
+	b := &x   //gosree:rob
 	setVia(p) // HIT(BORROW003): p == &x and setVia writes through it while b is live
 	_ = *b
 }
@@ -157,7 +157,7 @@ type Pair struct{ A, B int }
 
 func structCopy() {
 	var s Pair
-	b := &s.A  //gocap:rob
+	b := &s.A  //gosree:rob
 	s = Pair{} // HIT(BORROW003)
 	_ = *b
 }
@@ -165,7 +165,7 @@ func structCopy() {
 // 17. swap through a multi-assign.
 func swap() {
 	x, y := 1, 2
-	b := &x     //gocap:rob
+	b := &x     //gosree:rob
 	x, y = y, x // HIT(BORROW003)
 	_ = *b
 	_ = y
@@ -175,7 +175,7 @@ func swap() {
 // the borrow is of a copy and delete is harmless. FP probe.
 func mapDelete(m map[string]Pair) {
 	v := m["a"]
-	b := &v.A //gocap:rob
+	b := &v.A //gosree:rob
 	delete(m, "a")
 	_ = *b
 }
@@ -183,7 +183,7 @@ func mapDelete(m map[string]Pair) {
 // 19. compound assignment through a field of the owner.
 func compoundField() {
 	var s Pair
-	b := &s.A //gocap:rob
+	b := &s.A //gosree:rob
 	s.A += 1  // HIT(BORROW003)
 	_ = *b
 }
@@ -191,7 +191,7 @@ func compoundField() {
 // 20. moving the owner to a goroutine (as a pointer) while it is borrowed.
 func moveToGoroutine(done chan bool) {
 	x := 0
-	b := &x                                      //gocap:rob
+	b := &x                                      //gosree:rob
 	go func(p *int) { *p = 1; done <- true }(&x) // HIT(BORROW003) HIT(BORROW001)
 	_ = *b                                       // HIT(SAFE003)
 }
@@ -201,7 +201,7 @@ func moveToGoroutine(done chan bool) {
 // (`let r = &x; tx.send(x); *r`), and in Go nothing aliases.
 func sendOwnerValue(ch chan int) {
 	x := 0
-	b := &x //gocap:rob
+	b := &x //gosree:rob
 	ch <- x // FP(BORROW003): sending an int copies it; a read under a read-only borrow is allowed by the documented matrix (only writes and moves invalidate, docs §5)
 	_ = *b
 }
@@ -213,7 +213,7 @@ type Node struct{ v *int }
 
 func ownerAddrAfterBorrowDies(n *Node) {
 	x := 0
-	b := &x //gocap:rob
+	b := &x //gosree:rob
 	_ = *b
 	n.v = &x // FP(BORROW001): b is dead (last use on the line above) and &x is an ordinary pointer, not an annotated borrow
 }

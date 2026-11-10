@@ -1,6 +1,6 @@
 // Package dx_directive attacks the directive lexer (internal/annot/annot.go:213 parseDirective).
-// A comment that is not exactly "//gocap:" or "//safe:" (or the /*...*/ forms) is not a directive and
-// is dropped without a word. For //gocap:unsafe that fails closed (the finding stays). For every
+// A comment that is not exactly "//gosree:" or "//safe:" (or the /*...*/ forms) is not a directive and
+// is dropped without a word. For //gosree:unsafe that fails closed (the finding stays). For every
 // directive that asks for a check (iso, guarded_by, holds, imm, mub, rob) it fails open: the author
 // believes a guarantee is checked and none is. An unknown verb after a correct prefix is reported,
 // so the hole is exactly the prefix.
@@ -35,23 +35,23 @@ func (s *S) locked() {
 
 // iso: the control moves the caller's argument; the near-misses move nothing.
 //
-//gocap:iso j
+//gosree:iso j
 func consume(j *Job) { _ = j }
 
-// GOCAP:ISO j // HIT(SAFE007) upper-case prefix after a space; reported as a near miss
+// GOSREE:ISO j // HIT(SAFE007) upper-case prefix after a space; reported as a near miss
 func consumeLoud(j *Job) { _ = j }
 
-// gofmt made the line below. It was written "//gocap:Iso j", which gocap reports as an unknown
+// gofmt made the line below. It was written "//gosree:Iso j", which gosree reports as an unknown
 // directive. gofmt keeps "//x:y" unspaced in a doc comment only when y starts with a lower-case
 // letter or digit, so it inserted the space, and the SAFE007 vanished with it: formatting the file
 // turns a reported typo into a silently dropped directive.
 //
-// gocap:Iso j // HIT(SAFE007) the reported "//gocap:Iso j" after gofmt; reported again, as a near miss
+// gosree:Iso j // HIT(SAFE007) the reported "//gosree:Iso j" after gofmt; reported again, as a near miss
 func consumeCase(j *Job) { _ = j }
 
 // Outside a doc comment gofmt leaves the line alone, and the typo stays reported.
 func caseInBody() {
-	//gocap:Unsafe reason // HIT(SAFE007)
+	//gosree:Unsafe reason // HIT(SAFE007)
 	_ = 1
 }
 
@@ -62,24 +62,24 @@ func callers() {
 
 	b := &Job{}
 	consumeLoud(b)
-	b.ID = 1 // MISS(SAFE003): consumeLoud's "// GOCAP:ISO j" was dropped, so passing b moved nothing
+	b.ID = 1 // MISS(SAFE003): consumeLoud's "// GOSREE:ISO j" was dropped, so passing b moved nothing
 }
 
 // A local binding annotated both mutable and read-only. On a parameter the same pair is rejected
 // (annot.go:335-341); on an assignment both are recorded and nothing is said.
 func mutAndRob() {
 	x := 1
-	//gocap:rob
-	b := &x //gocap:mut // HIT(SAFE007) b would be both a \mub and a \rob borrow; the same check as for a parameter rejects it
+	//gosree:rob
+	b := &x //gosree:mut // HIT(SAFE007) b would be both a \mub and a \rob borrow; the same check as for a parameter rejects it
 	*b = 2  // HIT(BORROW003)
 }
 
 // Controls: misplaced directives that are reported.
 //
-//gocap:iso r // HIT(SAFE007)
+//gosree:iso r // HIT(SAFE007)
 func result() (r *Job) { return nil }
 
 // A blank line between the directive and the type detaches it, and that is reported.
-//gocap:imm // HIT(SAFE007)
+//gosree:imm // HIT(SAFE007)
 
 type spaced struct{}

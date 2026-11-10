@@ -14,18 +14,18 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
-	"github.com/bharathvbcr/gocap/passes/ownership"
+	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/passes/ownership"
 )
 
 // ModuleReport is the machine-readable result of -module, written to <out>/module-report.json.
 type ModuleReport struct {
 	GoVersion string `json:"go_version"`
-	// GocapCommit is `git describe --always --dirty` of the gocap checkout the tool was run from.
-	GocapCommit string   `json:"gocap_commit"`
-	Dir         string   `json:"dir"`
-	Patterns    []string `json:"patterns"`
-	Tests       bool     `json:"tests"`
+	// GosreeCommit is `git describe --always --dirty` of the gosree checkout the tool was run from.
+	GosreeCommit string   `json:"gosree_commit"`
+	Dir          string   `json:"dir"`
+	Patterns     []string `json:"patterns"`
+	Tests        bool     `json:"tests"`
 	// Repo, Rev and Subdir name the archived commit, for -git; Rev is the full SHA.
 	Repo   string `json:"repo,omitempty"`
 	Rev    string `json:"rev,omitempty"`
@@ -50,7 +50,7 @@ type moduleOpts struct {
 
 type gitSource struct{ repo, rev, subdir string }
 
-// PackageStats is what gocap saw in one package (or, for the total, in all of them).
+// PackageStats is what gosree saw in one package (or, for the total, in all of them).
 type PackageStats struct {
 	Package string `json:"package"`
 	ownership.Stats
@@ -74,7 +74,7 @@ func ratio(a, b int) float64 {
 }
 
 func runModule(o moduleOpts) {
-	rep := ModuleReport{GoVersion: runtime.Version(), GocapCommit: gocapCommit(), Tests: o.tests}
+	rep := ModuleReport{GoVersion: runtime.Version(), GosreeCommit: gosreeCommit(), Tests: o.tests}
 	if o.git != nil {
 		short := o.git.rev
 		if len(short) > 12 {
@@ -194,7 +194,7 @@ func (ps *PackageStats) add(s ownership.Stats) {
 }
 
 // checkApplied fails unless every table row took effect: no directive is malformed (SAFE007), and the
-// counts gocap parsed match the table's. A row that anchored but did not parse would otherwise leave
+// counts gosree parsed match the table's. A row that anchored but did not parse would otherwise leave
 // the run measuring less than the table claims. Without tests, rows in _test.go files are written but
 // not loaded, so they are not expected.
 func checkApplied(rows []annotation, t PackageStats, tests bool) error {
@@ -211,7 +211,7 @@ func checkApplied(rows []annotation, t PackageStats, tests bool) error {
 	}
 	for verb, n := range got {
 		if n != want[verb] {
-			bad = append(bad, fmt.Sprintf("%s: table has %d, gocap parsed %d", verb, want[verb], n))
+			bad = append(bad, fmt.Sprintf("%s: table has %d, gosree parsed %d", verb, want[verb], n))
 		}
 	}
 	if n := t.Findings[annot.CategoryMalformed]; n > 0 {
@@ -224,8 +224,8 @@ func checkApplied(rows []annotation, t PackageStats, tests bool) error {
 	return nil
 }
 
-// gocapCommit describes the gocap checkout in the working directory, or "unknown" outside one.
-func gocapCommit() string {
+// gosreeCommit describes the gosree checkout in the working directory, or "unknown" outside one.
+func gosreeCommit() string {
 	out, err := exec.Command("git", "describe", "--always", "--dirty").Output()
 	if err != nil {
 		return "unknown"
@@ -262,7 +262,7 @@ func distinctPackages(pkgs []*packages.Package) []*packages.Package {
 
 func printModuleSummary(rep ModuleReport, path string) {
 	var b bytes.Buffer
-	fmt.Fprintf(&b, "gocap on %s (%s, %s, tests=%v)\n", rep.Dir, strings.Join(rep.Patterns, " "), rep.GoVersion, rep.Tests)
+	fmt.Fprintf(&b, "gosree on %s (%s, %s, tests=%v)\n", rep.Dir, strings.Join(rep.Patterns, " "), rep.GoVersion, rep.Tests)
 	var shown []PackageStats
 	width := len("package")
 	quiet := 0
@@ -291,7 +291,7 @@ func printModuleSummary(rep ModuleReport, path string) {
 	fmt.Fprintf(&b, "         checked claims (not counted as escape hatches): %d guarded_by, %d holds, %d imm, %d iso\n",
 		t.Guarded, t.Holds, t.Imm, t.Iso)
 	if rep.Rev != "" {
-		fmt.Fprintf(&b, "  archived %s at %s (%s); %d annotations; gocap %s\n", rep.Subdir, rep.Rev, rep.Repo, rep.Annotations, rep.GocapCommit)
+		fmt.Fprintf(&b, "  archived %s at %s (%s); %d annotations; gosree %s\n", rep.Subdir, rep.Rev, rep.Repo, rep.Annotations, rep.GosreeCommit)
 	}
 	b.WriteString("  transfers are go statements, callbacks run on another goroutine (time.AfterFunc, WaitGroup.Go,\n" +
 		"  errgroup, net/http handlers), channel sends and //safe:iso arguments\n")

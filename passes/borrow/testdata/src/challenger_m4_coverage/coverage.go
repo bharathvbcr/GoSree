@@ -52,7 +52,7 @@ type StructWithMarkers struct {
 }
 
 type EmbeddedBlockComment struct {
-	*int /*gocap:mut*/ // want `BORROW001: embedded struct field cannot have second-class borrow type`
+	*int /*gosree:mut*/ // want `BORROW001: embedded struct field cannot have second-class borrow type`
 }
 
 type EmbeddedLegacyBlockComment struct {
@@ -60,7 +60,7 @@ type EmbeddedLegacyBlockComment struct {
 }
 
 type EmbeddedDocComment struct {
-	//gocap:mut
+	//gosree:mut
 	*int // want `BORROW001: embedded struct field cannot have second-class borrow type`
 }
 
@@ -84,7 +84,7 @@ func dummyCleanup(v int) {
 // 2.1 Owner mutated after defer: borrow lifetime extended to return by defer!
 func TestDeferBorrowExtendsLifetime() {
 	x := 10
-	b := &x /*gocap:rob*/
+	b := &x /*gosree:rob*/
 	defer dummyInspect(b)
 	x = 20 // want `BORROW003: cannot assign to 'x' because it is borrowed`
 	_ = x
@@ -93,25 +93,25 @@ func TestDeferBorrowExtendsLifetime() {
 // 2.2 Conflicting mutable borrow after defer: borrow lifetime extended to return!
 func TestDeferBorrowConflict() {
 	x := 10
-	b1 := &x /*gocap:rob*/
+	b1 := &x /*gosree:rob*/
 	defer dummyInspect(b1)
-	b2 := &x /*gocap:mut*/ // want `BORROW002: cannot borrow 'x' as mutable because it is also borrowed as read-only`
+	b2 := &x /*gosree:mut*/ // want `BORROW002: cannot borrow 'x' as mutable because it is also borrowed as read-only`
 	*b2 = 20
 }
 
 // 2.3 Conflicting simultaneous mutable borrow across defer
 func TestDeferMutBorrowConflict() {
 	x := 10
-	b1 := &x /*gocap:mut*/
+	b1 := &x /*gosree:mut*/
 	defer dummyInspect(b1)
-	b2 := &x /*gocap:mut*/ // want `BORROW002: cannot borrow 'x' as mutable more than once at a time`
+	b2 := &x /*gosree:mut*/ // want `BORROW002: cannot borrow 'x' as mutable more than once at a time`
 	*b2 = 30
 }
 
 // 2.4 Clean defer: independent variable used in defer, borrow already expired
 func TestDeferIndependentVarClean() {
 	x := 10
-	b := &x /*gocap:rob*/
+	b := &x /*gosree:rob*/
 	println(*b)
 	y := 20
 	defer dummyCleanup(y)
@@ -129,7 +129,7 @@ func TestNestedLoopEscape() {
 	x := 10
 	for i := 0; i < 2; i++ {
 		for j := 0; j < 2; j++ {
-			out = &x /*gocap:mut*/ // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`
+			out = &x /*gosree:mut*/ // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`
 		}
 	}
 	_ = out
@@ -141,7 +141,7 @@ func TestMiddleLoopEscape() {
 	for i := 0; i < 2; i++ {
 		var mid *int
 		for j := 0; j < 2; j++ {
-			mid = &x /*gocap:mut*/ // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`
+			mid = &x /*gosree:mut*/ // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`
 		}
 		_ = mid
 	}
@@ -153,7 +153,7 @@ func TestRangeLoopEscape() {
 	x := 10
 	items := []int{1, 2}
 	for range items {
-		out = &x /*gocap:mut*/ // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`
+		out = &x /*gosree:mut*/ // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`
 	}
 	_ = out
 }
@@ -163,7 +163,7 @@ func TestLoopCarriedVarEscape() {
 	var out *int
 	x := 10
 	for i := 0; i < 2; i++ {
-		b := &x /*gocap:mut*/
+		b := &x /*gosree:mut*/
 		out = b // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`
 	}
 	_ = out
@@ -173,7 +173,7 @@ func TestLoopCarriedVarEscape() {
 func TestLoopLocalBorrowClean() {
 	x := 10
 	for i := 0; i < 3; i++ {
-		b := &x /*gocap:mut*/
+		b := &x /*gosree:mut*/
 		*b += i
 	}
 	x = 99 // clean! borrow expired
@@ -187,7 +187,7 @@ func TestLoopControlFlowNLL() {
 		if i == 1 {
 			continue
 		}
-		b := &x /*gocap:mut*/
+		b := &x /*gosree:mut*/
 		*b += i
 		if i == 3 {
 			break
@@ -202,27 +202,27 @@ func TestLoopControlFlowNLL() {
 // ============================================================================
 
 // 4.1 Named pointer type conversion escaping via return
-//gocap:mut b
+//gosree:mut b
 func TestChangeTypeEscapeReturn(b *int) PtrAlias {
 	pa := PtrAlias(b)
 	return pa // want `BORROW001: second-class borrow cannot escape stack frame via return`
 }
 
 // 4.2 Named pointer type conversion stored to package global
-//gocap:mut b
+//gosree:mut b
 func TestChangeTypeStoreGlobal(b *int) {
 	GlobalAlias = PtrAlias(b) // want `BORROW001: package variable 'GlobalAlias' cannot store second-class borrow`
 }
 
 // 4.3 Multi-hop pointer to global store
-//gocap:mut b
+//gosree:mut b
 func TestMultiHopGlobalStore(b *int) {
 	pp := &GlobalTarget
 	*pp = b // want `BORROW001: package variable 'GlobalTarget' cannot store second-class borrow`
 }
 
 // 4.4 Multi-hop helper escape passing borrow alongside global address
-//gocap:mut b
+//gosree:mut b
 func TestMultiHopHelperEscape(b *int) {
 	assignHelper(&GlobalTarget, b) // want `BORROW001: package variable 'GlobalTarget' cannot store second-class borrow`
 }
@@ -236,7 +236,7 @@ func assignHelper(dst **int, src *int) {
 // ============================================================================
 
 // 5.1 Interface parameter boxing in call expression
-//gocap:mut b
+//gosree:mut b
 func TestInterfaceParamBoxing(s AnySink, b *int) {
 	s.Consume(b) // want `BORROW001: struct field or interface cannot box second-class borrow`
 }
@@ -246,13 +246,13 @@ func variadicSink(args ...any) {
 	_ = args
 }
 
-//gocap:mut b
+//gosree:mut b
 func TestVariadicDirect(b *int) {
 	variadicSink(b) // want `BORROW001: struct field or interface cannot box second-class borrow`
 }
 
 // 5.3 Interface method call without interface parameter boxing (clean)
-//gocap:rob b
+//gosree:rob b
 func TestInterfaceMethodCallClean(r Reader, b *int) {
 	r.Read(b) // clean! p *int is a direct pointer parameter, not an interface
 }
@@ -262,7 +262,7 @@ func TestInterfaceMethodCallClean(r Reader, b *int) {
 // ============================================================================
 
 // 6.1 Clean recursive borrow passing (e.g. countdown mutation)
-//gocap:mut b
+//gosree:mut b
 func TestRecursiveCountdownClean(n int, b *int) {
 	if n <= 0 {
 		return
@@ -272,7 +272,7 @@ func TestRecursiveCountdownClean(n int, b *int) {
 }
 
 // 6.2 Clean recursive read-only borrow passing
-//gocap:rob b
+//gosree:rob b
 func TestRecursiveReadClean(n int, b *int) int {
 	if n <= 0 {
 		return *b
@@ -281,7 +281,7 @@ func TestRecursiveReadClean(n int, b *int) int {
 }
 
 // 6.3 Recursive function escaping borrow to package global
-//gocap:mut b
+//gosree:mut b
 func TestRecursiveEscapeGlobal(n int, b *int) {
 	if n <= 0 {
 		GlobalTarget = b // want `BORROW001: package variable 'GlobalTarget' cannot store second-class borrow`
@@ -291,7 +291,7 @@ func TestRecursiveEscapeGlobal(n int, b *int) {
 }
 
 // 6.4 Recursive function escaping borrow via return
-//gocap:mut b
+//gosree:mut b
 func TestRecursiveEscapeReturn(n int, b *int) *int {
 	if n <= 0 {
 		return b // want `BORROW001: borrow stored in struct field 'b' escapes stack frame`
@@ -304,14 +304,14 @@ func TestRecursiveEscapeReturn(n int, b *int) *int {
 // ============================================================================
 
 // 7.1 Var declaration propagating borrow, then escaping via return
-//gocap:mut b
+//gosree:mut b
 func TestVarDeclPropagation(b *int) *int {
 	var b2 = b
 	return b2 // want `BORROW001: borrow stored in struct field 'b2' escapes stack frame`
 }
 
 // 7.2 Var declaration group storing to global
-//gocap:mut b
+//gosree:mut b
 func TestVarDeclGroup(b *int) {
 	var (
 		x  = 10
@@ -326,7 +326,7 @@ func TestVarDeclGroup(b *int) {
 // ============================================================================
 
 // 8.1 Fixed-size array storing borrow (index assign and composite lit)
-//gocap:mut b
+//gosree:mut b
 func TestArrayStorage(b *int) {
 	var arr [2]*int
 	arr[0] = b          // want `BORROW001: array cannot store second-class borrow`
@@ -334,7 +334,7 @@ func TestArrayStorage(b *int) {
 }
 
 // 8.2 Array of interface elements boxing borrow
-//gocap:mut b
+//gosree:mut b
 func TestArrayInterfaceBoxing(b *int) {
 	var arr [2]any
 	arr[0] = b         // want `BORROW001: struct field or interface cannot box second-class borrow`
@@ -346,7 +346,7 @@ func TestArrayInterfaceBoxing(b *int) {
 // ============================================================================
 
 // 9.1 Multi-level nested fieldAddr escaping via return
-//gocap:mut b
+//gosree:mut b
 func TestNestedStackTupleEscape(b *int) OuterNode {
 	var o OuterNode
 	o.m.in.p = b // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
@@ -376,7 +376,7 @@ func TestDanglingLocalScalar() *int {
 // 11.1 Owner increment while borrowed
 func TestOwnerIncInvalidation() {
 	x := 10
-	b := &x /*gocap:rob*/
+	b := &x /*gosree:rob*/
 	x++     // want `BORROW003: cannot assign to 'x' because it is borrowed`
 	println(*b)
 }
@@ -384,7 +384,7 @@ func TestOwnerIncInvalidation() {
 // 11.2 Owner decrement while borrowed
 func TestOwnerDecInvalidation() {
 	x := 10
-	b := &x /*gocap:rob*/
+	b := &x /*gosree:rob*/
 	x--     // want `BORROW003: cannot assign to 'x' because it is borrowed`
 	println(*b)
 }
@@ -392,7 +392,7 @@ func TestOwnerDecInvalidation() {
 // 11.3 Owner compound assignment while borrowed
 func TestOwnerCompoundAssign() {
 	x := 10
-	b := &x /*gocap:rob*/
+	b := &x /*gosree:rob*/
 	x += 5  // want `BORROW003: cannot assign to 'x' because it is borrowed`
 	println(*b)
 }
@@ -404,7 +404,7 @@ func TestOwnerCompoundAssign() {
 // 12.1 Borrow struct field, then mutate sibling field of owner
 func TestOwnerStructFieldMutation() {
 	var pt LocalPoint
-	b := &pt.X /*gocap:rob*/
+	b := &pt.X /*gosree:rob*/
 	pt.Y = 20  // want `BORROW003: cannot assign to 'pt' because it is borrowed`
 	println(*b)
 }
@@ -412,7 +412,7 @@ func TestOwnerStructFieldMutation() {
 // 12.2 Borrow struct field, then send owner struct to channel
 func TestOwnerStructFieldChannelMove(ch chan LocalPoint) {
 	var pt LocalPoint
-	b := &pt.X /*gocap:rob*/
+	b := &pt.X /*gosree:rob*/
 	ch <- pt   // want `BORROW003: cannot move 'pt' because it is borrowed`
 	println(*b)
 }
@@ -420,7 +420,7 @@ func TestOwnerStructFieldChannelMove(ch chan LocalPoint) {
 // 12.3 Borrow array element, then mutate array owner
 func TestOwnerArrayElementMutation() {
 	var arr [4]int
-	b := &arr[0] /*gocap:rob*/
+	b := &arr[0] /*gosree:rob*/
 	arr[1] = 99  // want `BORROW003: cannot assign to 'arr' because it is borrowed`
 	println(*b)
 }
@@ -428,7 +428,7 @@ func TestOwnerArrayElementMutation() {
 // 12.4 Borrow array element, then move array owner to channel
 func TestOwnerArrayElementChannelMove(ch chan [4]int) {
 	var arr [4]int
-	b := &arr[0] /*gocap:rob*/
+	b := &arr[0] /*gosree:rob*/
 	ch <- arr    // want `BORROW003: cannot move 'arr' because it is borrowed`
 	println(*b)
 }
@@ -442,14 +442,14 @@ type StackTuple struct {
 }
 
 // 13.1 Storing borrow into heap-allocated pointer via new(*int)
-//gocap:mut b
+//gosree:mut b
 func TestHeapPointerStore(b *int) {
 	hp := new(*int)
 	*hp = b // want `BORROW001: cannot store second-class borrow to heap or non-stack memory`
 }
 
 // 13.2 Storing borrow into field of heap-allocated struct via new(StackTuple)
-//gocap:mut b
+//gosree:mut b
 func TestHeapStructFieldStore(b *int) {
 	h := new(StackTuple)
 	h.p = b // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
@@ -460,33 +460,33 @@ func TestHeapStructFieldStore(b *int) {
 // ============================================================================
 
 // 14.1 Direct borrow returned boxed as any
-//gocap:mut b
+//gosree:mut b
 func TestReturnDirectInterfaceBoxing(b *int) any {
 	return b // want `BORROW001: struct field or interface cannot box second-class borrow`
 }
 
 // 14.2 Local stack tuple holding borrow returned boxed as any
-//gocap:mut b
+//gosree:mut b
 func TestReturnTupleInterfaceBoxing(b *int) any {
 	t := StackTuple{p: b}
 	return t // want `BORROW001: struct field or interface cannot box second-class borrow`
 }
 
 // 14.3 Channel send of borrow
-//gocap:mut b
+//gosree:mut b
 func TestChannelSendBorrow(ch chan *int, b *int) {
 	ch <- b // want `BORROW001: channel send cannot store second-class borrow`
 }
 
 // 14.4 Channel send of tuple holding borrow
-//gocap:mut b
+//gosree:mut b
 func TestChannelSendTupleHoldingBorrow(ch chan StackTuple, b *int) {
 	t := StackTuple{p: b}
 	ch <- t // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`
 }
 
 // 14.5 Goroutine capturing borrow via call argument
-//gocap:mut b
+//gosree:mut b
 func TestGoroutineArgBorrow(b *int) {
 	go dummyInspect(b) // want `BORROW001: goroutine cannot capture second-class borrow`
 }
@@ -496,7 +496,7 @@ func dummyTupleSink(t StackTuple) {
 }
 
 // 14.6 Goroutine capturing tuple holding borrow via call argument
-//gocap:mut b
+//gosree:mut b
 func TestGoroutineArgTuple(b *int) {
 	t := StackTuple{p: b}
 	go dummyTupleSink(t) // want `BORROW001: borrow stored in struct field 'p' escapes stack frame`

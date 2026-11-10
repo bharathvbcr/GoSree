@@ -204,7 +204,7 @@ func (g *graph) written(ins ssa.Instruction, v ssa.Value, desc string) {
 }
 
 // writtenCaptures records a write through every value closure v captured: a function value whose
-// body runs where gocap cannot see it may write all of them.
+// body runs where gosree cannot see it may write all of them.
 func (g *graph) writtenCaptures(ins ssa.Instruction, v ssa.Value, desc string) {
 	if mc, ok := v.(*ssa.MakeClosure); ok {
 		for _, b := range mc.Bindings {
@@ -455,7 +455,7 @@ func resolveClosureVal(v ssa.Value, depth int) *ssa.MakeClosure {
 // summary cannot say what the closure keeps, so the retention is charged where the closure is made.
 //
 // A bound method value's body is the method: its receiver is retained if the method leaks it, and
-// always for an interface method, whose implementation gocap cannot see.
+// always for an interface method, whose implementation gosree cannot see.
 func (g *graph) closureRetains(mc *ssa.MakeClosure) {
 	if g.closureUsedOnlyAtCallSites(mc, mc, 0) {
 		return
@@ -902,7 +902,7 @@ func (g *graph) buildRev() {
 }
 
 func isCapPkgPath(path string) bool {
-	return path == "github.com/bharathvbcr/gocap/cap" || strings.HasSuffix(path, "/cap") || path == "cap"
+	return path == "github.com/bharathvbcr/gosree/cap" || strings.HasSuffix(path, "/cap") || path == "cap"
 }
 
 func isCapMove(fn *ssa.Function) bool {

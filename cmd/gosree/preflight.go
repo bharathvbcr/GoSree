@@ -12,7 +12,7 @@ import (
 const (
 	exitClean    = 0 // every package loaded, type-checked and analysed, and nothing was reported
 	exitFailed   = 1 // a package could not be loaded or type-checked, or an analyzer failed: no verdict
-	exitUsage    = 2 // a flag gocap does not accept, or one it refuses because it would change the verdict
+	exitUsage    = 2 // a flag gosree does not accept, or one it refuses because it would change the verdict
 	exitFindings = 3 // every package was analysed and at least one finding was reported
 )
 
@@ -21,18 +21,18 @@ var valueFlags = map[string]bool{
 	"tags": true, "c": true, "debug": true, "cpuprofile": true, "memprofile": true, "trace": true,
 }
 
-// plan is what gocap does with its command line before the driver sees it.
+// plan is what gosree does with its command line before the driver sees it.
 type plan struct {
 	args     []string // the arguments the driver gets (without argv[0])
 	goflags  string   // text appended to GOFLAGS, so go list honours -tags
-	json     bool     // -json: the driver exits 0 even with findings, so gocap re-derives the exit code
+	json     bool     // -json: the driver exits 0 even with findings, so gosree re-derives the exit code
 	warnings []string // printed to stderr before the run
 }
 
 // parseCommandLine reads the flags that decide what a run covers or what its exit status means.
 // analyzers are the names of the analysis passes, which the driver exposes as -NAME flags.
 //
-// It refuses -fix and -diff (gocap has no suggested fixes, and the driver exits 0 without printing
+// It refuses -fix and -diff (gosree has no suggested fixes, and the driver exits 0 without printing
 // any finding when -fix is given), honours -tags by handing it to the go command (the driver
 // accepts it and does nothing), and warns when a flag makes a run cover less: -NAME=false or -NAME
 // switching analysis passes off, -test=false dropping the test files.
@@ -77,7 +77,7 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 			return plan{args: args}, nil // the driver answers these without analysing anything
 		case name == "fix" || name == "diff":
 			if truthy() {
-				return plan{}, errors.New("-" + name + " is not supported: gocap offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings")
+				return plan{}, errors.New("-" + name + " is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings")
 			}
 		case name == "tags":
 			if v := strings.TrimSpace(take()); v != "" {
@@ -151,4 +151,4 @@ var covers = map[string]string{
 }
 
 // usage formats a refusal.
-func usage(err error) string { return fmt.Sprintf("gocap: %v", err) }
+func usage(err error) string { return fmt.Sprintf("gosree: %v", err) }

@@ -1,4 +1,4 @@
-//! Gusset umbrella staticlib (`libgusset.a`) for GoSree (`gocap`).
+//! Gusset umbrella staticlib (`libgusset.a`) for GoSree (`gosree`).
 //!
 //! Per Gusset R14, a Go binary links exactly one Rust staticlib (`libgusset.a`),
 //! which owns the `Counting<System>` global allocator, installs the global

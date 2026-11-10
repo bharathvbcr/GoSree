@@ -4,15 +4,12 @@
 /gosree
 /gosree-erase
 /gosree-corpus
-/gocap
-/gocap-erase
-/gocap-corpus
 
 # Go test binaries, coverage profiles, and atomic-rewrite temp files
 *.test
 *.out
 coverage.*
-.gocap-erase-*.tmp
+.gosree-erase-*.tmp
 
 # Rust build artifacts (gusset engine & solver crates)
 /rust/target/

@@ -3,27 +3,27 @@ package h
 // Each statement with an "in" or "out" comment on its line is, or is not, covered by a hatch.
 
 func trailingHeader(n int) {
-	if n > 0 { //gocap:unsafe the header only
+	if n > 0 { //gosree:unsafe the header only
 		_ = n // out
 	}
-	for i := 0; i < n; i++ { //gocap:unsafe the header only
+	for i := 0; i < n; i++ { //gosree:unsafe the header only
 		_ = i // out
 	}
-	switch n { //gocap:unsafe the tag only
+	switch n { //gosree:unsafe the tag only
 	case 1:
 		_ = n // out
 	}
 	switch n {
-	case 2: //gocap:unsafe the case expression only
+	case 2: //gosree:unsafe the case expression only
 		_ = n // out
 	}
-	go func() { //gocap:unsafe the go statement only
+	go func() { //gosree:unsafe the go statement only
 		_ = n // out
 	}()
 }
 
 func ownLine(n int) {
-	//gocap:unsafe the whole if
+	//gosree:unsafe the whole if
 	if n > 0 {
 		_ = n // in
 	}
@@ -31,11 +31,11 @@ func ownLine(n int) {
 }
 
 func oneLine(n int) {
-	f := func() int { return n } //gocap:unsafe one line
+	f := func() int { return n } //gosree:unsafe one line
 	_ = f                        // out
 }
 
-//gocap:unsafe the whole function, goroutines included
+//gosree:unsafe the whole function, goroutines included
 func declLevel(n int) {
 	_ = n // in
 	go func() {
@@ -44,7 +44,7 @@ func declLevel(n int) {
 }
 
 func multiLine(n int) {
-	_ = []int{ //gocap:unsafe a statement without blocks, all of it
+	_ = []int{ //gosree:unsafe a statement without blocks, all of it
 		n, // in
 	}
 }

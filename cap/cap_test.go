@@ -3,7 +3,7 @@ package cap_test
 import (
 	"testing"
 
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type Point struct {

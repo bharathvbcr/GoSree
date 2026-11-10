@@ -5,7 +5,7 @@ import (
 
 	"golang.org/x/tools/go/analysis/analysistest"
 
-	"github.com/bharathvbcr/gocap/passes/unsafeban"
+	"github.com/bharathvbcr/gosree/passes/unsafeban"
 )
 
 func TestUnsafeBan(t *testing.T) {

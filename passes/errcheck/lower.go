@@ -10,7 +10,7 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/bharathvbcr/gocap/internal/gusseterr"
+	"github.com/bharathvbcr/gosree/internal/gusseterr"
 )
 
 type packageBuilder struct {

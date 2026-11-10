@@ -19,7 +19,7 @@ func TestChallengerGate2_StructLiteralsAndInterfaceBoxing(t *testing.T) {
 
 import (
 	"fmt"
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type Item struct {
@@ -77,7 +77,7 @@ func main() {
 	if strings.Contains(out, "cap.") {
 		t.Errorf("erased output still contains 'cap.':\n%s", out)
 	}
-	if strings.Contains(out, "github.com/bharathvbcr/gocap/cap") {
+	if strings.Contains(out, "github.com/bharathvbcr/gosree/cap") {
 		t.Errorf("cap import was not removed:\n%s", out)
 	}
 
@@ -102,7 +102,7 @@ func TestChallengerGate2_ComplexGenericInstantiations(t *testing.T) {
 
 import (
 	"fmt"
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type Pair[A, B any] struct {
@@ -147,7 +147,7 @@ func main() {
 	if strings.Contains(out, "cap.") {
 		t.Errorf("erased output still contains 'cap.':\n%s", out)
 	}
-	if strings.Contains(out, "github.com/bharathvbcr/gocap/cap") {
+	if strings.Contains(out, "github.com/bharathvbcr/gosree/cap") {
 		t.Errorf("cap import was not removed:\n%s", out)
 	}
 
@@ -174,7 +174,7 @@ func main() {
 func TestChallengerGate2_ChainedAndNestedHelpers(t *testing.T) {
 	src := `package test
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 func Nested() {
 	x := 5
@@ -207,7 +207,7 @@ func Nested() {
 func TestChallengerGate2_AllAliasesAndDotImportExplicitTypeArgs(t *testing.T) {
 	src := `package test
 
-import . "github.com/bharathvbcr/gocap/cap"
+import . "github.com/bharathvbcr/gosree/cap"
 
 func AllDot(x int) {
 	var _ Mut[int] = BorrowMut[int](&x)
@@ -227,7 +227,7 @@ func AllDot(x int) {
 	out := string(res)
 	t.Logf("Dot import erased:\n%s", out)
 
-	if strings.Contains(out, "github.com/bharathvbcr/gocap/cap") {
+	if strings.Contains(out, "github.com/bharathvbcr/gosree/cap") {
 		t.Errorf("dot import was not removed:\n%s", out)
 	}
 	if strings.Contains(out, "Borrow") || strings.Contains(out, "Move") {
@@ -242,11 +242,11 @@ func AllDot(x int) {
 // when input is unchanged or empty.
 func TestChallengerGate2_CLIStdinFlagPermutations(t *testing.T) {
 	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "gocap-erase")
+	binPath := filepath.Join(tmpDir, "gosree-erase")
 
 	cmdBuild := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := cmdBuild.CombinedOutput(); err != nil {
-		t.Fatalf("building gocap-erase failed: %v\n%s", err, string(out))
+		t.Fatalf("building gosree-erase failed: %v\n%s", err, string(out))
 	}
 
 	// 1. Unchanged stdin with -l: should output NOTHING
@@ -275,7 +275,7 @@ func TestChallengerGate2_CLIStdinFlagPermutations(t *testing.T) {
 	}
 
 	// 3. Stdin with -o flag: should write erased result to file
-	dirtySrc := "package p\n\n//gocap:iso x\nfunc Dirty(x *int) {}\n"
+	dirtySrc := "package p\n\n//gosree:iso x\nfunc Dirty(x *int) {}\n"
 	outFile := filepath.Join(tmpDir, "erased_output.go")
 	cmdO := exec.Command(binPath, "-o", outFile)
 	cmdO.Stdin = strings.NewReader(dirtySrc)
@@ -286,7 +286,7 @@ func TestChallengerGate2_CLIStdinFlagPermutations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading -o file failed: %v", err)
 	}
-	if strings.Contains(string(data), "//gocap:iso") {
+	if strings.Contains(string(data), "//gosree:iso") {
 		t.Errorf("-o output still contains directive:\n%s", string(data))
 	}
 	if !strings.Contains(string(data), "func Dirty(x *int)") {

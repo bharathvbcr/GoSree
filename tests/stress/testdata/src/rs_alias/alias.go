@@ -1,6 +1,6 @@
 // Package rs_alias: Rust's core rule is aliasing XOR mutation, enforced on every reference with no
-// annotation. gocap's borrow rules (BORROW002/003) apply only to borrows the programmer marks
-// (//gocap:mub, //gocap:rob, cap.Mut, cap.Ref), and its README says "Inside one goroutine,
+// annotation. gosree's borrow rules (BORROW002/003) apply only to borrows the programmer marks
+// (//gosree:mub, //gosree:rob, cap.Mut, cap.Ref), and its README says "Inside one goroutine,
 // aliasing is left alone." So every function here is NORULE for plain Go: each one is code Rust's
 // borrow checker rejects.
 package rs_alias

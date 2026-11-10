@@ -14,7 +14,7 @@ func (c *counter) Error() string { return "e" }
 
 // Holder is accepted as imm because error is on the override table.
 //
-//gocap:imm
+//gosree:imm
 type Holder struct {
 	err error
 }

@@ -4,7 +4,7 @@ package im_container
 
 // Config is a valid imm type.
 //
-//gocap:imm
+//gosree:imm
 type Config struct {
 	port int
 }

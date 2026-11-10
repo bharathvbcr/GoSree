@@ -1,4 +1,4 @@
-// Package dx_hatch attacks the //gocap:unsafe escape hatch. A hatch is a span (annot.go:258: the
+// Package dx_hatch attacks the //gosree:unsafe escape hatch. A hatch is a span (annot.go:258: the
 // attached node's Pos..End), and every pass mutes every finding of every rule inside it; the
 // ownership pass also mutes everything a hatched transfer causes, wherever it lies (check.go:19).
 // Nothing ties a hatch to the finding its reason is about, so one hatch written for a pointer cast
@@ -22,7 +22,7 @@ func sameLineControl(ch chan *Job) uintptr {
 func sameLine(ch chan *Job) uintptr {
 	j := &Job{}
 	ch <- j
-	return uintptr(u.Pointer(&j.ID)) //gocap:unsafe the address is only logged // MISS(SAFE003): muted by an unrelated hatch written for the pointer cast; j was sent and is read here
+	return uintptr(u.Pointer(&j.ID)) //gosree:unsafe the address is only logged // MISS(SAFE003): muted by an unrelated hatch written for the pointer cast; j was sent and is read here
 }
 
 // 2. A hatch on the function, written for one cast, reaches into the goroutine the function starts.
@@ -35,7 +35,7 @@ func funcLevelControl(p *int) uintptr {
 }
 
 //
-//gocap:unsafe the cast at the end is reviewed: p outlives the call
+//gosree:unsafe the cast at the end is reviewed: p outlives the call
 func funcLevel(p *int) uintptr {
 	j := &Job{}
 	go func() { j.ID = 2 }()
@@ -47,7 +47,7 @@ func funcLevel(p *int) uintptr {
 // A hatch written on the same line as code now covers that line's statement only, not the bodies of
 // blocks that continue past the line: here the condition, not the body.
 func ifLine(p *int) uintptr {
-	if p != nil { //gocap:unsafe p is checked non-nil before the cast
+	if p != nil { //gosree:unsafe p is checked non-nil before the cast
 		j := &Job{}
 		go func() { j.ID = 2 }()
 		j.ID = 1                     // HIT(SAFE003) no longer muted by the hatch trailing the if line three lines up
@@ -61,7 +61,7 @@ func ifLine(p *int) uintptr {
 // statement it was written for was reported and the one after it was muted.
 func multiLine(p *byte) {
 	a := u.Add(
-		u.Pointer(p), 1) //gocap:unsafe offset 1 is inside the buffer
+		u.Pointer(p), 1) //gosree:unsafe offset 1 is inside the buffer
 	b := u.Add(u.Pointer(p), 99) // HIT(SAFE001)
 	_, _ = a, b
 }
@@ -80,7 +80,7 @@ func loopAbove(ch chan *Job) {
 	j := &Job{}
 	for i := 0; i < 2; i++ {
 		j.ID = i // MISS(SAFE003): muted by the hatch on the send below it; the next iteration writes j while the receiver reads it
-		//gocap:unsafe the receiver only reads ID
+		//gosree:unsafe the receiver only reads ID
 		ch <- j
 	}
 }
@@ -89,8 +89,8 @@ func loopAbove(ch chan *Job) {
 // a hatch on the first borrow's line, written for something else, hides a conflict lines later.
 func borrowControl() uintptr {
 	x, y := 1, 2
-	b1, raw := &x /*gocap:mut*/, uintptr(u.Pointer(&y)) // HIT(SAFE001)
-	b2 := &x                                            /*gocap:mut*/ // HIT(BORROW002)
+	b1, raw := &x /*gosree:mut*/, uintptr(u.Pointer(&y)) // HIT(SAFE001)
+	b2 := &x                                            /*gosree:mut*/ // HIT(BORROW002)
 	*b1 = 2
 	*b2 = 3
 	return raw
@@ -98,8 +98,8 @@ func borrowControl() uintptr {
 
 func borrowHatched() uintptr {
 	x, y := 1, 2
-	b1, raw := &x /*gocap:mut*/, uintptr(u.Pointer(&y)) //gocap:unsafe raw is only logged
-	b2 := &x                                            /*gocap:mut*/ // MISS(BORROW002): muted by an unrelated hatch on b1's line, written for the cast of y
+	b1, raw := &x /*gosree:mut*/, uintptr(u.Pointer(&y)) //gosree:unsafe raw is only logged
+	b2 := &x                                            /*gosree:mut*/ // MISS(BORROW002): muted by an unrelated hatch on b1's line, written for the cast of y
 	*b1 = 2
 	*b2 = 3
 	return raw
@@ -107,20 +107,20 @@ func borrowHatched() uintptr {
 
 // 7. A hatch rejected as malformed (no reason) was still installed and still muted until 2026-11-10.
 func noReason(p *int) uintptr {
-	//gocap:unsafe // HIT(SAFE007)
-	return uintptr(u.Pointer(p)) // HIT(SAFE001) a directive gocap rejects has no effect
+	//gosree:unsafe // HIT(SAFE007)
+	return uintptr(u.Pointer(p)) // HIT(SAFE001) a directive gosree rejects has no effect
 }
 
 // 8. A reason made of one zero-width space was a reason until 2026-11-10.
 func invisibleReason(p *int) uintptr {
-	//gocap:unsafe ​ // HIT(SAFE007) the reason is U+200B ZERO WIDTH SPACE, invisible in review; DIRECTIVES.md 2.7 requires a reason
+	//gosree:unsafe ​ // HIT(SAFE007) the reason is U+200B ZERO WIDTH SPACE, invisible in review; DIRECTIVES.md 2.7 requires a reason
 	return uintptr(u.Pointer(p)) // HIT(SAFE001) the rejected hatch mutes nothing
 }
 
 // 9. A hatch that mutes nothing. DIRECTIVES.md 2.7: "it is flagged as stale". It is only counted in
-// ownership.Stats.UnsafeStale, which `gocap ./...` never prints.
+// ownership.Stats.UnsafeStale, which `gosree ./...` never prints.
 func stale() int {
-	//gocap:unsafe nothing here needs it // MISS(SAFE007): stale hatch, never reported to a gocap user
+	//gosree:unsafe nothing here needs it // MISS(SAFE007): stale hatch, never reported to a gosree user
 	return 1
 }
 
@@ -129,5 +129,5 @@ func stale() int {
 // comment too. Until then that comment lay before FuncDecl.Pos, outside every span.
 //
 //go:linkname nanotime runtime.nanotime // the declaration's hatch covers its doc comment
-//gocap:unsafe reviewed: monotonic clock read for tracing
+//gosree:unsafe reviewed: monotonic clock read for tracing
 func nanotime() int64

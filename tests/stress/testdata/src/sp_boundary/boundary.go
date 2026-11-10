@@ -1,4 +1,4 @@
-// Package sp_boundary maps which standard-library callbacks gocap treats as a goroutine boundary.
+// Package sp_boundary maps which standard-library callbacks gosree treats as a goroutine boundary.
 // Every function captures a local in a callback and keeps writing it in the parent. The spawner
 // table (passes/ownership/spawn.go) names time.AfterFunc, context.AfterFunc, WaitGroup.Go, errgroup
 // and http.Handle(Func); anything else is an ordinary call.

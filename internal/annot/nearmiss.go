@@ -15,18 +15,18 @@ var verbs = []string{"unsafe", "iso", "imm", "guarded_by", "holds", "mub", "rob"
 //
 //  1. strip one comment marker ("//", or "/*" and "*/"; on later lines of a block comment, a leading
 //     "*"), then leading white space;
-//  2. the rest must start with "gocap:" or "safe:" in any letter case;
+//  2. the rest must start with "gosree:" or "safe:" in any letter case;
 //  3. cut a trailing "// note", as parseDirective does;
 //  4. the word after the colon (letters, digits, '_' and '-') is then judged:
-//     - no word at all, nothing after the colon: a near miss (gofmt rewrites "//gocap:" to "// gocap:");
+//     - no word at all, nothing after the colon: a near miss (gofmt rewrites "//gosree:" to "// gosree:");
 //     - the colon is followed by white space ("// safe: ..."): a near miss only when the word is a
 //     verb exactly, ignoring case, and is followed by white space or the end of the line. Prose such as
-//     "// safe: this lock is held" or "// gocap: see docs" is left alone;
+//     "// safe: this lock is held" or "// gosree: see docs" is left alone;
 //     - the word follows the colon directly ("//Safe:guardedby"): a near miss when it is within edit
 //     distance (insertions, deletions, substitutions, transpositions) 2 of guarded_by, 1 of unsafe or
 //     holds, or 0 of the three-letter verbs, ignoring case.
 
-// nearMiss reports whether the comment text raw reads as a gocap directive. It returns the line that
+// nearMiss reports whether the comment text raw reads as a gosree directive. It returns the line that
 // does, as written but for a trailing "// note", and the spelling it most likely meant.
 func nearMiss(raw string) (written, meant string, ok bool) {
 	var body string
@@ -67,9 +67,9 @@ func nearMissLine(line string) (string, bool) {
 	s := strings.TrimLeftFunc(line, unicode.IsSpace)
 	var lead string
 	switch {
-	case hasFoldPrefix(s, "gocap:"):
-		lead = "//gocap:"
-		s = s[len("gocap:"):]
+	case hasFoldPrefix(s, "gosree:"):
+		lead = "//gosree:"
+		s = s[len("gosree:"):]
 	case hasFoldPrefix(s, "safe:"):
 		lead = "//safe:"
 		s = s[len("safe:"):]

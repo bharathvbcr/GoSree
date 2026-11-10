@@ -10,13 +10,13 @@ package adversarial_cfg
 func DiamondCFGSequentialExpiry(cond bool) int {
 	x := 10
 	if cond {
-		b1 := &x /*gocap:mut*/
+		b1 := &x /*gosree:mut*/
 		*b1 = 20
 	} else {
-		b2 := &x /*gocap:mut*/
+		b2 := &x /*gosree:mut*/
 		*b2 = 30
 	}
-	b3 := &x /*gocap:mut*/
+	b3 := &x /*gosree:mut*/
 	*b3 = 40
 	return x
 }
@@ -26,9 +26,9 @@ func DiamondCFGBorrowActiveAcrossJoin(cond bool) int {
 	x := 10
 	var b *int
 	if cond {
-		b = &x /*gocap:rob*/
+		b = &x /*gosree:rob*/
 	} else {
-		b = &x /*gocap:rob*/
+		b = &x /*gosree:rob*/
 	}
 	x = 20 // want `BORROW003: cannot assign to 'x' because it is borrowed`
 	return *b
@@ -38,7 +38,7 @@ func DiamondCFGBorrowActiveAcrossJoin(cond bool) int {
 func EarlyReturnDrop(cond bool) int {
 	x := 10
 	if cond {
-		b := &x /*gocap:mut*/
+		b := &x /*gosree:mut*/
 		*b = 20
 		return x
 	}
@@ -51,15 +51,15 @@ func SwitchBranchNLL(tag int) int {
 	x := 10
 	switch tag {
 	case 1:
-		b1 := &x /*gocap:mut*/
+		b1 := &x /*gosree:mut*/
 		*b1 = 20
 	case 2:
-		b2 := &x /*gocap:rob*/
+		b2 := &x /*gosree:rob*/
 		println(*b2)
 	default:
 		x = 30
 	}
-	b3 := &x /*gocap:mut*/
+	b3 := &x /*gosree:mut*/
 	*b3 = 50
 	return x
 }
@@ -67,10 +67,10 @@ func SwitchBranchNLL(tag int) int {
 // 5. Switch branch borrow conflicting with active outer borrow (BORROW002)
 func SwitchBranchConflict(tag int) {
 	x := 10
-	bOuter := &x /*gocap:rob*/
+	bOuter := &x /*gosree:rob*/
 	switch tag {
 	case 1:
-		bInner := &x /*gocap:mut*/ // want `BORROW002: cannot borrow 'x' as mutable because it is also borrowed as read-only`
+		bInner := &x /*gosree:mut*/ // want `BORROW002: cannot borrow 'x' as mutable because it is also borrowed as read-only`
 		*bInner = 20
 	}
 	println(*bOuter)
@@ -81,15 +81,15 @@ func SelectBranchNLL(ch1, ch2 chan int) int {
 	x := 10
 	select {
 	case <-ch1:
-		b := &x /*gocap:mut*/
+		b := &x /*gosree:mut*/
 		*b = 100
 	case <-ch2:
-		b := &x /*gocap:mut*/
+		b := &x /*gosree:mut*/
 		*b = 200
 	default:
 		x = 300
 	}
-	bFinal := &x /*gocap:mut*/
+	bFinal := &x /*gosree:mut*/
 	*bFinal = 400
 	return x
 }
@@ -103,7 +103,7 @@ func LoopContinueClean(n int) {
 		if i%2 == 0 {
 			continue
 		}
-		b := &x /*gocap:mut*/
+		b := &x /*gosree:mut*/
 		*b = i
 	}
 }
@@ -112,7 +112,7 @@ func LoopContinueClean(n int) {
 func LoopBreakCleanMutation(n int) int {
 	x := 10
 	for i := 0; i < n; i++ {
-		b := &x /*gocap:mut*/
+		b := &x /*gosree:mut*/
 		*b = i
 		if i == 5 {
 			break
@@ -128,7 +128,7 @@ func LabeledBreakNLL() int {
 Outer:
 	for i := 0; i < 3; i++ {
 		for j := 0; j < 3; j++ {
-			b := &x /*gocap:mut*/
+			b := &x /*gosree:mut*/
 			*b = i + j
 			if i == 1 && j == 1 {
 				break Outer
@@ -142,7 +142,7 @@ Outer:
 // 10. Mutation inside loop while outer borrow active across backedge (BORROW003)
 func LoopBackedgeOwnerMutation(n int) {
 	x := 10
-	b := &x /*gocap:mut*/
+	b := &x /*gosree:mut*/
 	for i := 0; i < n; i++ {
 		x = i // want `BORROW003: cannot assign to 'x' because it is borrowed`
 		*b = i + 1
@@ -152,7 +152,7 @@ func LoopBackedgeOwnerMutation(n int) {
 // 11. Outer borrow used after loop, mutated inside loop body (BORROW003)
 func LoopBodyOwnerMutationBorrowUsedAfter() {
 	x := 10
-	b := &x /*gocap:rob*/
+	b := &x /*gosree:rob*/
 	for i := 0; i < 2; i++ {
 		x++ // want `BORROW003: cannot assign to 'x' because it is borrowed`
 	}
@@ -164,7 +164,7 @@ func LoopCarriedEscapeWithBreak() {
 	x := 10
 	var outer *int
 	for i := 0; i < 5; i++ {
-		outer = &x /*gocap:mut*/ // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`
+		outer = &x /*gosree:mut*/ // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`
 		if i == 2 {
 			break
 		}
@@ -177,9 +177,9 @@ func LoopCarriedEscapeWithBreak() {
 // 13. Multiple defer statements extending lifetime to return (BORROW003)
 func MultipleDefersExtendingLifetime() {
 	x := 10
-	b1 := &x /*gocap:rob*/
+	b1 := &x /*gosree:rob*/
 	defer println(*b1)
-	b2 := &x /*gocap:rob*/
+	b2 := &x /*gosree:rob*/
 	defer println(*b2)
 	x = 20 // want `BORROW003: cannot assign to 'x' because it is borrowed`
 }
@@ -188,7 +188,7 @@ func MultipleDefersExtendingLifetime() {
 func ConditionalDeferExtendingLifetime(cond bool) {
 	x := 10
 	if cond {
-		b := &x /*gocap:rob*/
+		b := &x /*gosree:rob*/
 		defer println(*b)
 	}
 	x = 30 // want `BORROW003: cannot assign to 'x' because it is borrowed`
@@ -198,7 +198,7 @@ func ConditionalDeferExtendingLifetime(cond bool) {
 func DeferUnrelatedCleanNLL() int {
 	x := 10
 	defer println("done")
-	b := &x /*gocap:mut*/
+	b := &x /*gosree:mut*/
 	*b = 20
 	x = 30
 	return x
@@ -209,7 +209,7 @@ func DeferUnrelatedCleanNLL() int {
 // 16. Parameter shadowed by type switch variable (Clean Pass)
 func ParamShadowedByTypeSwitch(x any, ch chan int) {
 	val := 100
-	b := &val /*gocap:rob*/
+	b := &val /*gosree:rob*/
 	switch x := x.(type) {
 	case int:
 		x = x + 1
@@ -226,7 +226,7 @@ type CfgPoint struct {
 
 func DeepNestedBlockShadowing() {
 	pt := CfgPoint{X: 1, Y: 2}
-	b := &pt.X /*gocap:mut*/
+	b := &pt.X /*gosree:mut*/
 	{
 		pt := 99
 		{
@@ -244,7 +244,7 @@ func DeepNestedBlockShadowing() {
 func TupleAssignOwnerMutation() {
 	x := 10
 	y := 20
-	b := &x /*gocap:rob*/
+	b := &x /*gosree:rob*/
 	x, y = 30, 40 // want `BORROW003: cannot assign to 'x' because it is borrowed`
 	_ = y
 	println(*b)
@@ -253,7 +253,7 @@ func TupleAssignOwnerMutation() {
 // 19. Compound assignment operator mutation detection (BORROW003)
 func CompoundAssignMutation() {
 	x := 10
-	b := &x /*gocap:rob*/
+	b := &x /*gosree:rob*/
 	x += 5 // want `BORROW003: cannot assign to 'x' because it is borrowed`
 	println(*b)
 }
@@ -261,7 +261,7 @@ func CompoundAssignMutation() {
 // 20. Multi-dimensional array element invalidation (BORROW003)
 func MultiDimArrayOwnerMutation() {
 	var grid [2][2]int
-	b := &grid[0][1] /*gocap:mut*/
+	b := &grid[0][1] /*gosree:mut*/
 	grid[0][1] = 99 // want `BORROW003: cannot assign to 'grid' because it is borrowed`
 	*b = 42
 }
@@ -272,10 +272,10 @@ func MultiDimArrayOwnerMutation() {
 func DisjointBranchMutBorrows(cond bool) {
 	x := 10
 	if cond {
-		b1 := &x /*gocap:mut*/
+		b1 := &x /*gosree:mut*/
 		*b1 = 20
 	} else {
-		b2 := &x /*gocap:mut*/
+		b2 := &x /*gosree:mut*/
 		*b2 = 30
 	}
 }
@@ -284,18 +284,18 @@ func DisjointBranchMutBorrows(cond bool) {
 func SequentialRobAfterMubExpiry() int {
 	x := 10
 	{
-		m := &x /*gocap:mut*/
+		m := &x /*gosree:mut*/
 		*m = 25
 	}
-	r := &x /*gocap:rob*/
+	r := &x /*gosree:rob*/
 	return *r
 }
 
 // 23. Re-borrow mutable from mutable while active conflict (BORROW002)
 func ReborrowMutFromMutConflict() {
 	x := 10
-	b1 := &x /*gocap:mut*/
-	b2 := b1 /*gocap:mut*/ // want `BORROW002: cannot borrow 'x' as mutable more than once at a time`
+	b1 := &x /*gosree:mut*/
+	b2 := b1 /*gosree:mut*/ // want `BORROW002: cannot borrow 'x' as mutable more than once at a time`
 	*b1 = 20
 	*b2 = 30
 }
@@ -303,9 +303,9 @@ func ReborrowMutFromMutConflict() {
 // 24. Three-way conflict: rob + mub + rob (BORROW002)
 func ThreeWayRobMubConflict() {
 	x := 10
-	r1 := &x /*gocap:rob*/
-	m := &x /*gocap:mut*/ // want `BORROW002: cannot borrow 'x' as mutable because it is also borrowed as read-only`
-	r2 := &x /*gocap:rob*/ // want `BORROW002: cannot borrow 'x' as read-only because it is also borrowed as mutable`
+	r1 := &x /*gosree:rob*/
+	m := &x /*gosree:mut*/ // want `BORROW002: cannot borrow 'x' as mutable because it is also borrowed as read-only`
+	r2 := &x /*gosree:rob*/ // want `BORROW002: cannot borrow 'x' as read-only because it is also borrowed as mutable`
 	println(*r1)
 	*m = 100
 	println(*r2)

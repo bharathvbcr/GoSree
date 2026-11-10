@@ -15,12 +15,12 @@ func TestCommentDirectiveErasure(t *testing.T) {
 	src := `package test
 
 // Foo does something useful.
-//gocap:iso p
-//gocap:mut q
+//gosree:iso p
+//gosree:mut q
 // It returns computed total.
 func Foo(p *int, q *int) int {
-	//gocap:unsafe testing hardware
-	//gocap:mut
+	//gosree:unsafe testing hardware
+	//gosree:mut
 	b := q
 	return *p + *b
 }
@@ -37,7 +37,7 @@ type Config struct {
 	}
 
 	out := string(res)
-	if strings.Contains(out, "//gocap:") || strings.Contains(out, "//safe:") {
+	if strings.Contains(out, "//gosree:") || strings.Contains(out, "//safe:") {
 		t.Fatalf("output still contains directive comments:\n%s", out)
 	}
 
@@ -66,7 +66,7 @@ func TestInlineCommentErasure(t *testing.T) {
 
 func Bar() {
 	x := 10
-	b1 := &x /*gocap:mut*/
+	b1 := &x /*gosree:mut*/
 	b2 := &x /*safe:rob*/
 	_ = b1
 	_ = b2
@@ -77,7 +77,7 @@ func Bar() {
 		t.Fatalf("Erase returned error: %v", err)
 	}
 	out := string(res)
-	if strings.Contains(out, "/*gocap:") || strings.Contains(out, "/*safe:") {
+	if strings.Contains(out, "/*gosree:") || strings.Contains(out, "/*safe:") {
 		t.Fatalf("output still contains inline block comments:\n%s", out)
 	}
 }
@@ -86,7 +86,7 @@ func TestMarkerTypeErasure(t *testing.T) {
 	src := `package test
 
 import (
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type Item struct {
@@ -117,15 +117,15 @@ func Transform(
 		}
 	}
 
-	if strings.Contains(out, "github.com/bharathvbcr/gocap/cap") {
-		t.Errorf("import of gocap/cap was not removed")
+	if strings.Contains(out, "github.com/bharathvbcr/gosree/cap") {
+		t.Errorf("import of gosree/cap was not removed")
 	}
 }
 
 func TestComplexNestedTypes(t *testing.T) {
 	src := `package test
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 type Container struct {
 	Items  []cap.Iso[string]
@@ -156,7 +156,7 @@ type Container struct {
 func TestHelperExpressionsErasure(t *testing.T) {
 	src := `package test
 
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 func Run(x int, payload []byte) {
 	b := cap.BorrowMut(&x)
@@ -197,7 +197,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 var mu sync.Mutex
@@ -212,8 +212,8 @@ func Echo(v cap.Iso[string]) {
 	}
 
 	out := string(res)
-	if strings.Contains(out, "github.com/bharathvbcr/gocap/cap") {
-		t.Errorf("expected gocap/cap import to be deleted")
+	if strings.Contains(out, "github.com/bharathvbcr/gosree/cap") {
+		t.Errorf("expected gosree/cap import to be deleted")
 	}
 	if !strings.Contains(out, "\"fmt\"") || !strings.Contains(out, "\"sync\"") {
 		t.Errorf("expected standard imports to be preserved, got:\n%s", out)
@@ -223,7 +223,7 @@ func Echo(v cap.Iso[string]) {
 func TestRenamedAndDotImports(t *testing.T) {
 	srcRenamed := `package test
 
-import c "github.com/bharathvbcr/gocap/cap"
+import c "github.com/bharathvbcr/gosree/cap"
 
 func Step(m c.Mut[int]) *int {
 	return c.Move(m)
@@ -235,7 +235,7 @@ func Step(m c.Mut[int]) *int {
 	}
 
 	out := string(res)
-	if strings.Contains(out, "github.com/bharathvbcr/gocap/cap") {
+	if strings.Contains(out, "github.com/bharathvbcr/gosree/cap") {
 		t.Errorf("named import was not deleted:\n%s", out)
 	}
 	if strings.Contains(out, "c.Mut") || strings.Contains(out, "c.Move") {
@@ -244,7 +244,7 @@ func Step(m c.Mut[int]) *int {
 
 	srcDot := `package test
 
-import . "github.com/bharathvbcr/gocap/cap"
+import . "github.com/bharathvbcr/gosree/cap"
 
 func StepDot(m Mut[int]) *int {
 	return Move(m)
@@ -256,7 +256,7 @@ func StepDot(m Mut[int]) *int {
 	}
 
 	outDot := string(resDot)
-	if strings.Contains(outDot, "github.com/bharathvbcr/gocap/cap") {
+	if strings.Contains(outDot, "github.com/bharathvbcr/gosree/cap") {
 		t.Errorf("dot import was not deleted:\n%s", outDot)
 	}
 	if strings.Contains(outDot, "Mut[int]") || strings.Contains(outDot, "Move(m)") {
@@ -269,7 +269,7 @@ func TestCLIInPlaceAndOutputFlags(t *testing.T) {
 	testFile := filepath.Join(tmpDir, "sample.go")
 	src := `package sample
 
-//gocap:iso x
+//gosree:iso x
 func Sample(x *int) int { return *x }
 `
 	if err := os.WriteFile(testFile, []byte(src), 0644); err != nil {
@@ -286,7 +286,7 @@ func Sample(x *int) int { return *x }
 	if err != nil {
 		t.Fatalf("reading output file: %v", err)
 	}
-	if strings.Contains(string(outContent), "//gocap:iso") {
+	if strings.Contains(string(outContent), "//gosree:iso") {
 		t.Errorf("output file still contains directive")
 	}
 
@@ -298,15 +298,15 @@ func Sample(x *int) int { return *x }
 	if err != nil {
 		t.Fatalf("reading updated file: %v", err)
 	}
-	if strings.Contains(string(updatedContent), "//gocap:iso") {
+	if strings.Contains(string(updatedContent), "//gosree:iso") {
 		t.Errorf("in-place file still contains directive")
 	}
 
 	// Test -l and -d flags using CLI binary execution
-	binPath := filepath.Join(tmpDir, "gocap-erase-testbin")
+	binPath := filepath.Join(tmpDir, "gosree-erase-testbin")
 	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
 	if out, err := buildCmd.CombinedOutput(); err != nil {
-		t.Fatalf("failed to build gocap-erase: %v\nOutput: %s", err, string(out))
+		t.Fatalf("failed to build gosree-erase: %v\nOutput: %s", err, string(out))
 	}
 
 	// Create a modified file
@@ -319,20 +319,20 @@ func Sample(x *int) int { return *x }
 	cmdL := exec.Command(binPath, "-l", diffFile)
 	outL, err := cmdL.CombinedOutput()
 	if err != nil {
-		t.Fatalf("gocap-erase -l failed: %v\nOutput: %s", err, string(outL))
+		t.Fatalf("gosree-erase -l failed: %v\nOutput: %s", err, string(outL))
 	}
 	if !strings.Contains(string(outL), diffFile) {
-		t.Errorf("gocap-erase -l did not list differing file: %s", string(outL))
+		t.Errorf("gosree-erase -l did not list differing file: %s", string(outL))
 	}
 
 	// Test -d prints diff
 	cmdD := exec.Command(binPath, "-d", diffFile)
 	outD, err := cmdD.CombinedOutput()
 	if err != nil {
-		t.Fatalf("gocap-erase -d failed: %v\nOutput: %s", err, string(outD))
+		t.Fatalf("gosree-erase -d failed: %v\nOutput: %s", err, string(outD))
 	}
-	if !strings.Contains(string(outD), "//gocap:iso") {
-		t.Errorf("gocap-erase -d did not show diff of removed directive: %s", string(outD))
+	if !strings.Contains(string(outD), "//gosree:iso") {
+		t.Errorf("gosree-erase -d did not show diff of removed directive: %s", string(outD))
 	}
 }
 
@@ -349,7 +349,7 @@ go 1.24
 
 import (
 	"fmt"
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 // Item holds data.
@@ -359,7 +359,7 @@ type Item struct {
 }
 
 // Compute performs calculations.
-//gocap:iso item
+//gosree:iso item
 func Compute(item cap.Iso[Item], multiplier cap.Mut[int]) (int, *Item) {
 	m := cap.BorrowMut(multiplier)
 	*m *= 2

@@ -2,7 +2,7 @@
 //
 // Mixed atomic and plain access to one variable: the workers count with atomic.AddInt64, the
 // reporter reads the counter plainly. Rust's AtomicI64 has no plain access, so this cannot be
-// written. gocap's SAFE006 treats atomic functions as synchronised rather than as writes, and a
+// written. gosree's SAFE006 treats atomic functions as synchronised rather than as writes, and a
 // plain read is not a write, so the package variable is never reported.
 package main
 

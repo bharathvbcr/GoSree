@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// FuncOverride replaces gocap's summary of a function of another package with an assumption, the
+// FuncOverride replaces gosree's summary of a function of another package with an assumption, the
 // way Override does for a type. An entry replaces the whole summary, so it states every flag, and
 // it asserts only what Why rests on: an entry added to make a result fresh keeps its arguments
 // leaked and written.
@@ -24,7 +24,7 @@ type FuncOverride struct {
 	Why string
 }
 
-// funcOverrides is the curated table of function summaries gocap assumes rather than computes. Every
+// funcOverrides is the curated table of function summaries gosree assumes rather than computes. Every
 // entry counts toward the override budget (TestOverrideBudget).
 var funcOverrides = []FuncOverride{
 	{"context.WithCancel", []bool{true}, []bool{false}, true,

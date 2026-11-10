@@ -1,7 +1,7 @@
 // Package rs_init: Rust has no implicit zero value. A struct is built by a literal naming every
 // field or by a constructor, and a struct with private fields can be built only inside its module.
 // Go makes the zero value of every type, so a type that needs a constructor can be used without
-// one. gocap has no rule.
+// one. gosree has no rule.
 package rs_init
 
 import "sync"

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 // 1. Stack-scoped borrow escape via cap.BorrowMut to goroutine -> CAP003
@@ -47,12 +47,12 @@ func TestUseAfterMoveIntrinsic() int { // want TestUseAfterMoveIntrinsic:"owners
 }
 
 // 5. Channel element immutability -> SAFE005
-//gocap:imm
-type BadChanStruct struct { // want `SAFE005: //gocap:imm type BadChanStruct is not immutable: field ch has type chan \*int`
+//gosree:imm
+type BadChanStruct struct { // want `SAFE005: //gosree:imm type BadChanStruct is not immutable: field ch has type chan \*int`
 	ch chan *int
 }
 
-//gocap:imm
+//gosree:imm
 type GoodChanStruct struct { // want GoodChanStruct:"imm"
 	ch chan int
 }
@@ -61,22 +61,22 @@ type GoodChanStruct struct { // want GoodChanStruct:"imm"
 // Round 2 Deep Stress Tests (Rust-grade parity)
 // ============================================================================
 
-// 6 (Hole 5A): //gocap:imm struct containing array of mutable channel [2]chan *int -> SAFE005
-//gocap:imm
-type BadArrayChanStruct struct { // want `SAFE005: //gocap:imm type BadArrayChanStruct is not immutable: field chs has type \[2\]chan \*int`
+// 6 (Hole 5A): //gosree:imm struct containing array of mutable channel [2]chan *int -> SAFE005
+//gosree:imm
+type BadArrayChanStruct struct { // want `SAFE005: //gosree:imm type BadArrayChanStruct is not immutable: field chs has type \[2\]chan \*int`
 	chs [2]chan *int
 }
 
-// 7 (Hole 5A): //gocap:imm struct containing inline struct with exported field -> SAFE005
-//gocap:imm
-type BadInlineExportedStruct struct { // want `SAFE005: //gocap:imm type BadInlineExportedStruct is not immutable: field inner.Exported is exported, so other packages could write it`
+// 7 (Hole 5A): //gosree:imm struct containing inline struct with exported field -> SAFE005
+//gosree:imm
+type BadInlineExportedStruct struct { // want `SAFE005: //gosree:imm type BadInlineExportedStruct is not immutable: field inner.Exported is exported, so other packages could write it`
 	inner struct {
 		Exported int
 	}
 }
 
-// 8 (Hole 5B): Mutating //gocap:imm field via helper call mutateField(&c.rate) -> SAFE005
-//gocap:imm
+// 8 (Hole 5B): Mutating //gosree:imm field via helper call mutateField(&c.rate) -> SAFE005
+//gosree:imm
 type ImmConfig struct { // want ImmConfig:"imm"
 	rate int
 }
@@ -86,10 +86,10 @@ func mutateField(p *int) {
 }
 
 func TestImmMutatedViaFieldAddrCall(c *ImmConfig) { // want TestImmMutatedViaFieldAddrCall:"ownership summary"
-	mutateField(&c.rate) // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+	mutateField(&c.rate) // want `SAFE005: write to a field of ImmConfig, which is //gosree:imm; imm values are only written by their composite literal`
 }
 
-// 9 (Hole 5B): Mutating //gocap:imm field via branch-merged Phi pointer -> SAFE005
+// 9 (Hole 5B): Mutating //gosree:imm field via branch-merged Phi pointer -> SAFE005
 func TestImmMutatedViaPhiPtr(c *ImmConfig, cond bool) { // want TestImmMutatedViaPhiPtr:"ownership summary"
 	var p *int
 	if cond {
@@ -97,7 +97,7 @@ func TestImmMutatedViaPhiPtr(c *ImmConfig, cond bool) { // want TestImmMutatedVi
 	} else {
 		p = &c.rate
 	}
-	*p = 999 // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+	*p = 999 // want `SAFE005: write to a field of ImmConfig, which is //gosree:imm; imm values are only written by their composite literal`
 }
 
 // 10 (Hole 6): Stack-scoped borrow captured by time.AfterFunc spawner -> CAP003
@@ -139,7 +139,7 @@ func TestTrailingUnsafeOnMultilineGo() { // want TestTrailingUnsafeOnMultilineGo
 	_ = x
 	go func() {
 		x = 1
-	}() //gocap:unsafe intentional suppression on closing line of multiline go
+	}() //gosree:unsafe intentional suppression on closing line of multiline go
 	x = 2
 
 	y := 0
@@ -414,7 +414,7 @@ func TestBorrowPhiAndNestedClosureEscape(ch chan *int, cond bool, safe *int) { /
 	}()
 }
 
-// 29. SAFE005: Mutating //gocap:imm via pointer type conversion, accessor method, slice slot, clear(immSlice), and array store
+// 29. SAFE005: Mutating //gosree:imm via pointer type conversion, accessor method, slice slot, clear(immSlice), and array store
 type MutableRateLayout struct {
 	rate int
 }
@@ -424,11 +424,11 @@ func (c *ImmConfig) ratePtr() *int {
 }
 
 func TestImmTypeConvAccessorSliceAndArrayStore(c *ImmConfig, cs []ImmConfig, arrPtr *[2]ImmConfig) { // want TestImmTypeConvAccessorSliceAndArrayStore:"ownership summary"
-	(*MutableRateLayout)(c).rate = 9 // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
-	*c.ratePtr() = 10                // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+	(*MutableRateLayout)(c).rate = 9 // want `SAFE005: write to a field of ImmConfig, which is //gosree:imm; imm values are only written by their composite literal`
+	*c.ratePtr() = 10                // want `SAFE005: write to a field of ImmConfig, which is //gosree:imm; imm values are only written by their composite literal`
 	ps := []*int{&c.rate}
-	mutateIntPtr(ps[0])      // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
-	clear(cs)                // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+	mutateIntPtr(ps[0])      // want `SAFE005: write to a field of ImmConfig, which is //gosree:imm; imm values are only written by their composite literal`
+	clear(cs)                // want `SAFE005: write to a field of ImmConfig, which is //gosree:imm; imm values are only written by their composite literal`
 	*arrPtr = [2]ImmConfig{} // want `SAFE005: store through a \*\[2\]marker_ownership\.ImmConfig overwrites an immutable value`
 }
 
@@ -519,8 +519,8 @@ func TestIdentityPassThroughAndDeferHelperUnlock(c *ImmConfig, g *GuardedCounter
 	b := cap.BorrowMut(&x)
 	ch <- idIntPtrHelper(b) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 
-	*idIntPtrHelper(&c.rate) = 77        // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
-	mutateIntPtr(idIntPtrHelper(&c.rate)) // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+	*idIntPtrHelper(&c.rate) = 77        // want `SAFE005: write to a field of ImmConfig, which is //gosree:imm; imm values are only written by their composite literal`
+	mutateIntPtr(idIntPtrHelper(&c.rate)) // want `SAFE005: write to a field of ImmConfig, which is //gosree:imm; imm values are only written by their composite literal`
 
 	*idIntPtrHelper(&unguardedIdentityGlobal) = 88
 

@@ -17,7 +17,7 @@ import (
 	"testing"
 )
 
-const hdrMath = "package main\n\nimport (\n\t\"fmt\"\n\t\"math\"\n\t\"time\"\n\n\t\"github.com/bharathvbcr/gocap/cap\"\n)\n\n"
+const hdrMath = "package main\n\nimport (\n\t\"fmt\"\n\t\"math\"\n\t\"time\"\n\n\t\"github.com/bharathvbcr/gosree/cap\"\n)\n\n"
 
 var fixCorpus = []e2eCase{
 	// ======== mechanism: name resolution (what does this identifier refer to?) ========
@@ -153,7 +153,7 @@ func main() {
 import (
 	"fmt"
 
-	. "github.com/bharathvbcr/gocap/cap"
+	. "github.com/bharathvbcr/gosree/cap"
 )
 
 func local(Mut []int, Borrow func(int) int) int {
@@ -179,7 +179,7 @@ func main() {
 import (
 	"fmt"
 
-	c "github.com/bharathvbcr/gocap/cap"
+	c "github.com/bharathvbcr/gosree/cap"
 )
 
 func main() {
@@ -200,7 +200,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type MyP *int
@@ -237,7 +237,7 @@ func main() {
 import (
 	"fmt"
 
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type Weekday int
@@ -381,7 +381,7 @@ import (
 	"fmt"
 	"image"
 
-	"github.com/bharathvbcr/gocap/cap"
+	"github.com/bharathvbcr/gosree/cap"
 )
 
 type P struct{ n int }
@@ -461,7 +461,7 @@ func main() {
 import (
 	"fmt"
 
-	. "github.com/bharathvbcr/gocap/cap"
+	. "github.com/bharathvbcr/gosree/cap"
 )
 
 func pick[T any](v T) T {
@@ -482,8 +482,8 @@ import (
 	"fmt"
 
 	_ "embed"
-	_ "github.com/bharathvbcr/gocap/cap"
-	c "github.com/bharathvbcr/gocap/cap"
+	_ "github.com/bharathvbcr/gosree/cap"
+	c "github.com/bharathvbcr/gosree/cap"
 )
 
 func main() {
@@ -495,7 +495,7 @@ func main() {
 	{name: "import_blank_only", src: `package main
 
 import (
-	_ "github.com/bharathvbcr/gocap/cap"
+	_ "github.com/bharathvbcr/gosree/cap"
 )
 
 func main() { println("blank") }
@@ -524,7 +524,7 @@ func main() {
 import (
 	"fmt"
 
-	. "github.com/bharathvbcr/gocap/cap"
+	. "github.com/bharathvbcr/gosree/cap"
 )
 
 type T struct{ A int }
@@ -768,7 +768,7 @@ func TestFixCommitIsAtomicAndRestoresOnFailure(t *testing.T) {
 	}
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".gocap-erase") {
+		if strings.HasPrefix(e.Name(), ".gosree-erase") {
 			t.Errorf("temporary file left behind: %s", e.Name())
 		}
 	}

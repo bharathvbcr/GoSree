@@ -24,11 +24,11 @@ func selectThreeBorrows(ch1, ch2, ch3 chan *int) {
 	x := 10
 	y := 20
 	z := 30
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:mut
+	//gosree:mut
 	b2 := &y
-	//gocap:rob
+	//gosree:rob
 	b3 := &z
 	select { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel` `CAP003: stack-scoped borrow 'b2' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel` `CAP003: stack-scoped borrow 'b3' \(\\rob\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch1 <- b1:
@@ -43,13 +43,13 @@ func selectFourBorrows(ch1, ch2, ch3, ch4 chan *int) {
 	x := 2
 	y := 3
 	z := 4
-	//gocap:mut
+	//gosree:mut
 	b1 := &w
-	//gocap:rob
+	//gosree:rob
 	b2 := &x
-	//gocap:mut
+	//gosree:mut
 	b3 := &y
-	//gocap:rob
+	//gosree:rob
 	b4 := &z
 	select { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be sent on a channel` `CAP003: stack-scoped borrow 'b3' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel` `CAP003: stack-scoped borrow 'b4' \(\\rob\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch1 <- b1:
@@ -63,7 +63,7 @@ func selectFourBorrows(ch1, ch2, ch3, ch4 chan *int) {
 func selectDefaultFirst(ch1 chan *Packet, ch2 chan *int) int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	select { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	default:
@@ -78,7 +78,7 @@ func selectDefaultFirst(ch1 chan *Packet, ch2 chan *int) int {
 func selectDefaultMiddle(ch1 chan *Packet, ch2 chan *int) int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	select { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch1 <- p:
@@ -93,7 +93,7 @@ func selectDefaultMiddle(ch1 chan *Packet, ch2 chan *int) int {
 func selectDefaultLast(ch1 chan *Packet, ch2 chan *int) int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	select { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case ch1 <- p:
@@ -107,7 +107,7 @@ func selectDefaultLast(ch1 chan *Packet, ch2 chan *int) int {
 // 6. Select inside a loop with both \iso and borrow
 func selectInLoop(ch1 chan *Packet, ch2 chan *int) {
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	for i := 0; i < 3; i++ {
 		p := &Packet{ID: i}
@@ -134,7 +134,7 @@ func selectInLoopIsoOutside(ch1, ch2 chan *Packet) {
 func goMethodIsoReceiverBorrowArg() int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go p.process(b) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 	p.ID = 20       // want `SAFE003: composite literal is used after it was passed to a goroutine`
@@ -144,7 +144,7 @@ func goMethodIsoReceiverBorrowArg() int {
 // 9. Goroutine method call where receiver is a borrow and argument is \iso
 func goMethodBorrowReceiverIsoArg() int {
 	w := Worker{val: 10}
-	//gocap:mut
+	//gosree:mut
 	bw := &w
 	p := &Packet{ID: 20}
 	go bw.consume(p) // want `CAP003: stack-scoped borrow 'bw' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
@@ -157,11 +157,11 @@ func goThreeBorrows() {
 	x := 10
 	y := 20
 	z := 30
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
-	//gocap:mut
+	//gosree:mut
 	b3 := &z
 	go sink3(b1, b2, b3) // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be passed as argument to go statement` `CAP003: stack-scoped borrow 'b3' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 }
@@ -172,9 +172,9 @@ func goMultiIsoAndMultiBorrow() int {
 	p2 := &Packet{ID: 2}
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	go sinkMulti(p1, b1, p2, b2) // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 	p1.ID = 10                   // want `SAFE003: composite literal is used after it was passed to a goroutine`
@@ -187,9 +187,9 @@ func selectComplexMix(ch1 chan *Packet, ch2, ch3 chan *int, recvCh chan int) int
 	p := &Packet{ID: 10}
 	x := 42
 	y := 84
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:rob
+	//gosree:rob
 	b2 := &y
 	select { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel` `CAP003: stack-scoped borrow 'b2' \(\\rob\) cannot cross goroutine boundary: cannot be sent on a channel`
 	case <-recvCh:
@@ -206,7 +206,7 @@ func selectComplexMix(ch1 chan *Packet, ch2, ch3 chan *int, recvCh chan int) int
 func goMethodExpression() int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go (*Packet).process(p, b) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be passed as argument to go statement`
 	p.ID = 20                  // want `SAFE003: composite literal is used after it was passed to a goroutine`
@@ -217,7 +217,7 @@ func goMethodExpression() int {
 func goClosureCaptureBorrowAndIsoArg() int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go func(arg *Packet) { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		_ = *b
@@ -230,7 +230,7 @@ func goClosureCaptureBorrowAndIsoArg() int {
 func goClosureCaptureIsoAndBorrow() int {
 	p := &Packet{ID: 10}
 	x := 42
-	//gocap:mut
+	//gosree:mut
 	b := &x
 	go func() { // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		p.ID = *b
@@ -243,9 +243,9 @@ func goClosureCaptureIsoAndBorrow() int {
 func goClosureCaptureTwoBorrows() {
 	x := 10
 	y := 20
-	//gocap:mut
+	//gosree:mut
 	b1 := &x
-	//gocap:mut
+	//gosree:mut
 	b2 := &y
 	go func() { // want `CAP003: stack-scoped borrow 'b1' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine` `CAP003: stack-scoped borrow 'b2' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
 		_ = *b1

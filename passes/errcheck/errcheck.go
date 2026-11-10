@@ -23,8 +23,8 @@ import (
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/ssa"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
-	"github.com/bharathvbcr/gocap/internal/gusseterr"
+	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/gusseterr"
 )
 
 // Rule identifiers.
@@ -118,7 +118,7 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 	}
 
-	// Format, deduplicate per (line, rule_code, detail), honor //gocap:unsafe / //gosree:unsafe,
+	// Format, deduplicate per (line, rule_code, detail), honor //gosree:unsafe,
 	// and sort deterministically.
 	type dedupKey struct {
 		file string

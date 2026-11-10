@@ -5,13 +5,13 @@ import (
 	"go/types"
 	"sort"
 
-	"github.com/bharathvbcr/gocap/internal/kinds"
+	"github.com/bharathvbcr/gosree/internal/kinds"
 )
 
 // The call tables name functions of other packages by types.Func.FullName: spawners (spawn.go), the
 // mutex vocabulary (lockOps, lockset.go) and the function overrides (internal/kinds/funcs.go). They
 // answer different questions and stay separate, but they are checked in one place, with one
-// resolver: when gocap analyses the package a table entry belongs to, the entry must resolve to a
+// resolver: when gosree analyses the package a table entry belongs to, the entry must resolve to a
 // function of it, or the analysis fails. A renamed function is an error, never an entry that
 // silently stops matching.
 
@@ -51,7 +51,7 @@ func checkCallTables(pkg *types.Package) error {
 // argument, and `atomic.AddInt64(&h.hits, 1)` in a handler would be SAFE008.
 const atomicPkg = "sync/atomic"
 
-// overrideBudget is the abandon criterion's cap on assumptions about code gocap does not check.
+// overrideBudget is the abandon criterion's cap on assumptions about code gosree does not check.
 const overrideBudget = 100
 
 // assumptions counts the entries that assert something about a type or function instead of

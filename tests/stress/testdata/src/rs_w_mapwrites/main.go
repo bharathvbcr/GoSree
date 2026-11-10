@@ -1,8 +1,8 @@
 // WITNESS: panic
 //
-// fatal error: concurrent map writes, in a program gocap accepts. The session table is published
+// fatal error: concurrent map writes, in a program gosree accepts. The session table is published
 // through an atomic.Pointer, and both the publisher and a worker keep writing the map they share.
-// Rust rejects it: a HashMap is not Sync, so sharing it needs Arc<Mutex<_>>. gocap treats
+// Rust rejects it: a HashMap is not Sync, so sharing it needs Arc<Mutex<_>>. gosree treats
 // Store as an ordinary call and Load as returning memory nobody else holds.
 package main
 

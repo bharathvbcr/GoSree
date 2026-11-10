@@ -2,7 +2,7 @@
 // for release builds, makes `as` truncation explicit, and panics on an out-of-range index and on
 // division by zero. Go wraps silently, truncates on conversion, and panics on the last two at
 // run time. Rust's static guarantee is the same as Go's for bounds and division (both are run-time
-// panics, not memory corruption); the difference is overflow. gocap has no arithmetic rule; go
+// panics, not memory corruption); the difference is overflow. gosree has no arithmetic rule; go
 // vet has none for overflow.
 package rs_arith
 

@@ -6,7 +6,7 @@ type Job struct{ ID int }
 
 // Mutes an unsafeban finding: not stale.
 func cast(p *int) uintptr {
-	//gocap:unsafe p outlives the call
+	//gosree:unsafe p outlives the call
 	return uintptr(unsafe.Pointer(p))
 }
 
@@ -14,18 +14,18 @@ func cast(p *int) uintptr {
 func send(ch chan *Job) {
 	j := &Job{}
 	ch <- j
-	//gocap:unsafe the receiver only reads ID
+	//gosree:unsafe the receiver only reads ID
 	j.ID = 1
 }
 
 // Mutes nothing.
 func plain() int {
-	//gocap:unsafe nothing here needs it // want `SAFE007: stale escape hatch`
+	//gosree:unsafe nothing here needs it // want `SAFE007: stale escape hatch`
 	return 1
 }
 
 // A hatch in a declaration's doc comment covers the //go:linkname line above it: not stale.
 //
 //go:linkname nanotime runtime.nanotime
-//gocap:unsafe reviewed: monotonic clock read
+//gosree:unsafe reviewed: monotonic clock read
 func nanotime() int64

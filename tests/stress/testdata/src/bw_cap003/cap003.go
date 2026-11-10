@@ -16,7 +16,7 @@ func (t Tuple) bump() { *t.p++ }
 
 // 1. control: a goroutine closure capturing the borrow.
 //
-//gocap:mub b
+//gosree:mub b
 func captureDirect(b *int) {
 	go func() { *b = 1 }() // HIT(CAP003)
 }
@@ -24,7 +24,7 @@ func captureDirect(b *int) {
 // 2. the borrow inside the transient stack tuple, captured by a goroutine closure: the captured
 // variable is t, which is not itself annotated.
 //
-//gocap:mub b
+//gosree:mub b
 func captureViaTuple(b *int) {
 	t := Tuple{p: b}
 	go func() { *t.p = 1 }() // HIT(SAFE002) MISS(CAP003): t.p is b; the goroutine writes through it while the caller may still use b
@@ -32,7 +32,7 @@ func captureViaTuple(b *int) {
 
 // 3. the tuple passed as a go-statement argument.
 //
-//gocap:mub b
+//gosree:mub b
 func tupleAsGoArg(b *int) {
 	t := Tuple{p: b}
 	go Tuple.bump(t) // HIT(BORROW001) HIT(SAFE002)
@@ -40,7 +40,7 @@ func tupleAsGoArg(b *int) {
 
 // 4. a method value bound to the tuple, then started as a goroutine.
 //
-//gocap:mub b
+//gosree:mub b
 func methodValueOfTuple(b *int) {
 	t := Tuple{p: b}
 	f := t.bump
@@ -49,7 +49,7 @@ func methodValueOfTuple(b *int) {
 
 // 5. a closure capturing a closure that captures the borrow.
 //
-//gocap:mub b
+//gosree:mub b
 func closureOfClosure(b *int) {
 	inner := func() { *b = 1 }
 	go func() { inner() }() // HIT(CAP003): inner captures b, and the goroutine calls inner
@@ -60,7 +60,7 @@ func closureOfClosure(b *int) {
 // p); the call site that hands it a \mub borrow is not.
 func spawn(p *int) { go func() { *p = 1 }() } // HIT(SAFE002)
 
-//gocap:mub b
+//gosree:mub b
 func viaSpawningHelper(b *int) {
 	spawn(b) // MISS(CAP003): spawn starts a goroutine that writes through b while this frame may still use it
 }
@@ -68,10 +68,10 @@ func viaSpawningHelper(b *int) {
 // 6b. control: the same spawner with its parameter marked iso, which makes the callee clean. The
 // caller passing a \mub borrow (which it does not own) to the iso parameter is then caught.
 //
-//gocap:iso p
+//gosree:iso p
 func spawnIso(p *int) { go func() { *p = 1 }() }
 
-//gocap:mub b
+//gosree:mub b
 func viaIsoSpawner(b *int) {
 	spawnIso(b) // HIT(SAFE002)
 	*b = 2      // HIT(SAFE003)
@@ -79,7 +79,7 @@ func viaIsoSpawner(b *int) {
 
 // 7. WaitGroup.Go as the spawner.
 //
-//gocap:mub b
+//gosree:mub b
 func viaWaitGroupGo(b *int) {
 	var wg sync.WaitGroup
 	wg.Go(func() { *b = 1 }) // HIT(CAP003)
@@ -88,7 +88,7 @@ func viaWaitGroupGo(b *int) {
 
 // 8. time.AfterFunc as the spawner.
 //
-//gocap:mub b
+//gosree:mub b
 func viaAfterFunc(b *int) {
 	time.AfterFunc(time.Millisecond, func() { *b = 1 }) // HIT(CAP003)
 }
@@ -96,7 +96,7 @@ func viaAfterFunc(b *int) {
 // 9. a generic helper that starts the goroutine.
 func goWith[T any](v T, f func(T)) { go f(v) } // HIT(SAFE002)
 
-//gocap:mub b
+//gosree:mub b
 func viaGeneric(b *int) {
 	goWith(b, func(p *int) { *p = 1 }) // MISS(CAP003): goWith starts f(b) on a new goroutine
 }
@@ -104,7 +104,7 @@ func viaGeneric(b *int) {
 // 10. a local borrow (not a parameter) inside a struct sent on a channel.
 func tupleSent(ch chan Tuple) {
 	x := 0
-	b := &x           //gocap:mut
+	b := &x           //gosree:mut
 	ch <- Tuple{p: b} // HIT(BORROW001)
 	*b = 2            // HIT(SAFE003)
 }

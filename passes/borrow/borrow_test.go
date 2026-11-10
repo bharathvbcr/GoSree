@@ -5,7 +5,7 @@ import (
 
 	"golang.org/x/tools/go/analysis/analysistest"
 
-	"github.com/bharathvbcr/gocap/passes/borrow"
+	"github.com/bharathvbcr/gosree/passes/borrow"
 )
 
 func TestBorrows(t *testing.T) {

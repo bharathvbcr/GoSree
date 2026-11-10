@@ -18,11 +18,11 @@ import (
 	"golang.org/x/tools/go/analysis/checker"
 	"golang.org/x/tools/go/packages"
 
-	"github.com/bharathvbcr/gocap/internal/kinds"
+	"github.com/bharathvbcr/gosree/internal/kinds"
 )
 
 // oraclePackages are the std packages the race corpus and the reference service call most. The
-// differential runs over every exported function gocap summarises in them.
+// differential runs over every exported function gosree summarises in them.
 var oraclePackages = []string{"bytes", "strings", "strconv", "sort", "bufio", "io", "encoding/json", "net/http"}
 
 // compilerLeak is one "leaking param" line of `go build -gcflags=-m=2`.
@@ -89,16 +89,16 @@ var (
 	fieldFlow = regexp.MustCompile(`^from (\w+)\.(\w+) \(dot(?: of pointer)?\)`)
 )
 
-// excusedLeak says why a heap leak the compiler reports is not one gocap tracks, or "" if it is:
-//   - "lock": the parameter reaches the heap through a sync method. gocap counts lock operations as
+// excusedLeak says why a heap leak the compiler reports is not one gosree tracks, or "" if it is:
+//   - "lock": the parameter reaches the heap through a sync method. gosree counts lock operations as
 //     synchronisation, not as retention (lockOps, and the sync types are shareable).
 //   - "shareable field": what escapes is a field of a shareable type (a string, an error) loaded
 //     from the parameter, which a caller can share freely.
 //   - "self-store": the content is stored back into the parameter's own memory (b.buf =
-//     append(b.buf, c)); the compiler models a store through a parameter as the heap, gocap as a
+//     append(b.buf, c)); the compiler models a store through a parameter as the heap, gosree as a
 //     write to the parameter, which Writes records.
 //
-// -m=2 explains only the first path the compiler found, so a second path that gocap should see can
+// -m=2 explains only the first path the compiler found, so a second path that gosree should see can
 // hide behind an excused one; that is this oracle's limit, not a proof.
 func excusedLeak(l compilerLeak, ptype types.Type, cls *kinds.Classifier) string {
 	for _, f := range l.heapFlow {
@@ -135,11 +135,11 @@ func excusedLeak(l compilerLeak, ptype types.Type, cls *kinds.Classifier) string
 	return ""
 }
 
-// explains reports whether a gocap summary accounts for a compiler leak of parameter i of a function
+// explains reports whether a gosree summary accounts for a compiler leak of parameter i of a function
 // with np parameters. The compiler's escape analysis is the oracle for one direction only: whatever
 // it says leaves the function must be retained (Leaks), joined to another argument or result (Links),
 // or assumed (Unknown). A flow to a result may instead make the result not fresh, which callers treat
-// as foreign. The converse is not checked: gocap's Leaks is wider than heap escape (a move to another
+// as foreign. The converse is not checked: gosree's Leaks is wider than heap escape (a move to another
 // goroutine leaks even when the compiler keeps it on the stack), and Fresh and Writes have no oracle.
 func explains(f *FuncFact, i, np int, l compilerLeak) bool {
 	if f.Unknown || (i < len(f.Leaks) && f.Leaks[i]) {
@@ -208,10 +208,10 @@ func canonical(pos string) string {
 	return file + ":" + rest
 }
 
-// TestEscapeOracleNoFreshOrWritesOracle is the differential test of gocap's std summaries against
+// TestEscapeOracleNoFreshOrWritesOracle is the differential test of gosree's std summaries against
 // the compiler's escape analysis. Every parameter the compiler reports as leaking must be leaked or
-// linked in gocap's FuncFact, or the fact must be Unknown. Parameters of shareable types are skipped:
-// gocap gives them no alias class because sharing them is safe. A heap leak the compiler explains by
+// linked in gosree's FuncFact, or the fact must be Unknown. Parameters of shareable types are skipped:
+// gosree gives them no alias class because sharing them is safe. A heap leak the compiler explains by
 // a lock or by a shareable field is excused (excusedLeak) and counted, not compared. Fresh and Writes
 // are not compared; the compiler has no notion of either (hence the name).
 func TestEscapeOracleNoFreshOrWritesOracle(t *testing.T) {
@@ -273,7 +273,7 @@ func TestEscapeOracleNoFreshOrWritesOracle(t *testing.T) {
 			continue
 		}
 		// A flow into a result of a shareable type (an error, a string, a context) hands the caller
-		// nothing it could race on, so gocap rightly keeps no link for it.
+		// nothing it could race on, so gosree rightly keeps no link for it.
 		if res := p.fn.Signature().Results(); l.toResult && l.result < res.Len() && cls.Shareable(res.At(l.result).Type()) {
 			continue
 		}
@@ -294,7 +294,7 @@ func TestEscapeOracleNoFreshOrWritesOracle(t *testing.T) {
 				continue
 			}
 			violations++
-			bad = append(bad, fmt.Sprintf("%s: %s (gocap: leaks %v, links %v, fresh %v)", key, l.line, f.Leaks, f.Links, f.Fresh))
+			bad = append(bad, fmt.Sprintf("%s: %s (gosree: leaks %v, links %v, fresh %v)", key, l.line, f.Leaks, f.Links, f.Fresh))
 		}
 	}
 	slices.Sort(bad)
@@ -308,12 +308,12 @@ func TestEscapeOracleNoFreshOrWritesOracle(t *testing.T) {
 	}
 	for key := range reviewedLeaks {
 		if !seen[key] {
-			t.Errorf("reviewed leak %s no longer disagrees with gocap; remove it from reviewedLeaks", key)
+			t.Errorf("reviewed leak %s no longer disagrees with gosree; remove it from reviewedLeaks", key)
 		}
 	}
 }
 
-// reviewedLeaks are compiler leaks gocap's summaries do not account for, each read by hand (item 4,
+// reviewedLeaks are compiler leaks gosree's summaries do not account for, each read by hand (item 4,
 // go1.27.3): the compiler's -m=2 explanation and the source of the callee it names (pathAddrs,
 // isRequestExempt, findHandler and matchOrRedirect, serveFile, genericReplacer.lookup,
 // url.EscapedPath, Cookie.String). What escapes is string data reached through the callee, or the

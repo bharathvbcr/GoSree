@@ -2,7 +2,7 @@
 // either: deadlocks (lock order, re-locking a std Mutex, which deadlocks or panics) are possible
 // in safe Rust. What Rust does prevent: unlocking a mutex you do not hold (the guard is the only
 // way to unlock), a negative counter on a join handle (there is none), and mixing atomic and plain
-// access to one variable (an AtomicI64 has no plain access). gocap's SAFE009 checks access to
+// access to one variable (an AtomicI64 has no plain access). gosree's SAFE009 checks access to
 // //safe:guarded_by memory; the question here is whether its lockset notices the lock misuse.
 package rs_conc
 

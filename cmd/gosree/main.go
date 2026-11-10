@@ -1,12 +1,12 @@
-// Command gocap checks Go packages for ownership and memory-safety violations.
+// Command gosree checks Go packages for ownership and memory-safety violations.
 //
-//	gocap ./...
-//	go vet -vettool=$(command -v gocap) ./...
+//	gosree ./...
+//	go vet -vettool=$(command -v gosree) ./...
 //
 // Exit status, in both drivers: 0 when every package was loaded, type-checked and analysed and
 // nothing was reported; 3 when findings were reported; 1 when a package could not be loaded or
 // type-checked or an analyzer failed (no verdict, never 0, and it outranks 3: findings of the
-// packages that did load are still printed); 2 for a flag gocap refuses. Under go vet the status
+// packages that did load are still printed); 2 for a flag gosree refuses. Under go vet the status
 // is go vet's own (1 for findings and for failures).
 //
 // Flags that would make a run cover less or pass what it should not are handled before the driver
@@ -26,15 +26,15 @@ import (
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/multichecker"
 
-	"github.com/bharathvbcr/gocap/internal/annot"
-	"github.com/bharathvbcr/gocap/passes/borrow"
-	"github.com/bharathvbcr/gocap/passes/errcheck"
-	"github.com/bharathvbcr/gocap/passes/ownership"
-	"github.com/bharathvbcr/gocap/passes/unsafeban"
+	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/passes/borrow"
+	"github.com/bharathvbcr/gosree/passes/errcheck"
+	"github.com/bharathvbcr/gosree/passes/ownership"
+	"github.com/bharathvbcr/gosree/passes/unsafeban"
 )
 
 // childEnv marks the process that runs the driver for a -json parent.
-const childEnv = "GOCAP_JSON_CHILD"
+const childEnv = "GOSREE_JSON_CHILD"
 
 var analyzers = []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer, borrow.Analyzer, errcheck.Analyzer}
 
@@ -51,7 +51,7 @@ func main() {
 		}
 		if !vetxOnly(p.args) {
 			for _, w := range p.warnings {
-				fmt.Fprintln(os.Stderr, "gocap: WARNING: "+w)
+				fmt.Fprintln(os.Stderr, "gosree: WARNING: "+w)
 			}
 		}
 		os.Args = append(os.Args[:1:1], p.args...)
@@ -91,7 +91,7 @@ func vetxOnly(args []string) bool {
 func runJSON(args []string) int {
 	self, err := os.Executable()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gocap: cannot locate itself to run -json:", err)
+		fmt.Fprintln(os.Stderr, "gosree: cannot locate itself to run -json:", err)
 		return exitFailed
 	}
 	cmd := exec.Command(self, args...)
@@ -104,7 +104,7 @@ func runJSON(args []string) int {
 		if ee, ok := err.(*exec.ExitError); ok {
 			code = ee.ExitCode()
 		} else {
-			fmt.Fprintln(os.Stderr, "gocap: cannot run the driver for -json:", err)
+			fmt.Fprintln(os.Stderr, "gosree: cannot run the driver for -json:", err)
 			return exitFailed
 		}
 	}
@@ -123,7 +123,7 @@ func jsonExit(data []byte) int {
 	}
 	var tree map[string]map[string]any
 	if err := json.Unmarshal(data, &tree); err != nil {
-		fmt.Fprintln(os.Stderr, "gocap: cannot read the driver's -json output:", err)
+		fmt.Fprintln(os.Stderr, "gosree: cannot read the driver's -json output:", err)
 		return exitFailed
 	}
 	code, failed := exitClean, false
