@@ -234,7 +234,7 @@ func buildRandomPackage(rng *rand.Rand, nFuncs, maxBlocks int) []gusseterr.FuncI
 				case 1:
 					tid := uint32(rng.IntN(nTuples))
 					es := tuples[tid].ErrSlot
-					cSlot := uint32(( int(sA) + 1 ) % nSlots)
+					cSlot := uint32((int(sA) + 1) % nSlots)
 					ops = append(ops, gusseterr.OpIR{
 						Kind:       gusseterr.OpBindTuple,
 						SiteID:     siteSeq,

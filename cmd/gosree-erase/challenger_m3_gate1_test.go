@@ -516,4 +516,3 @@ func TestChallenger_DiffStressPerformance(t *testing.T) {
 	// Measure memory and time
 	printUnifiedDiff(b1.String(), b2.String())
 }
-
