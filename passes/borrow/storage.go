@@ -254,6 +254,8 @@ func canHoldBorrow(t types.Type) bool {
 		return canHoldBorrow(u.Key()) || canHoldBorrow(u.Elem())
 	case *types.Chan:
 		return canHoldBorrow(u.Elem())
+	case *types.Signature:
+		return true
 	}
 	return false
 }
@@ -285,6 +287,27 @@ func (sc *storageChecker) isBorrowExpr(expr ast.Expr, isBorrowVar map[*types.Var
 				}
 			}
 		}
+	case *ast.CallExpr:
+		if sc.ix.BorrowAt(e.Pos()) != annot.BorrowNone {
+			return true
+		}
+	case *ast.FuncLit:
+		capturesBorrow := false
+		if e.Body != nil {
+			ast.Inspect(e.Body, func(n ast.Node) bool {
+				if capturesBorrow {
+					return false
+				}
+				if id, ok := n.(*ast.Ident); ok {
+					if v, ok := sc.pass.TypesInfo.Uses[id].(*types.Var); ok && isBorrowVar[v] {
+						capturesBorrow = true
+						return false
+					}
+				}
+				return true
+			})
+		}
+		return capturesBorrow
 	case *ast.TypeAssertExpr:
 		return sc.isBorrowExpr(e.X, isBorrowVar)
 	}
@@ -339,6 +362,25 @@ func (sc *storageChecker) findBorrowInExpr(
 		}
 	case *ast.TypeAssertExpr:
 		return sc.findBorrowInExpr(e.X, isBorrowVar, structVarHoldsBorrow)
+	case *ast.FuncLit:
+		var foundFld string
+		if e.Body != nil {
+			ast.Inspect(e.Body, func(n ast.Node) bool {
+				if foundFld != "" {
+					return false
+				}
+				if id, ok := n.(*ast.Ident); ok {
+					if v, ok := sc.pass.TypesInfo.Uses[id].(*types.Var); ok {
+						if fld, ok := structVarHoldsBorrow[v]; ok {
+							foundFld = fld
+							return false
+						}
+					}
+				}
+				return true
+			})
+		}
+		return foundFld
 	case *ast.CompositeLit:
 		for _, elt := range e.Elts {
 			valExpr := elt
@@ -515,12 +557,16 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 		}
 	}
 
-	// Seed with annotated local variables
+	// Seed with annotated local variables belonging to this function
 	for v := range sc.ix.MubVars {
-		isBorrowVar[v] = true
+		if v.Pos().IsValid() && v.Pos() >= syntax.Pos() && v.Pos() <= syntax.End() {
+			isBorrowVar[v] = true
+		}
 	}
 	for v := range sc.ix.RobVars {
-		isBorrowVar[v] = true
+		if v.Pos().IsValid() && v.Pos() >= syntax.Pos() && v.Pos() <= syntax.End() {
+			isBorrowVar[v] = true
+		}
 	}
 
 	// AST walk to find borrows and struct composite literals and check local escapes
@@ -687,13 +733,23 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 					continue
 				}
 
-				// E. Check if LHS is a package global
+				// E. Check if LHS is a package global or captured outer variable
 				if sc.isPackageGlobal(v) {
 					if i < len(stmt.Rhs) {
 						valExpr := stmt.Rhs[i]
 						if sc.isBorrowExpr(valExpr, isBorrowVar) || sc.findBorrowInExpr(valExpr, isBorrowVar, structVarHoldsBorrow) != "" {
 							sc.report(stmt.Pos(), StorageViolation, fmt.Sprintf(
 								"package variable '%s' cannot store second-class borrow", v.Name()))
+						}
+					}
+					continue
+				}
+				if v.Pos().IsValid() && (v.Pos() < syntax.Pos() || v.Pos() > syntax.End()) {
+					if i < len(stmt.Rhs) {
+						valExpr := stmt.Rhs[i]
+						if sc.isBorrowExpr(valExpr, isBorrowVar) || sc.findBorrowInExpr(valExpr, isBorrowVar, structVarHoldsBorrow) != "" {
+							sc.report(stmt.Pos(), StorageViolation,
+								"cannot store second-class borrow to heap or non-stack memory")
 						}
 					}
 					continue
@@ -754,6 +810,18 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 								if idx < len(vs.Names) {
 									declId := vs.Names[idx]
 									if dv, ok := sc.pass.TypesInfo.Defs[declId].(*types.Var); ok {
+										if ue, ok := unparen(valExpr).(*ast.UnaryExpr); ok && ue.Op == token.AND {
+											if baseId, ok := unparen(ue.X).(*ast.Ident); ok {
+												if gv, ok := sc.pass.TypesInfo.Uses[baseId].(*types.Var); ok && sc.isPackageGlobal(gv) {
+													ptrToGlobal[dv] = gv.Name()
+												}
+											}
+										}
+										if call, ok := unparen(valExpr).(*ast.CallExpr); ok {
+											if funId, ok := unparen(call.Fun).(*ast.Ident); ok && funId.Name == "new" {
+												heapPtrs[dv] = true
+											}
+										}
 										if fld := sc.findBorrowInExpr(valExpr, isBorrowVar, structVarHoldsBorrow); fld != "" {
 											if _, isStruct := dv.Type().Underlying().(*types.Struct); isStruct {
 												structVarHoldsBorrow[dv] = fld
@@ -984,6 +1052,18 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 			isBorrowVal[p] = true
 		}
 	}
+	for _, fv := range fn.FreeVars {
+		for v := range isBorrowVar {
+			if (fv.Pos().IsValid() && v.Pos().IsValid() && fv.Pos() == v.Pos()) || fv.Name() == v.Name() {
+				isBorrowVal[fv] = true
+			}
+		}
+		for v, fld := range structVarHoldsBorrow {
+			if (fv.Pos().IsValid() && v.Pos().IsValid() && fv.Pos() == v.Pos()) || fv.Name() == v.Name() {
+				structHoldsBorrow[fv] = fld
+			}
+		}
+	}
 
 	// Map local borrow variables using ValueForExpr and AST identifiers
 	ast.Inspect(syntax, func(n ast.Node) bool {
@@ -1014,9 +1094,12 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 							}
 							// Owner allocation in fn.Locals and fn.Blocks
 							ownerName := ""
-							rhs := node.Rhs[i]
+							rhs := unparen(node.Rhs[i])
+							if call, ok := rhs.(*ast.CallExpr); ok && len(call.Args) == 1 && sc.ix.BorrowAt(call.Pos()) != annot.BorrowNone {
+								rhs = unparen(call.Args[0])
+							}
 							if ue, ok := rhs.(*ast.UnaryExpr); ok && ue.Op == token.AND {
-								if baseId, ok := ue.X.(*ast.Ident); ok {
+								if baseId, ok := unparen(ue.X).(*ast.Ident); ok {
 									ownerName = baseId.Name
 								}
 							}
@@ -1225,6 +1308,17 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 			if !pos.IsValid() {
 				pos = resolveInstructionPos(ins, fn)
 			}
+			if callee := ins.Common().StaticCallee(); callee != nil {
+				switch callee.Name() {
+				case "BorrowMut", "BorrowMub", "Borrow", "BorrowRef", "BorrowRob":
+					if callee.Pkg != nil && callee.Pkg.Pkg != nil && (callee.Pkg.Pkg.Name() == "cap" || strings.HasSuffix(callee.Pkg.Pkg.Path(), "/cap")) {
+						isBorrowVal[ins] = true
+						for _, arg := range ins.Common().Args {
+							isBorrowVal[arg] = true
+						}
+					}
+				}
+			}
 			// Check built-in append(s, t)
 			if b, ok := ins.Common().Value.(*ssa.Builtin); ok && b.Name() == "append" {
 				for _, arg := range ins.Common().Args[1:] {
@@ -1282,6 +1376,29 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 			}
 			if fld, ok := structHoldsBorrow[ins.X]; ok {
 				structHoldsBorrow[ins] = fld
+			}
+
+		case *ssa.MakeClosure:
+			for _, b := range ins.Bindings {
+				if ptr, ok := b.Type().Underlying().(*types.Pointer); ok && !canHoldBorrow(ptr.Elem()) {
+					continue
+				}
+				if isBorrowVal[b] {
+					isBorrowVal[ins] = true
+				}
+				if fld, ok := structHoldsBorrow[b]; ok {
+					structHoldsBorrow[ins] = fld
+				}
+			}
+
+		case *ssa.Phi:
+			for _, e := range ins.Edges {
+				if isBorrowVal[e] {
+					isBorrowVal[ins] = true
+				}
+				if fld, ok := structHoldsBorrow[e]; ok {
+					structHoldsBorrow[ins] = fld
+				}
 			}
 
 		case *ssa.Convert:
@@ -1393,6 +1510,10 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 				pos = resolveInstructionPos(ins, fn)
 			}
 			cc := ins.Common()
+			if fld, ok := structHoldsBorrow[cc.Value]; ok {
+				sc.report(pos, StorageViolation, fmt.Sprintf(
+					"borrow stored in struct field '%s' escapes stack frame", fld))
+			}
 			for _, arg := range cc.Args {
 				if isBorrowVal[arg] {
 					sc.report(pos, StorageViolation,

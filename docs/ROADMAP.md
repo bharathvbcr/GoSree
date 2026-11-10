@@ -1,0 +1,165 @@
+# Roadmap
+
+The README and `docs/` are the design of record: gocap checks memory where it crosses goroutines, and leaves
+aliasing within one goroutine alone. In build order:
+
+Done:
+- callback functions as goroutine boundaries;
+- SAFE001 for dot imports of `unsafe` and functions without a Go body;
+- SAFE008 for handlers that write shared memory;
+- items 1, 2 and 3 below.
+
+1. **Done:** a guarded-by rule. It came before item 2, since recording writes in summaries turns calls like
+   `h.cache.Set(...)` into SAFE008 findings that need it. The guarded SAFE008 findings on the
+   reference service are its acceptance cases. Five steps, from the 2026-11-09 design ruling:
+   - **Done:** parse `//safe:guarded_by mu` and `//safe:holds mu`.
+   - **Done:** SAFE006 checked where the package variable is declared. Race corpus: 229/234, and
+     38 → 36 race-free tests clean. `TestNoRaceFinGlobal` (fixed by `//safe:guarded_by Mutex`) and
+     `TestNoRaceRpcChan` write package variables outside init.
+   - **Done:** lock tracking and SAFE009, with SAFE008 leaving guarded writes to SAFE009. No
+     annotations exist in the corpus or the reference service, so neither moved. On a scratch copy
+     of the reference service with 8 `guarded_by` and 1 `holds` added:
+     - SAFE008 went from 13 to 1 (the unguarded test).
+     - SAFE009 found 2: `paper.go:759` returns the guarded `*TTLCache` (a policy call: accept it, or
+       override the type), and a stress test reads `len(windows)` unlocked.
+
+     The design review predicted 3. Its third, `client_telemetry_test.go:335`, reads under
+     `limiter.mu.Lock()`, so no finding is right.
+   - **Done:** `//safe:imm` types may have guarded fields of any type. The same change closes a
+     hole: the address of a field or element of a shared value (`&cfg.port` on an imm `*Config`)
+     used to look owned and could be moved to a goroutine. It is now foreign (SAFE002). The race
+     corpus and the reference service did not move, as predicted.
+   - **Done:** guarded local variables, and the corpus scored a second time on an annotated copy:
+     229 / 40, as predicted before the run ([the annotated copy](../README.md#the-annotated-copy)). The design
+     review predicted 229 / 42 from the earlier base of 38. A write to a guarded field of a package
+     variable is no longer SAFE006. The reference service did not move (no annotations).
+2. **Done:** summaries that record writes, a function override table, and summaries that link
+   arguments and results, plus summaries of the locks a function returns holding. Four steps, from
+   the 2026-11-09 design ruling, each measured against a prediction made before its run:
+   - **Writes bit.** SAFE008 follows static calls into other packages through the callee's summary.
+     Reference service: SAFE008 13 → 101, as predicted, and no other category moved. 88 of the 101
+     are calls: handlers in `internal/api` passing a captured singleton
+     (`*wisdev.IdempotencyStore`, `*RuntimeStateStore`, `*RuntimeJournal`, `*AgentGateway`,
+     `*llm.Client`) to a method that writes it under a mutex nothing declares guards it. Three
+     callees are outside the module, one finding each: `websocket.Upgrader.Upgrade`,
+     `require.NotEmpty` and `t.Fatalf`. The corpus did not move.
+   - **Function overrides** (`internal/kinds/funcs.go`) and `net.Listener` as a type override.
+     SAFE002 784 → 736. The prediction was a drop of 30 to 43, so it **missed**. The 48 break down
+     as follows:
+     - 37 from the entries' own causes: `context.WithCancel` 27, `context.WithTimeout` 8,
+       `io.ReadAll` and `json.Marshal` one each;
+     - 5 from `net.Listen`: 7 findings, of which 2 now name their next cause, `grpc.NewServer`;
+     - 5 from three in-module functions that return a `WithCancel` or `json.Marshal` result, which
+       became fresh too;
+     - 1 whose cause was a parameter merged with a listener.
+
+     The prediction left two effects out. Freshness is transitive. And as a type override,
+     `net.Listener` also stopped `ln.Close()` after a goroutine took the listener from counting as
+     a use or an escape (SAFE003 −12, SAFE004 −6).
+   - **Links.** The prediction was SAFE004 −24 to −30, with SAFE002 falling and SAFE003 rising. It
+     **missed on SAFE004**, which rose. Two corrections to the ruling's design came first:
+     - **Pointer depth.** A link records the pointer depth where the two values meet, not only that
+       they meet. Joining them at the top made `(*llm.Client).WithTimeout`, which writes a copy of
+       its receiver, a writer of the receiver: 4 false SAFE008 findings.
+     - **Every event.** The summary records links from every event in a region, not only the events
+       before the first leak. Stopping early made the recorded links depend on map order, and
+       could drop the link of a result that is also not fresh.
+
+     Measured with both: SAFE002 736 → 644, SAFE003 673 → 811, SAFE003-forkjoin 202 → 286 and
+     SAFE004 341 → 414. Transfers with a SAFE002 or SAFE004 fell from 784 to 695: 95 cleared and 6
+     newly flagged. 113 of the 114 new SAFE004 positions are on transfers that were already flagged.
+     A constructor's result that used to be foreign is now joined to its argument (a handler built
+     from `cfg`), and that argument's own escape (`cfg` passed to `ensureAgentGateway`) is now
+     visible on the handler. The SAFE003 rise is the second and later captures of one linked struct,
+     as predicted. Two corpus race tests changed categories ([in the README](../README.md#measured-on-the-go-race-detectors-corpus)).
+   - **Lock-acquire summaries.** Annotated corpus 229 / 40 → 229 / 42, as predicted. Reference
+     service unchanged (no annotations).
+
+   gocap has no summary for `sync/atomic`'s functions (they have no Go body), so the writes bit
+   counted `atomic.AddInt64(&h.n, 1)` in a handler as a write. That contradicts the README's rule that
+   atomic calls are not stores, so `sync/atomic` functions write nothing. Like `lockOps`, this is
+   vocabulary, not a budget entry. Only SAFE008 reads writes, and it stayed at 101 with and without
+   the rule.
+3. The hatch ratio measured on the reference service: ScholarLM's `backend/go_orchestrator`, pinned
+   at ScholarLM commit `bb60b53`, measured with `-tests` on go1.27.3. Untriaged baselines, each
+   with 0 `//safe:unsafe`:
+
+   | | Transfers | SAFE001 | SAFE002 | SAFE003 | SAFE003-forkjoin | SAFE004 | SAFE006 | SAFE008 | Findings |
+   |---|---|---|---|---|---|---|---|---|---|
+   | Links and lock-acquire summaries | 1,642 | 104 | 644 | 811 | 286 | 414 | 238 | 101 | 2,598 |
+   | Function overrides | 1,642 | 104 | 736 | 673 | 202 | 341 | 238 | 101 | 2,395 |
+   | Writes bit | 1,642 | 104 | 784 | 685 | 202 | 347 | 238 | 101 | 2,461 |
+   | SAFE006 at the declaration | 1,642 | 104 | 784 | 685 | 202 | 347 | 238 | 13 | 2,373 |
+   | With SAFE008 (`8add3ad`) | 1,642 | 104 | 784 | 685 | 202 | 347 | 130 | 13 | 2,265 |
+   | With callbacks (`b56b798`) | 1,642 | 104 | 784 | 685 | 202 | 347 | 130 | - | 2,252 |
+   | Before callbacks (`538bbe2`) | 1,258 | 104 | 511 | 458 | 193 | 263 | 123 | - | 1,652 |
+
+   SAFE001 is mostly generated protobuf code and tests. The 384 transfers callbacks added are mostly
+   HTTP handlers: `internal/api` went from 365 to 633. The 13 SAFE008 findings are on 6 handler
+   registrations:
+   - `paper.go` ×7 and `client_telemetry.go` ×3, mostly reached through helper calls;
+   - `login.go:181` and `mcp_wiring.go:46`;
+   - one test.
+
+   Every non-test write is under a mutex: checked line by line in the 2026-11-09 design review, plus
+   `client_telemetry.go:119`, which that review's prototype missed.
+
+   **Done: the triage.** The triage log is
+   [`refservice/scholarlm-bb60b53.md`](../cmd/gocap-corpus/refservice/scholarlm-bb60b53.md). It has
+   each batch's prediction, made before its run, and its result. The ledger,
+   [`scholarlm-bb60b53.tsv`](../cmd/gocap-corpus/refservice/scholarlm-bb60b53.tsv), has one row per
+   directive with its verdict. Both strata are measured on a `git archive` of `bb60b53`: the
+   `-tests` baseline reproduced the row above exactly. The production stratum (no `-tests`) is the
+   headline, since the abandon criterion is about a service, not its tests.
+
+   | Stratum | Transfers | Flagged | Hatched | Hatch ratio | Races found |
+   |---|---|---|---|---|---|
+   | production | 476 | 345 | 345 (all) | **72.5%** | 0 |
+   | `-tests` | 1,798 | 1,014 | 450: the production 345, plus 105 transfers at a seeded sample of 100 of the 575 test-only positions | 25.0% measured (sample only); 56.4% if every flagged transfer takes a hatch, as every sampled one did | 0 in the sample |
+
+   The design review predicted 50-70% and 30-50%: both **missed** high (the `-tests` figure by its
+   extrapolation).
+
+   "Races found" is what the reading found, not a proof of absence. 12 production transfers and 17
+   sampled test transfers were read by hand; the other hatches were classified by rules over each
+   transfer's findings, and the SAFE008 callees were sampled (7).
+
+   Beside the ratio:
+   - checked claims: 14 `guarded_by`, 9 `holds`, 1 imm, 8 iso;
+   - 0 stale `//safe:unsafe`;
+   - overrides 42 of 100. This item added `context.CancelFunc`, whose documentation says it may be
+     called by several goroutines at once.
+
+   What changed the count, in order:
+   - **Spawn wrappers.** `//safe:iso` on the service's spawn wrappers (`safego.SafeGo*`,
+     `detachedTasks.spawn*`) turned 137 production escapes into transfers. The design review had
+     found that its 113 `SafeGo*` calls were missing from the denominator.
+   - **`guarded_by` on the mutex-protected singletons.** SAFE008 went from 98 to 75. The rest are
+     writes the writes bit over-counts: interface and func-field calls (19), and writes to fresh or
+     local memory unified with the receiver (56). None of the 7 callees sampled writes shared memory
+     outside a lock.
+   - **Imm census.** Of the dependency types handlers and goroutines share, only `IdempotencyStore`
+     can be imm.
+   - **Hatches.** One hatch per flagged transfer. 324 of the 333 are `IMM_BLOCKED`: the transfer
+     shares a long-lived dependency (the router's `ServerConfig`, the `wisdevServer`, the
+     `AgentGateway`, a handler struct) whose type has interface, func-typed or exported fields.
+
+   Of the 73 production SAFE006, a reading of the source sorts 51 as mutex-protected, 13 as test
+   seams, 7 as `sync.Once` and 2 as generated. They are not annotated.
+
+   The abandon criterion applies at 100 table entries, and this item ends at 42. So the measurement
+   does not decide abandonment, but the diagnosis says more entries would not help: no flagged
+   transfer is blocked by a third-party type. The ratio is set by dependency containers that are
+   mutable in type and frozen in practice. gocap needs a checked claim for them: an imm rule that
+   accepts interface and func-typed fields set only during construction.
+4. Ownership of the channel's send end; joins through `select`; a differential test of the summaries
+   against `-gcflags=-m`. From item 3:
+   - an imm rule for dependency containers frozen after construction;
+   - `SafeGoWG`'s join (43 SAFE003-forkjoin findings);
+   - the writes bit's two over-counts (75 SAFE008);
+   - SAFE006 for `sync.Once`-published variables.
+
+The project should be abandoned if a `net/http` reference service has a hatch ratio above 20% (see
+[Measuring the escape hatch](../README.md#measuring-the-escape-hatch-on-a-module)) once the type and function
+override tables together hold 100 entries.
+

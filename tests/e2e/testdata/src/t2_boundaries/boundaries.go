@@ -300,3 +300,16 @@ func StructFieldThroughBorrow() int {
 	r := &c
 	return r.Count
 }
+
+// TC-T2-5.6: Loop-carried borrow escape via alias rejected (BORROW002)
+func LoopCarriedBorrowAliasEscape() {
+	var outer *int
+	for i := 0; i < 3; i++ {
+		x := i
+		//gocap:mut
+		b := &x
+		alias := b
+		outer = alias // want `BORROW002: cannot borrow 'x' as mutable: loop-carried borrow escapes to outer scope`
+	}
+	_ = outer
+}

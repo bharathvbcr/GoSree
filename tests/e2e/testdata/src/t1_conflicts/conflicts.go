@@ -1,5 +1,9 @@
 package t1_conflicts
 
+import (
+	"github.com/bharathvbcr/gocap/cap"
+)
+
 // TC-T1-2.1: Simultaneous multiple mutable borrows of same allocation rejected (BORROW002)
 func SimultaneousMut() {
 	x := 10
@@ -55,4 +59,13 @@ func ReborrowMutFromRob() {
 	m := r // want `BORROW002: cannot borrow 'x' as mutable because it is also borrowed as read-only`
 	println(*r)
 	*m = 20
+}
+
+// TC-T1-2.6: cap.BorrowMut simultaneous mutable borrow rejected (BORROW002)
+func MarkerSimultaneousMut() {
+	x := 10
+	b1 := cap.BorrowMut(&x)
+	b2 := cap.BorrowMut(&x) // want `BORROW002: cannot borrow 'x' as mutable more than once at a time`
+	*b1 = 20
+	*b2 = 30
 }

@@ -82,7 +82,7 @@ func (st *state) guardedCells(fns []*ssa.Function) map[ssa.Value]localGuard {
 		}
 	}
 	out := map[ssa.Value]localGuard{}
-	for _, m := range cells {
+	for fn, m := range cells {
 		for v, c := range m {
 			mu := st.ix.Guarded[v]
 			if mu == nil || v.IsField() || v.Parent() == pkgScope {
@@ -95,6 +95,15 @@ func (st *state) guardedCells(fns []*ssa.Function) map[ssa.Value]localGuard {
 				}
 			} else if mc, ok := m[mu]; ok {
 				lg.muCell = mc
+			} else {
+				for p := fn.Parent(); p != nil; p = p.Parent() {
+					if pm := cells[p]; pm != nil {
+						if mc, ok := pm[mu]; ok {
+							lg.muCell = mc
+							break
+						}
+					}
+				}
 			}
 			out[c] = lg
 		}

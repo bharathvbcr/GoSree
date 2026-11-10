@@ -142,7 +142,7 @@ func (c *Cache[K, V]) Get(k K) cap.Ref[V] {
 }
 
 func ProcessResult[T any](res Result[T, error]) cap.Iso[T] {
-	return cap.Move[T](res.Value)
+	return cap.Move[*T](res.Value)
 }
 
 func main() {
@@ -152,7 +152,7 @@ func main() {
 	got := cache.Get("a")
 
 	res := Result[int, error]{
-		Value: cap.Move[int](&val),
+		Value: cap.Move[*int](&val),
 		Err:   nil,
 	}
 	unwrapped := ProcessResult(res)

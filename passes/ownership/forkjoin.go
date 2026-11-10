@@ -124,6 +124,11 @@ func (st *state) computeJoins(g *graph, sp spawnSite) map[ssa.Instruction]bool {
 		// In a loop, a receive or Done does not say which instance of F it synchronised with.
 		return out
 	}
+	if callIns, ok := sp.ins.(*ssa.Call); ok && (sp.via == "time.AfterFunc" || sp.via == "context.AfterFunc") {
+		for _, iff := range stopIfJoins(g.fn, callIns, sp.via) {
+			join(iff)
+		}
+	}
 	for _, b := range mc.Bindings {
 		so := syncObject(g.fn, b)
 		if so == nil {
@@ -160,6 +165,59 @@ func waitCalls(fn *ssa.Function, recv ssa.Value, wait string) []ssa.Instruction 
 		}
 		if obj, ok := callee.Object().(*types.Func); ok && obj.FullName() == wait {
 			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// stopIfJoins returns the *ssa.If instructions in fn whose branch condition checks the boolean
+// result of (*time.Timer).Stop (for time.AfterFunc) or stop() (for context.AfterFunc) on spawnCall.
+// When Stop() returns true, the callback was stopped before starting and never runs.
+func stopIfJoins(fn *ssa.Function, spawnCall *ssa.Call, via string) []*ssa.If {
+	var out []*ssa.If
+	isSpawnHandle := func(v ssa.Value) bool {
+		if v == spawnCall {
+			return true
+		}
+		if u, ok := v.(*ssa.UnOp); ok && u.Op == token.MUL {
+			if sv := uncapturedSingleStore(u); sv == spawnCall {
+				return true
+			}
+		}
+		return false
+	}
+	isStopCall := func(v ssa.Value) bool {
+		c, ok := v.(*ssa.Call)
+		if !ok || c.Call.IsInvoke() || c.Parent() != fn {
+			return false
+		}
+		switch via {
+		case "time.AfterFunc":
+			if len(c.Call.Args) != 1 || !isSpawnHandle(c.Call.Args[0]) {
+				return false
+			}
+			callee := c.Call.StaticCallee()
+			if callee == nil {
+				return false
+			}
+			obj, ok := callee.Object().(*types.Func)
+			return ok && obj.FullName() == "(*time.Timer).Stop"
+		case "context.AfterFunc":
+			return len(c.Call.Args) == 0 && isSpawnHandle(c.Call.Value)
+		}
+		return false
+	}
+	for _, b := range fn.Blocks {
+		if len(b.Instrs) == 0 {
+			continue
+		}
+		iff, ok := b.Instrs[len(b.Instrs)-1].(*ssa.If)
+		if !ok {
+			continue
+		}
+		cond, _ := unwrapBoolCond(iff.Cond)
+		if isStopCall(cond) {
+			out = append(out, iff)
 		}
 	}
 	return out

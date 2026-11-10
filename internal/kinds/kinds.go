@@ -101,7 +101,9 @@ func QualifiedName(t types.Type) string {
 // shared mutable memory that gocap cannot see: pointer-free values, strings, channels, verified imm
 // types, pointers to imm types, and the override table.
 func (c *Classifier) Shareable(t types.Type) bool {
-	if v, ok := c.memo[t]; ok {
+	if c.memo == nil {
+		c.memo = make(map[types.Type]bool)
+	} else if v, ok := c.memo[t]; ok {
 		return v
 	}
 	v := c.shareable(t)

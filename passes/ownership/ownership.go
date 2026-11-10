@@ -209,6 +209,15 @@ func (st *state) exportFacts(fns []*ssa.Function) {
 	if len(st.pass.Analyzer.FactTypes) == 0 {
 		return
 	}
+	var acq map[*ssa.Function][]acquire
+	if st.hasLockOps(fns) {
+		gs := &guardState{
+			releases: st.releaseSummaries(fns),
+			before:   map[*ssa.Function]map[ssa.Instruction]lockset{},
+			visiting: map[*ssa.Function]bool{},
+		}
+		acq = st.acquireSummaries(gs, fns)
+	}
 	for _, fn := range fns {
 		obj, ok := fn.Object().(*types.Func)
 		// Only exported functions can be called statically from another package; calls that reach an
@@ -231,9 +240,14 @@ func (st *state) exportFacts(fns []*ssa.Function) {
 			}
 		} else {
 			f.Leaks = append([]bool(nil), s.leakParam...)
+			f.Spawns = append([]bool(nil), s.spawnParam...)
 			f.Writes = append([]bool(nil), s.writeParam...)
 			f.Links = append([]Link(nil), s.links...)
 			f.Fresh = s.fresh
+			f.FreshResult = append([]bool(nil), s.freshResult...)
+			if acq != nil {
+				f.Acquires = append([]acquire(nil), acq[fn]...)
+			}
 		}
 		st.pass.ExportObjectFact(obj, f)
 	}

@@ -78,10 +78,32 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 			}
 			cc := c.Common()
 			if cc.IsInvoke() {
+				for _, v := range append([]ssa.Value{cc.Value}, cc.Args...) {
+					if _, guarded := st.slotOf(v); guarded {
+						continue
+					}
+					if root, ok := sharedRoot(v, r); ok && !st.cls.Shareable(v.Type()) && once(ins) {
+						st.report(posOf(ins, ins), HandlerWrite, fmt.Sprintf(
+							"%s is passed to interface method %s, which may write it, by a handler registered with %s%s, which shares it with every concurrent request",
+							r[root], cc.Method.Name(), sp.via, st.at(regPos)))
+						return
+					}
+				}
 				return
 			}
 			callee, bindings := directCallee(cc.Value)
 			if callee == nil {
+				for _, v := range append(cc.Args, cc.Value) {
+					if _, guarded := st.slotOf(v); guarded {
+						continue
+					}
+					if root, ok := sharedRoot(v, r); ok && !st.cls.Shareable(v.Type()) && once(ins) {
+						st.report(posOf(ins, ins), HandlerWrite, fmt.Sprintf(
+							"%s is passed to a dynamic function call, which may write it, by a handler registered with %s%s, which shares it with every concurrent request",
+							r[root], sp.via, st.at(regPos)))
+						return
+					}
+				}
 				return
 			}
 			if len(callee.Blocks) == 0 || !st.followable(callee) {
@@ -200,6 +222,9 @@ func directCallee(v ssa.Value) (*ssa.Function, []ssa.Value) {
 	case *ssa.MakeClosure:
 		return x.Fn.(*ssa.Function), x.Bindings
 	}
+	if mc := resolveClosureVal(v, 0); mc != nil {
+		return mc.Fn.(*ssa.Function), mc.Bindings
+	}
 	return nil, nil
 }
 
@@ -244,7 +269,7 @@ func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]
 		if _, ok := roots[v]; ok {
 			return v, true
 		}
-		if seen[v] {
+		if v == nil || seen[v] || len(seen) >= 64 {
 			return nil, false
 		}
 		seen[v] = true
@@ -275,7 +300,74 @@ func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]
 			if x.Op != token.MUL {
 				return nil, false
 			}
+			var alloc *ssa.Alloc
+			if a, ok := x.X.(*ssa.Alloc); ok {
+				alloc = a
+			} else if fa, ok := x.X.(*ssa.FieldAddr); ok {
+				alloc, _ = fa.X.(*ssa.Alloc)
+			}
+			if alloc != nil && alloc.Referrers() != nil {
+				for _, ref := range *alloc.Referrers() {
+					if st, ok := ref.(*ssa.Store); ok && st.Addr == alloc {
+						if r, ok := sharedRootSeen(st.Val, roots, seen); ok {
+							return r, true
+						}
+					}
+					if fa, ok := ref.(*ssa.FieldAddr); ok && fa.Referrers() != nil {
+						for _, r2 := range *fa.Referrers() {
+							if st, ok := r2.(*ssa.Store); ok && st.Addr == fa {
+								if r, ok := sharedRootSeen(st.Val, roots, seen); ok {
+									return r, true
+								}
+							}
+						}
+					}
+					if ia, ok := ref.(*ssa.IndexAddr); ok && ia.Referrers() != nil {
+						for _, r2 := range *ia.Referrers() {
+							if st, ok := r2.(*ssa.Store); ok && st.Addr == ia {
+								if r, ok := sharedRootSeen(st.Val, roots, seen); ok {
+									return r, true
+								}
+							}
+						}
+					}
+				}
+			}
 			v = x.X
+		case *ssa.Call:
+			callee := x.Call.StaticCallee()
+			if callee == nil || len(callee.Blocks) == 0 {
+				return nil, false
+			}
+			paramRoots := map[ssa.Value]string{}
+			paramToRoot := map[ssa.Value]ssa.Value{}
+			for i, a := range x.Call.Args {
+				if i < len(callee.Params) {
+					if r, ok := sharedRootSeen(a, roots, seen); ok {
+						paramRoots[callee.Params[i]] = roots[r]
+						paramToRoot[callee.Params[i]] = r
+					}
+				}
+			}
+			if len(paramRoots) == 0 {
+				return nil, false
+			}
+			for _, b := range callee.Blocks {
+				for _, ins := range b.Instrs {
+					if ret, ok := ins.(*ssa.Return); ok && len(ret.Results) == 1 {
+						subSeen := make(map[ssa.Value]bool, len(seen))
+						for k, val := range seen {
+							subSeen[k] = val
+						}
+						if pRoot, ok := sharedRootSeen(ret.Results[0], paramRoots, subSeen); ok {
+							if orig, ok := paramToRoot[pRoot]; ok {
+								return orig, true
+							}
+						}
+					}
+				}
+			}
+			return nil, false
 		case *ssa.Phi:
 			for _, e := range x.Edges {
 				if r, ok := sharedRootSeen(e, roots, seen); ok {

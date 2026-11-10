@@ -3,6 +3,7 @@ package ownership
 import (
 	"cmp"
 	"fmt"
+	"go/constant"
 	"go/token"
 	"go/types"
 	"slices"
@@ -96,6 +97,10 @@ func pathOf(v ssa.Value) (guardPath, bool) {
 			if x.Op != token.MUL || !stableLoad(x) {
 				return guardPath{}, false
 			}
+			if sv := uncapturedSingleStore(x); sv != nil {
+				v = sv
+				continue
+			}
 			steps = append(steps, "*")
 			v = x.X
 		default:
@@ -106,9 +111,34 @@ func pathOf(v ssa.Value) (guardPath, bool) {
 	return guardPath{}, false
 }
 
+func uncapturedSingleStore(load *ssa.UnOp) ssa.Value {
+	cell, ok := load.X.(*ssa.Alloc)
+	if !ok {
+		return nil
+	}
+	var store *ssa.Store
+	for _, r := range *cell.Referrers() {
+		switch r := r.(type) {
+		case *ssa.MakeClosure:
+			return nil
+		case *ssa.Store:
+			if r.Addr == cell {
+				if store != nil {
+					return nil
+				}
+				store = r
+			}
+		}
+	}
+	if store != nil && store.Block() != nil && dominates(store, load) {
+		return store.Val
+	}
+	return nil
+}
+
 // stableLoad reports whether a load reads a variable cell that holds one value for the whole time
 // the load can see it: a captured variable the closure never assigns, or a local cell stored once,
-// before the load.
+// before the load, or a struct pointer field not reassigned in this function.
 func stableLoad(load *ssa.UnOp) bool {
 	switch cell := load.X.(type) {
 	case *ssa.FreeVar:
@@ -139,6 +169,21 @@ func stableLoad(load *ssa.UnOp) bool {
 			}
 		}
 		return store == nil || (store.Block() != nil && dominates(store, load))
+	case *ssa.FieldAddr:
+		fn := load.Parent()
+		if fn == nil {
+			return false
+		}
+		for _, b := range fn.Blocks {
+			for _, ins := range b.Instrs {
+				if s, ok := ins.(*ssa.Store); ok {
+					if fa, ok := s.Addr.(*ssa.FieldAddr); ok && fa.Field == cell.Field && types.Identical(fa.X.Type(), cell.X.Type()) {
+						return false
+					}
+				}
+			}
+		}
+		return true
 	}
 	return false
 }
@@ -309,10 +354,12 @@ func lockOp(cc *ssa.CallCommon) (lockOpKind, ssa.Value) {
 	return lockOps[obj.FullName()], cc.Args[0]
 }
 
-// release is a mutex a function unlocks, as a path from one of its parameters.
+// release is a mutex a function unlocks, as a path from a parameter, free variable, or global.
 type release struct {
-	param int
-	steps string
+	param  int
+	free   int
+	global *ssa.Global
+	steps  string
 }
 
 // guardState holds the per-package results the lock analysis shares between functions.
@@ -348,8 +395,31 @@ func (st *state) checkGuarded(fns []*ssa.Function) {
 	}
 }
 
-// releaseSummaries computes, for each function of the package, the parameter mutexes it may leave
-// unlocked: Unlock or RUnlock (deferred or not) on a parameter path, directly or through calls.
+func (st *state) hasLockOps(fns []*ssa.Function) bool {
+	found := false
+	for _, fn := range fns {
+		forEachInstr(fn, func(ins ssa.Instruction) {
+			if found {
+				return
+			}
+			c, ok := ins.(ssa.CallInstruction)
+			if !ok {
+				return
+			}
+			if k, _ := lockOp(c.Common()); k == opLock || k == opRLock || k == opTryLock || k == opTryRLock {
+				found = true
+			}
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+// releaseSummaries computes, for each function of the package, the mutexes it may leave
+// unlocked: Unlock or RUnlock (deferred or not) on a parameter, free-var, or global path,
+// directly or through calls.
 func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]release {
 	out := map[*ssa.Function][]release{}
 	paramIndex := func(fn *ssa.Function, v ssa.Value) int {
@@ -359,6 +429,20 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 			}
 		}
 		return -1
+	}
+	toRelease := func(fn *ssa.Function, p guardPath) (release, bool) {
+		if i := paramIndex(fn, p.root); i >= 0 {
+			return release{param: i, free: -1, steps: p.steps}, true
+		}
+		if fv, ok := p.root.(*ssa.FreeVar); ok {
+			if i := slices.Index(fn.FreeVars, fv); i >= 0 {
+				return release{param: -1, free: i, steps: p.steps}, true
+			}
+		}
+		if g, ok := p.root.(*ssa.Global); ok {
+			return release{param: -1, free: -1, global: g, steps: p.steps}, true
+		}
+		return release{}, false
 	}
 	add := func(fn *ssa.Function, r release) bool {
 		if slices.Contains(out[fn], r) {
@@ -381,22 +465,38 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 				cc := c.Common()
 				if k, recv := lockOp(cc); k == opUnlock {
 					if p, ok := pathOf(recv); ok {
-						if i := paramIndex(fn, p.root); i >= 0 && add(fn, release{i, p.steps}) {
+						if rel, ok := toRelease(fn, p); ok && add(fn, rel) {
 							changed = true
 						}
 					}
 					return
 				}
 				callee := cc.StaticCallee()
+				mc := resolveClosureVal(cc.Value, 0)
+				if callee == nil && mc != nil {
+					callee, _ = mc.Fn.(*ssa.Function)
+				}
 				if callee == nil || callee.Pkg != st.ssa.Pkg {
 					return
 				}
 				for _, r := range out[callee] {
-					if r.param >= len(cc.Args) {
+					if r.global != nil {
+						if add(fn, r) {
+							changed = true
+						}
 						continue
 					}
-					if p, ok := pathOf(cc.Args[r.param]); ok {
-						if i := paramIndex(fn, p.root); i >= 0 && add(fn, release{i, p.steps + r.steps}) {
+					var base ssa.Value
+					switch {
+					case r.param >= 0 && r.param < len(cc.Args):
+						base = cc.Args[r.param]
+					case r.free >= 0 && mc != nil && r.free < len(mc.Bindings):
+						base = mc.Bindings[r.free]
+					default:
+						continue
+					}
+					if p, ok := pathOf(base); ok {
+						if rel, ok := toRelease(fn, guardPath{p.root, p.steps + r.steps}); ok && add(fn, rel) {
 							changed = true
 						}
 					}
@@ -422,6 +522,10 @@ func (st *state) holdsPaths(fn *ssa.Function, recv ssa.Value) []guardPath {
 	var out []guardPath
 	for _, mu := range st.holdsOf(fn) {
 		if mu.IsField() {
+			if recv == nil {
+				out = append(out, guardPath{})
+				continue
+			}
 			s, ok := derefStruct(recv.Type())
 			if !ok {
 				continue
@@ -498,7 +602,8 @@ func (st *state) entryLocks(gs *guardState, fn *ssa.Function) lockset {
 }
 
 // translate maps a caller's held guards into the closure mc builds: a guard rooted at a captured
-// value is rooted at the matching free variable; package variables stay; the rest are dropped.
+// value is rooted at the matching free variable; package variables and uncaptured parent guards
+// stay; the rest are mapped.
 func translate(at lockset, mc *ssa.MakeClosure) lockset {
 	out := lockset{}
 	fn := mc.Fn.(*ssa.Function)
@@ -507,10 +612,15 @@ func translate(at lockset, mc *ssa.MakeClosure) lockset {
 			out[p] = m
 			continue
 		}
+		bound := false
 		for j, b := range mc.Bindings {
 			if b == p.root {
 				out[guardPath{fn.FreeVars[j], p.steps}] = m
+				bound = true
 			}
+		}
+		if !bound {
+			out[p] = m
 		}
 	}
 	return out
@@ -573,12 +683,12 @@ func (st *state) flow(gs *guardState, fn *ssa.Function, entry lockset) map[ssa.I
 	return before
 }
 
-// acquire is a mutex a function returns holding, as a path from one of its parameters (param >= 0)
-// or free variables (free >= 0).
+// acquire is a mutex a function returns holding, as a path from one of its parameters (Param >= 0)
+// or free variables (Free >= 0).
 type acquire struct {
-	param, free int
-	steps       string
-	mode        lockMode
+	Param, Free int
+	Steps       string
+	Mode        lockMode
 }
 
 // acquireSummaries computes, for each function of the package, the parameter and captured mutexes it
@@ -642,21 +752,64 @@ func (st *state) acquiresOf(gs *guardState, fn *ssa.Function) []acquire {
 		if _, ok := entry[p]; ok {
 			continue
 		}
-		a := acquire{param: -1, free: -1, steps: p.steps, mode: m}
+		a := acquire{Param: -1, Free: -1, Steps: p.steps, Mode: m}
 		switch r := p.root.(type) {
 		case *ssa.Parameter:
-			a.param = slices.Index(fn.Params, r)
+			a.Param = slices.Index(fn.Params, r)
 		case *ssa.FreeVar:
-			a.free = slices.Index(fn.FreeVars, r)
+			a.Free = slices.Index(fn.FreeVars, r)
 		}
-		if a.param >= 0 || a.free >= 0 {
+		if a.Param >= 0 || a.Free >= 0 {
 			out = append(out, a)
 		}
 	}
 	slices.SortFunc(out, func(x, y acquire) int {
-		return cmp.Or(cmp.Compare(x.param, y.param), cmp.Compare(x.free, y.free), strings.Compare(x.steps, y.steps))
+		return cmp.Or(cmp.Compare(x.Param, y.Param), cmp.Compare(x.Free, y.Free), strings.Compare(x.Steps, y.Steps))
 	})
 	return out
+}
+
+// unwrapBoolCond strips boolean negations, single-store local loads, and == / != bool constant
+// comparisons from a branch condition, returning the underlying SSA value and whether it is negated.
+func unwrapBoolCond(cond ssa.Value) (ssa.Value, bool) {
+	negated := false
+	for range 16 {
+		switch x := cond.(type) {
+		case *ssa.UnOp:
+			if x.Op == token.NOT {
+				negated = !negated
+				cond = x.X
+				continue
+			}
+			if x.Op == token.MUL {
+				if sv := uncapturedSingleStore(x); sv != nil {
+					cond = sv
+					continue
+				}
+			}
+		case *ssa.BinOp:
+			if x.Op == token.EQL || x.Op == token.NEQ {
+				if c, ok := x.Y.(*ssa.Const); ok && c.Value != nil && c.Type().Underlying() == types.Typ[types.Bool] {
+					val := constant.BoolVal(c.Value)
+					if (x.Op == token.EQL && !val) || (x.Op == token.NEQ && val) {
+						negated = !negated
+					}
+					cond = x.X
+					continue
+				}
+				if c, ok := x.X.(*ssa.Const); ok && c.Value != nil && c.Type().Underlying() == types.Typ[types.Bool] {
+					val := constant.BoolVal(c.Value)
+					if (x.Op == token.EQL && !val) || (x.Op == token.NEQ && val) {
+						negated = !negated
+					}
+					cond = x.Y
+					continue
+				}
+			}
+		}
+		break
+	}
+	return cond, negated
 }
 
 // tryEdge adds the lock a TryLock took on the branch where it succeeded.
@@ -665,10 +818,7 @@ func tryEdge(out lockset, b *ssa.BasicBlock, succ int) lockset {
 	if !ok {
 		return out
 	}
-	cond, negated := iff.Cond, false
-	if u, ok := cond.(*ssa.UnOp); ok && u.Op == token.NOT {
-		cond, negated = u.X, true
-	}
+	cond, negated := unwrapBoolCond(iff.Cond)
 	c, ok := cond.(*ssa.Call)
 	if !ok {
 		return out
@@ -724,41 +874,62 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 		return
 	}
 	if _, isGo := ins.(*ssa.Go); isGo {
-		// The goroutine may unlock what it is handed.
+		// The goroutine may unlock what it is handed or captures.
 		for _, a := range cc.Args {
 			killFor(s, a)
 		}
+		if mc := resolveClosureVal(cc.Value, 0); mc != nil {
+			for _, b := range mc.Bindings {
+				killFor(s, b)
+			}
+		}
 		return
 	}
-	if callee := cc.StaticCallee(); callee != nil && !cc.IsInvoke() && callee.Pkg == st.ssa.Pkg {
+	callee := cc.StaticCallee()
+	mc := resolveClosureVal(cc.Value, 0)
+	if callee == nil && mc != nil {
+		callee, _ = mc.Fn.(*ssa.Function)
+	}
+	if callee != nil && !cc.IsInvoke() && callee.Pkg == st.ssa.Pkg {
 		if st.holdsOf(callee) != nil {
 			return
 		}
 		for _, r := range gs.releases[callee] {
-			if r.param < len(cc.Args) {
-				if p, ok := pathOf(cc.Args[r.param]); ok {
-					delete(s, guardPath{p.root, p.steps + r.steps})
-				}
+			if r.global != nil {
+				delete(s, guardPath{r.global, r.steps})
+				continue
+			}
+			var base ssa.Value
+			switch {
+			case r.param >= 0 && r.param < len(cc.Args):
+				base = cc.Args[r.param]
+			case r.free >= 0 && mc != nil && r.free < len(mc.Bindings):
+				base = mc.Bindings[r.free]
+			default:
+				continue
+			}
+			if p, ok := pathOf(base); ok {
+				delete(s, guardPath{p.root, p.steps + r.steps})
 			}
 		}
 		if !take {
 			return
 		}
-		// What the callee returns holding, translated through the arguments, or for a closure built
-		// in place, through its bindings (as translate does for entry locks).
+		// What the callee returns holding, translated through the arguments, or for a closure
+		// through its bindings (as translate does for entry locks).
 		for _, a := range gs.acquires[callee] {
 			var base ssa.Value
-			switch mc, closure := cc.Value.(*ssa.MakeClosure); {
-			case a.param >= 0 && a.param < len(cc.Args):
-				base = cc.Args[a.param]
-			case a.free >= 0 && closure && a.free < len(mc.Bindings):
-				base = mc.Bindings[a.free]
+			switch {
+			case a.Param >= 0 && a.Param < len(cc.Args):
+				base = cc.Args[a.Param]
+			case a.Free >= 0 && mc != nil && a.Free < len(mc.Bindings):
+				base = mc.Bindings[a.Free]
 			default:
 				continue
 			}
 			if p, ok := pathOf(base); ok {
-				k := guardPath{p.root, p.steps + a.steps}
-				s[k] = max(s[k], a.mode)
+				k := guardPath{p.root, p.steps + a.Steps}
+				s[k] = max(s[k], a.Mode)
 			}
 		}
 		return
@@ -769,6 +940,18 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 	}
 	for _, a := range cc.Args {
 		killFor(s, a)
+	}
+	if take && !cc.IsInvoke() {
+		if callee := cc.StaticCallee(); callee != nil {
+			for _, a := range st.summary(callee).acquires {
+				if a.Param >= 0 && a.Param < len(cc.Args) {
+					if p, ok := pathOf(cc.Args[a.Param]); ok {
+						k := guardPath{p.root, p.steps + a.Steps}
+						s[k] = max(s[k], a.Mode)
+					}
+				}
+			}
+		}
 	}
 }
 

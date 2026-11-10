@@ -1,6 +1,7 @@
 package annot_test
 
 import (
+	"os"
 	"testing"
 
 	"golang.org/x/tools/go/analysis/analysistest"
@@ -20,8 +21,10 @@ func TestDirectives(t *testing.T) {
 	if got := len(ix.ImmTypes); got != 1 {
 		t.Errorf("ImmTypes: got %d, want 1 (only T)", got)
 	}
-	if got := ix.UnsafeScopes(); got != 1 {
-		t.Errorf("UnsafeScopes: got %d, want 1 (the reasonless one still applies; the dangling one does not)", got)
+	// A malformed directive has no effect: the reasonless hatch is reported and not installed, and the
+	// dangling one attaches to nothing.
+	if got := ix.UnsafeScopes(); got != 0 {
+		t.Errorf("UnsafeScopes: got %d, want 0 (neither the reasonless nor the dangling hatch applies)", got)
 	}
 }
 
@@ -50,6 +53,91 @@ func TestGuardedDirectives(t *testing.T) {
 	}
 	if n := ix.HoldsDirectives(); n != 2 {
 		t.Errorf("Holds: got %d, want 2 (bumpLocked, addLocked)", n)
+	}
+}
+
+// TestNearMissesAndMalformed checks that a comment read as a directive is applied or reported, never
+// dropped, that prose is left alone, and that a reported directive has no effect.
+func TestNearMissesAndMalformed(t *testing.T) {
+	results := analysistest.Run(t, analysistest.TestData(), annot.Analyzer, "n")
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	ix := results[0].Result.(*annot.Index)
+	guarded := map[string]bool{}
+	for v := range ix.Guarded {
+		guarded[v.Name()] = true
+	}
+	if len(guarded) != 1 || !guarded["c"] {
+		t.Errorf("Guarded: got %v, want only c (the tab-separated directive; the near misses have no effect)", guarded)
+	}
+	if got := len(ix.IsoVars); got != 0 {
+		t.Errorf("IsoVars: got %d, want 0 (both iso directives are malformed)", got)
+	}
+	if got := len(ix.ImmTypes); got != 0 {
+		t.Errorf("ImmTypes: got %d, want 0 (imm with arguments is malformed)", got)
+	}
+	mub, rob := map[string]bool{}, map[string]bool{}
+	for v := range ix.MubVars {
+		mub[v.Name()] = true
+	}
+	for v := range ix.RobVars {
+		rob[v.Name()] = true
+	}
+	if len(mub) != 2 || !mub["a"] || !mub["b"] {
+		t.Errorf("MubVars: got %v, want a and b (the inline form after a two-name field)", mub)
+	}
+	if !rob["c"] || rob["r"] {
+		t.Errorf("RobVars: got %v, want c and not the result r", rob)
+	}
+	// The binding's first directive applies; the conflicting second one has no effect.
+	if !rob["b"] {
+		t.Errorf("RobVars: got %v, want binding b from the first directive", rob)
+	}
+	// The tab-separated hatch and the first of the two identical ones.
+	if got := ix.UnsafeScopes(); got != 2 {
+		t.Errorf("UnsafeScopes: got %d, want 2", got)
+	}
+}
+
+// TestHatchSpans checks which statements a hatch covers: every line commented "in" must be suppressed
+// and every line commented "out" must not.
+func TestHatchSpans(t *testing.T) {
+	results := analysistest.Run(t, analysistest.TestData(), annot.Analyzer, "h")
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	pass := results[0].Pass
+	ix := results[0].Result.(*annot.Index)
+	checked := 0
+	for _, f := range pass.Files {
+		tf := pass.Fset.File(f.Pos())
+		src, err := os.ReadFile(tf.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, cg := range f.Comments {
+			for _, c := range cg.List {
+				want := c.Text == "// in"
+				if !want && c.Text != "// out" {
+					continue
+				}
+				// The first non-blank byte of the comment's line.
+				line := pass.Fset.PositionFor(c.Pos(), false).Line
+				off := tf.Offset(tf.LineStart(line))
+				for src[off] == '\t' || src[off] == ' ' {
+					off++
+				}
+				pos := tf.Pos(off)
+				if got := ix.Suppressed(pos); got != want {
+					t.Errorf("%s: Suppressed = %v, want %v", pass.Fset.Position(pos), got, want)
+				}
+				checked++
+			}
+		}
+	}
+	if checked < 10 {
+		t.Errorf("checked %d lines, want at least 10", checked)
 	}
 }
 

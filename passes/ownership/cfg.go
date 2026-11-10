@@ -148,8 +148,10 @@ func useAfter(s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Value, joins map[ssa.
 				}
 			}
 			if joins[ins] {
-				killed = true
-				break
+				if _, isIf := ins.(*ssa.If); !isIf {
+					killed = true
+					break
+				}
 			}
 			if isSync(ins) {
 				synced = true
@@ -158,7 +160,13 @@ func useAfter(s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Value, joins map[ssa.
 		if killed {
 			continue
 		}
-		for _, succ := range it.b.Succs {
+		for si, succ := range it.b.Succs {
+			if iff, ok := lastInstr(it.b).(*ssa.If); ok && joins[iff] {
+				_, negated := unwrapBoolCond(iff.Cond)
+				if (si == 0) != negated {
+					continue
+				}
+			}
 			// A phi in the successor reads w on the edge from this block.
 			for pi, pred := range succ.Preds {
 				if pred != it.b {

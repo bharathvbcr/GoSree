@@ -16,20 +16,37 @@
 //
 // Legacy //safe:* directives and inline comment forms (/*gocap:mut*/, /*gocap:rob*/) are supported.
 // A directive attaches to the declaration whose doc comment it is in, to the statement, spec or
-// struct field on the line that follows the comment group, or to the one on the same line.
+// struct field on the line that follows the comment group, or to the one on the same line. Lines are
+// physical lines: a //line directive does not move a directive. Inside a function's parameter list a
+// borrow or iso directive goes directly after a parameter's type, func f(p *T /*gocap:mub*/), and
+// applies to every name declared with that type.
+//
+// A directive is applied, or reported as SAFE007, never dropped: a malformed directive has no effect
+// at all, and a comment that reads as a directive but is not one (// gocap:iso p, //Safe:holds mu,
+// /* gocap:mut */) is reported too; see nearMiss for the rule that tells it from prose.
+//
+// A //gocap:unsafe hatch covers the code written under it: on its own line above a statement, or in
+// a declaration's doc comment, the whole statement or declaration (doc comment included); on the same
+// line as code, that line's statement except the bodies of blocks in it that span several lines.
 package annot
 
 import (
-	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
 	"reflect"
 	"strings"
 	"sync"
+	"unicode"
 
 	"golang.org/x/tools/go/analysis"
 )
+
+// SreePrefix starts GoSree directives.
+const SreePrefix = "//gosree:"
+
+// ShortSreePrefix starts short GoSree directives.
+const ShortSreePrefix = "//sree:"
 
 // CanonicalPrefix starts modern gocap directives.
 const CanonicalPrefix = "//gocap:"
@@ -70,7 +87,8 @@ type span struct{ start, end token.Pos }
 
 // Index holds the directives of one package.
 type Index struct {
-	unsafe []span
+	// hatches are the //gocap:unsafe scopes, in source order.
+	hatches []*hatch
 	// used marks the //safe:unsafe scopes that muted at least one finding. Every pass that requires
 	// this analyzer shares the Index and may run concurrently, so mu guards it.
 	mu   sync.Mutex
@@ -116,12 +134,17 @@ func (ix *Index) ImmPrefixOf(tn *types.TypeName) string {
 
 // IsMub reports whether v is marked as a mutable borrow variable.
 func (ix *Index) IsMub(v *types.Var) bool {
-	return ix.MubVars != nil && ix.MubVars[v]
+	return v != nil && ix.MubVars != nil && (ix.MubVars[v] || ix.MubVars[v.Origin()])
 }
 
 // IsRob reports whether v is marked as a read-only borrow variable.
 func (ix *Index) IsRob(v *types.Var) bool {
-	return ix.RobVars != nil && ix.RobVars[v]
+	return v != nil && ix.RobVars != nil && (ix.RobVars[v] || ix.RobVars[v.Origin()])
+}
+
+// IsIso reports whether v is marked as an isolated (owned) parameter.
+func (ix *Index) IsIso(v *types.Var) bool {
+	return v != nil && ix.IsoVars != nil && (ix.IsoVars[v] || ix.IsoVars[v.Origin()])
 }
 
 // BorrowAt returns the BorrowKind at pos, or BorrowNone if none.
@@ -136,11 +159,11 @@ func (ix *Index) BorrowAt(pos token.Pos) BorrowKind {
 // a pass that mutes a finding because of the scope calls Mute, so the scope is not counted as stale.
 func (ix *Index) Suppressed(pos token.Pos) bool { return ix.scope(pos) >= 0 }
 
-// scope returns the innermost //safe:unsafe scope containing pos, or -1.
+// scope returns the innermost //safe:unsafe scope covering pos, or -1.
 func (ix *Index) scope(pos token.Pos) int {
 	best := -1
-	for i, s := range ix.unsafe {
-		if pos >= s.start && pos < s.end && (best < 0 || s.end-s.start < ix.unsafe[best].end-ix.unsafe[best].start) {
+	for i, h := range ix.hatches {
+		if h.covers(pos) && (best < 0 || h.size() < ix.hatches[best].size()) {
 			best = i
 		}
 	}
@@ -168,11 +191,35 @@ func (ix *Index) Mute(pos token.Pos) bool {
 func (ix *Index) StaleScopes() int {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	return len(ix.unsafe) - len(ix.used)
+	return len(ix.hatches) - len(ix.used)
+}
+
+// StaleHatches returns, in source order, the //gocap:unsafe directives that have muted nothing so far.
+// Like StaleScopes, it is the final answer only once every pass that can mute has run on the package.
+func (ix *Index) StaleHatches() []Hatch {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	var stale []Hatch
+	for i, h := range ix.hatches {
+		if !ix.used[i] {
+			stale = append(stale, Hatch{h.at, h.atEnd})
+		}
+	}
+	return stale
+}
+
+// ReportStale reports each stale //gocap:unsafe directive as SAFE007, at the directive. Call it from
+// an analyzer that requires every analyzer that mutes findings through this Index, so that it runs
+// after all of them.
+func (ix *Index) ReportStale(pass *analysis.Pass) {
+	for _, h := range ix.StaleHatches() {
+		pass.Report(analysis.Diagnostic{Pos: h.Pos, End: h.End, Category: CategoryMalformed,
+			Message: CategoryMalformed + ": stale escape hatch: this //gocap:unsafe mutes no finding of any rule; remove it"})
+	}
 }
 
 // UnsafeScopes reports how many //safe:unsafe scopes the package declares.
-func (ix *Index) UnsafeScopes() int { return len(ix.unsafe) }
+func (ix *Index) UnsafeScopes() int { return len(ix.hatches) }
 
 // Analyzer parses the directives and reports the malformed ones.
 var Analyzer = &analysis.Analyzer{
@@ -193,32 +240,87 @@ func run(pass *analysis.Pass) (any, error) {
 		RobVars:   map[*types.Var]bool{},
 		Borrows:   map[token.Pos]BorrowKind{},
 	}
+	a := &applier{
+		pass:   pass,
+		ix:     ix,
+		src:    map[*token.File][]byte{},
+		bound:  map[*types.Var]string{},
+		onNode: map[ast.Node]BorrowKind{},
+		scopes: map[span][]*hatch{},
+	}
 	for _, file := range pass.Files {
-		starts, structOf := lineStarts(pass.Fset, file)
+		var dirs []*ast.Comment
+		for _, cg := range file.Comments {
+			for _, c := range cg.List {
+				if _, _, _, ok := parseDirective(c.Text); ok {
+					dirs = append(dirs, c)
+				} else if written, meant, near := nearMiss(c.Text); near {
+					// A comment a reader takes for a directive but gocap does not is reported, never
+					// applied: whatever check it asks for is not running.
+					a.c = c
+					a.malformed("%q is not a gocap directive, so it has no effect: write it as %s (no space after the slashes, lower case)", written, meant)
+				}
+			}
+		}
+		if len(dirs) == 0 {
+			scanCapMarkers(pass, ix, file)
+			continue
+		}
+		starts, ends, structOf := lineStarts(pass.Fset, file)
+		inField := fieldListsOf(file, dirs)
 		for _, cg := range file.Comments {
 			for _, c := range cg.List {
 				lead, verb, args, ok := parseDirective(c.Text)
 				if !ok {
 					continue
 				}
-				target := attach(pass.Fset, cg, c, starts)
-				apply(pass, ix, c, lead, verb, args, target, structOf)
+				a.c = c
+				if l := inField[c]; l != nil {
+					a.applyInField(c, lead, verb, args, l)
+					continue
+				}
+				target, inline := attach(pass.Fset, cg, c, starts, ends)
+				a.apply(cg, lead, verb, args, target, inline, structOf)
 			}
 		}
+		scanCapMarkers(pass, ix, file)
 	}
 	return ix, nil
+}
+
+// quoted returns the part of a comment a message quotes: its first line, without a trailing "// note".
+func quoted(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.Index(s[min(2, len(s)):], "//"); i >= 0 {
+		s = strings.TrimRightFunc(s[:i+2], unicode.IsSpace)
+	}
+	return s
 }
 
 func parseDirective(raw string) (lead, verb, args string, ok bool) {
 	text := strings.TrimSpace(raw)
 	var body string
 	switch {
+	case strings.HasPrefix(text, "//gosree:"):
+		lead = "//gosree:"
+		body = text[len("//gosree:"):]
+	case strings.HasPrefix(text, "//sree:"):
+		lead = "//sree:"
+		body = text[len("//sree:"):]
 	case strings.HasPrefix(text, "//gocap:"):
 		lead = "//gocap:"
 		body = text[len("//gocap:"):]
 	case strings.HasPrefix(text, "//safe:"):
 		lead = "//safe:"
 		body = text[len("//safe:"):]
+	case strings.HasPrefix(text, "/*gosree:"):
+		lead = "//gosree:"
+		body = strings.TrimSuffix(text[len("/*gosree:"):], "*/")
+	case strings.HasPrefix(text, "/*sree:"):
+		lead = "//sree:"
+		body = strings.TrimSuffix(text[len("/*sree:"):], "*/")
 	case strings.HasPrefix(text, "/*gocap:"):
 		lead = "//gocap:"
 		body = strings.TrimSuffix(text[len("/*gocap:"):], "*/")
@@ -234,212 +336,299 @@ func parseDirective(raw string) (lead, verb, args string, ok bool) {
 		body = body[:i]
 	}
 	body = strings.TrimSpace(body)
-	verb, args, _ = strings.Cut(body, " ")
-	verb = strings.TrimSpace(verb)
-	args = strings.TrimSpace(args)
+	// The verb ends at any white space: a tab between verb and arguments is a separator.
+	if i := strings.IndexFunc(body, unicode.IsSpace); i >= 0 {
+		verb, args = body[:i], strings.TrimSpace(body[i:])
+	} else {
+		verb = body
+	}
 	return lead, verb, args, true
 }
 
-func apply(pass *analysis.Pass, ix *Index, c *ast.Comment, lead, verb, args string, target ast.Node, structOf map[*ast.Field]*ast.StructType) {
-	malformed := func(format string, a ...any) {
-		pass.Report(analysis.Diagnostic{Pos: c.Pos(), End: c.End(), Category: CategoryMalformed,
-			Message: CategoryMalformed + ": " + fmt.Sprintf(format, a...)})
+// visibleReason reports whether a hatch's reason has at least one letter or digit: a reason made of
+// zero-width or other invisible characters only is no reason a reviewer can read.
+func visibleReason(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
 	}
+	return false
+}
+
+// apply applies one directive outside a field list. A directive that is reported as malformed has no
+// effect at all: every check below runs before the Index changes.
+func (a *applier) apply(cg *ast.CommentGroup, lead, verb, args string, target ast.Node, inline bool, structOf map[*ast.Field]*ast.StructType) {
+	pass, ix := a.pass, a.ix
 	switch verb {
 	case "unsafe":
-		if target == nil {
-			malformed("%s%s is not attached to a statement or declaration", lead, verb)
-			return
-		}
-		if args == "" {
-			malformed("%s%s needs a reason after the directive", lead, verb)
-		}
-		ix.unsafe = append(ix.unsafe, span{target.Pos(), target.End()})
+		a.applyHatch(cg, lead, verb, args, target, inline)
 	case "iso":
 		fd, ok := target.(*ast.FuncDecl)
 		if !ok {
-			malformed("%s%s must be in a function's doc comment", lead, verb)
+			a.malformed("%s%s must be in a function's doc comment", lead, verb)
 			return
 		}
-		names := strings.FieldsFunc(args, func(r rune) bool { return r == ',' || r == ' ' })
-		if len(names) == 0 {
-			malformed("%s%s needs at least one parameter name", lead, verb)
-			return
-		}
-		for _, name := range names {
-			v := paramVar(pass, fd, name)
-			if v == nil {
-				malformed("%s%s names %q, which is not a parameter of %s", lead, verb, name, fd.Name.Name)
-				continue
-			}
-			if ix.MubVars[v] || ix.RobVars[v] {
-				malformed("%s%s names %q, which already has a conflicting capability/borrow annotation", lead, verb, name)
-				continue
-			}
-			ix.IsoVars[v] = true
+		if vars, ok := a.paramVars(lead, verb, args, fd); ok {
+			a.applyParamCaps(lead, verb, vars)
 		}
 	case "imm":
 		ts := typeSpec(target)
 		if ts == nil {
-			malformed("%s%s must be in a type declaration's doc comment", lead, verb)
+			a.malformed("%s%s must be in a type declaration's doc comment", lead, verb)
 			return
 		}
 		if args != "" {
-			malformed("%s%s takes no arguments", lead, verb)
+			a.malformed("%s%s takes no arguments", lead, verb)
+			return
 		}
-		if tn, ok := pass.TypesInfo.Defs[ts.Name].(*types.TypeName); ok {
-			ix.ImmTypes[tn] = ts.Pos()
-			ix.ImmPrefix[tn] = lead
+		tn, ok := pass.TypesInfo.Defs[ts.Name].(*types.TypeName)
+		if !ok {
+			return
 		}
+		if _, dup := ix.ImmTypes[tn]; dup {
+			a.malformed("%s%s repeats the %s already on %s", lead, verb, verb, tn.Name())
+			return
+		}
+		ix.ImmTypes[tn] = ts.Pos()
+		ix.ImmPrefix[tn] = lead
 	case "guarded_by":
-		applyGuardedBy(pass, ix, target, args, structOf, malformed)
+		applyGuardedBy(pass, ix, target, args, structOf, a.malformed)
 	case "holds":
-		applyHolds(pass, ix, target, args, malformed)
+		applyHolds(pass, ix, target, args, a.malformed)
 	case "mub", "mut":
-		applyBorrow(pass, ix, c, lead, verb, args, target, BorrowMut, malformed)
+		a.applyBorrow(lead, verb, args, target, BorrowMut)
 	case "rob", "ref":
-		applyBorrow(pass, ix, c, lead, verb, args, target, BorrowRob, malformed)
+		a.applyBorrow(lead, verb, args, target, BorrowRob)
 	default:
-		malformed("unknown directive %s%s (known: unsafe, iso, imm, guarded_by, holds, mub, rob, mut, ref)", lead, verb)
+		a.unknown(lead, verb)
 	}
 }
 
-func applyBorrow(pass *analysis.Pass, ix *Index, c *ast.Comment, lead, verb, args string, target ast.Node, kind BorrowKind, malformed func(string, ...any)) {
+// applyHatch installs a //gocap:unsafe scope.
+func (a *applier) applyHatch(cg *ast.CommentGroup, lead, verb, args string, target ast.Node, inline bool) {
 	if target == nil {
-		malformed("%s%s is not attached to a function or assignment", lead, verb)
+		a.malformed("%s%s is not attached to a statement or declaration", lead, verb)
 		return
 	}
+	if args == "" {
+		a.malformed("%s%s needs a reason after the directive", lead, verb)
+		return
+	}
+	if !visibleReason(args) {
+		a.malformed("%s%s needs a reason after the directive: %q has no visible letter or digit", lead, verb, args)
+		return
+	}
+	h, ok := newHatch(a.pass.Fset, target, cg, a.c, inline)
+	if !ok {
+		a.malformed("%s%s on the line of an opening brace covers nothing: write it above the statement it is for", lead, verb)
+		return
+	}
+	key := span{h.start, h.end}
+	for _, o := range a.scopes[key] {
+		if o.sameScope(h) {
+			a.malformed("%s%s repeats a //gocap:unsafe that already covers exactly this code", lead, verb)
+			return
+		}
+	}
+	a.scopes[key] = append(a.scopes[key], h)
+	a.ix.hatches = append(a.ix.hatches, h)
+}
 
-	// Case 1: Function or method parameter directive
+// paramVars resolves a doc-comment directive's parameter names on fd.
+func (a *applier) paramVars(lead, verb, args string, fd *ast.FuncDecl) ([]*types.Var, bool) {
+	names := splitNames(args)
+	if len(names) == 0 {
+		a.malformed("%s%s needs at least one parameter name", lead, verb)
+		return nil, false
+	}
+	vars := make([]*types.Var, 0, len(names))
+	for _, name := range names {
+		v := paramVar(a.pass, fd, name)
+		if v == nil {
+			a.malformed("%s%s names %q, which is not a parameter of %s", lead, verb, name, fd.Name.Name)
+			return nil, false
+		}
+		vars = append(vars, v)
+	}
+	return vars, true
+}
+
+// capability names what an iso, borrow or no directive gives a variable.
+func capability(verb string) string {
+	switch verb {
+	case "iso":
+		return "iso"
+	case "mub", "mut":
+		return "mub"
+	case "rob", "ref":
+		return "rob"
+	}
+	return ""
+}
+
+// capOf returns the capability v holds so far from directives or cap markers, or "".
+func (a *applier) capOf(v *types.Var) string {
+	switch {
+	case a.ix.IsoVars[v]:
+		return "iso"
+	case a.ix.MubVars[v]:
+		return "mub"
+	case a.ix.RobVars[v]:
+		return "rob"
+	}
+	return ""
+}
+
+// conflict says why v cannot also take capability want, or "". It is the one check for parameters
+// and bindings: a variable is owned, a mutable borrow or a read-only borrow, never two of them, and
+// two directives that say the same thing about it are a duplicate.
+func (a *applier) conflict(v *types.Var, want string) string {
+	have := a.capOf(v)
+	switch {
+	case have == "":
+		return ""
+	case have == want:
+		if a.bound[v] == want {
+			return "which an earlier directive already annotates the same way"
+		}
+		return ""
+	case want == "iso":
+		return "which already has a conflicting capability/borrow annotation"
+	case have == "iso":
+		return "which already has an iso capability annotation"
+	case have == "rob":
+		return "which is already annotated as read-only borrow"
+	}
+	return "which is already annotated as mutable borrow"
+}
+
+// applyParamCaps gives each of vars the capability verb names, or reports why not and gives none.
+func (a *applier) applyParamCaps(lead, verb string, vars []*types.Var) {
+	want := capability(verb)
+	seen := map[*types.Var]bool{}
+	for _, v := range vars {
+		if seen[v] {
+			a.malformed("%s%s names %q twice", lead, verb, v.Name())
+			return
+		}
+		seen[v] = true
+		if why := a.conflict(v, want); why != "" {
+			a.malformed("%s%s names %q, %s", lead, verb, v.Name(), why)
+			return
+		}
+	}
+	for _, v := range vars {
+		a.bound[v] = want
+		switch want {
+		case "iso":
+			a.ix.IsoVars[v] = true
+		case "mub":
+			a.ix.MubVars[v] = true
+			a.ix.Borrows[v.Pos()] = BorrowMut
+		case "rob":
+			a.ix.RobVars[v] = true
+			a.ix.Borrows[v.Pos()] = BorrowRob
+		}
+	}
+}
+
+func (a *applier) applyBorrow(lead, verb, args string, target ast.Node, kind BorrowKind) {
+	if target == nil {
+		a.malformed("%s%s is not attached to a function or assignment", lead, verb)
+		return
+	}
 	if fd, ok := target.(*ast.FuncDecl); ok {
-		if args == "" {
-			malformed("%s%s needs at least one parameter name", lead, verb)
-			return
-		}
-		names := strings.FieldsFunc(args, func(r rune) bool { return r == ',' || r == ' ' })
-		if len(names) == 0 {
-			malformed("%s%s needs at least one parameter name", lead, verb)
-			return
-		}
-		for _, name := range names {
-			v := paramVar(pass, fd, name)
-			if v == nil {
-				malformed("%s%s names %q, which is not a parameter of %s", lead, verb, name, fd.Name.Name)
-				continue
-			}
-			if ix.IsoVars[v] {
-				malformed("%s%s names %q, which already has an iso capability annotation", lead, verb, name)
-				continue
-			}
-			if kind == BorrowMut && ix.RobVars[v] {
-				malformed("%s%s names %q, which is already annotated as read-only borrow", lead, verb, name)
-				continue
-			}
-			if kind == BorrowRob && ix.MubVars[v] {
-				malformed("%s%s names %q, which is already annotated as mutable borrow", lead, verb, name)
-				continue
-			}
-			if kind == BorrowMut {
-				ix.MubVars[v] = true
-			} else {
-				ix.RobVars[v] = true
-			}
-			ix.Borrows[v.Pos()] = kind
+		if vars, ok := a.paramVars(lead, verb, args, fd); ok {
+			a.applyParamCaps(lead, verb, vars)
 		}
 		return
 	}
 
-	// Case 2: Local assignment statement
+	// A local binding: an assignment, or a var declaration in a function body. Everything is checked
+	// before anything is recorded.
+	var lhs, rhs []ast.Expr
 	switch n := target.(type) {
 	case *ast.AssignStmt:
-		if args != "" {
-			matched := false
-			for _, lhs := range n.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && id.Name == args {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				malformed("%s%s on assignment names %q, which does not match assigned variable", lead, verb, args)
-				return
-			}
-		}
-		ix.Borrows[n.Pos()] = kind
-		ix.Borrows[c.Pos()] = kind
-		for _, rhs := range n.Rhs {
-			ix.Borrows[rhs.Pos()] = kind
-			if ue, ok := rhs.(*ast.UnaryExpr); ok {
-				ix.Borrows[ue.OpPos] = kind
-			}
-		}
-		for _, lhs := range n.Lhs {
-			ix.Borrows[lhs.Pos()] = kind
-			if id, ok := lhs.(*ast.Ident); ok {
-				if v, ok := pass.TypesInfo.Defs[id].(*types.Var); ok && v != nil {
-					if kind == BorrowMut {
-						ix.MubVars[v] = true
-					} else {
-						ix.RobVars[v] = true
-					}
-				} else if v, ok := pass.TypesInfo.Uses[id].(*types.Var); ok && v != nil {
-					if kind == BorrowMut {
-						ix.MubVars[v] = true
-					} else {
-						ix.RobVars[v] = true
-					}
-				}
-			}
-		}
-		return
-
+		lhs, rhs = n.Lhs, n.Rhs
 	case *ast.DeclStmt:
 		gd, ok := n.Decl.(*ast.GenDecl)
 		if !ok || gd.Tok != token.VAR {
-			malformed("%s%s must be attached to a function declaration or an assignment statement", lead, verb)
+			a.malformed("%s%s must be attached to a function declaration or an assignment statement", lead, verb)
 			return
 		}
-		ix.Borrows[n.Pos()] = kind
-		ix.Borrows[c.Pos()] = kind
 		for _, spec := range gd.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
-				continue
-			}
-			if args != "" {
-				matched := false
-				for _, name := range vs.Names {
-					if name.Name == args {
-						matched = true
-						break
-					}
+			if vs, ok := spec.(*ast.ValueSpec); ok {
+				for _, id := range vs.Names {
+					lhs = append(lhs, id)
 				}
-				if !matched {
-					malformed("%s%s on assignment names %q, which does not match assigned variable", lead, verb, args)
-					return
-				}
+				rhs = append(rhs, vs.Values...)
 			}
-			for _, val := range vs.Values {
-				ix.Borrows[val.Pos()] = kind
-				if ue, ok := val.(*ast.UnaryExpr); ok {
-					ix.Borrows[ue.OpPos] = kind
-				}
+		}
+	default:
+		a.malformed("%s%s must be attached to a function declaration or an assignment statement", lead, verb)
+		return
+	}
+	if args != "" {
+		matched := false
+		for _, e := range lhs {
+			if id, ok := e.(*ast.Ident); ok && id.Name == args {
+				matched = true
 			}
-			for _, name := range vs.Names {
-				ix.Borrows[name.Pos()] = kind
-				if v, ok := pass.TypesInfo.Defs[name].(*types.Var); ok && v != nil {
-					if kind == BorrowMut {
-						ix.MubVars[v] = true
-					} else {
-						ix.RobVars[v] = true
-					}
-				}
-			}
+		}
+		if !matched {
+			a.malformed("%s%s on assignment names %q, which does not match assigned variable", lead, verb, args)
+			return
+		}
+	}
+	if prev, ok := a.onNode[target]; ok {
+		if prev == kind {
+			a.malformed("%s%s repeats the borrow directive already on this statement", lead, verb)
+		} else {
+			a.malformed("%s%s conflicts with the //gocap:%s directive already on this statement: a binding is a mutable or a read-only borrow, not both", lead, verb, prev)
 		}
 		return
 	}
-
-	malformed("%s%s must be attached to a function declaration or an assignment statement", lead, verb)
+	want := capability(verb)
+	var vars []*types.Var
+	for _, e := range lhs {
+		id, ok := e.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		v, ok := a.pass.TypesInfo.Defs[id].(*types.Var)
+		if !ok || v == nil {
+			v, _ = a.pass.TypesInfo.Uses[id].(*types.Var)
+		}
+		if v == nil {
+			continue
+		}
+		if have := a.capOf(v); have != "" && have != want {
+			a.malformed("%s%s names %q, %s", lead, verb, v.Name(), a.conflict(v, want))
+			return
+		}
+		vars = append(vars, v)
+	}
+	a.onNode[target] = kind
+	ix := a.ix
+	ix.Borrows[target.Pos()] = kind
+	ix.Borrows[a.c.Pos()] = kind
+	for _, e := range rhs {
+		ix.Borrows[e.Pos()] = kind
+		if ue, ok := e.(*ast.UnaryExpr); ok {
+			ix.Borrows[ue.OpPos] = kind
+		}
+	}
+	for _, e := range lhs {
+		ix.Borrows[e.Pos()] = kind
+	}
+	for _, v := range vars {
+		if kind == BorrowMut {
+			ix.MubVars[v] = true
+		} else {
+			ix.RobVars[v] = true
+		}
+	}
 }
 
 func paramVar(pass *analysis.Pass, fd *ast.FuncDecl, name string) *types.Var {
@@ -474,37 +663,305 @@ func typeSpec(n ast.Node) *ast.TypeSpec {
 }
 
 // lineStarts maps each line to the outermost statement, declaration, spec or struct field that starts
-// on it, and records the struct each field belongs to.
-func lineStarts(fset *token.FileSet, file *ast.File) (map[int]ast.Node, map[*ast.Field]*ast.StructType) {
+// on it (and ends on it, for multi-line statements), and records the struct each field belongs to.
+func lineStarts(fset *token.FileSet, file *ast.File) (map[int]ast.Node, map[int]ast.Node, map[*ast.Field]*ast.StructType) {
 	starts := map[int]ast.Node{}
+	ends := map[int]ast.Node{}
 	structOf := map[*ast.Field]*ast.StructType{}
 	mark := func(n ast.Node) {
-		line := fset.Position(n.Pos()).Line
+		line := physLine(fset, n.Pos())
 		if _, seen := starts[line]; !seen {
 			starts[line] = n
+		}
+	}
+	markEnd := func(n ast.Node) {
+		switch n.(type) {
+		case *ast.BlockStmt, *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt,
+			*ast.SwitchStmt, *ast.TypeSwitchStmt, *ast.SelectStmt, *ast.FuncDecl:
+			return
+		}
+		endLine := physLine(fset, n.End())
+		if _, seen := ends[endLine]; !seen {
+			ends[endLine] = n
 		}
 	}
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case ast.Stmt, ast.Decl, ast.Spec:
 			mark(n)
+			markEnd(n)
 		case *ast.StructType:
 			for _, f := range n.Fields.List {
 				structOf[f] = n
 				mark(f)
+				markEnd(f)
 			}
 		}
 		return true
 	})
-	return starts, structOf
+	return starts, ends, structOf
 }
 
-// attach finds the node a directive applies to: a node on the same line, otherwise the node
-// that starts on the line after its comment group.
-func attach(fset *token.FileSet, cg *ast.CommentGroup, c *ast.Comment, starts map[int]ast.Node) ast.Node {
-	line := fset.Position(c.Slash).Line
+// attach finds the node a directive applies to: a node starting or ending on the same line (inline is
+// then true), otherwise the node that starts on the line after its comment group. Lines are physical
+// lines: a //line directive renumbers what is printed, not what a directive is written next to.
+func attach(fset *token.FileSet, cg *ast.CommentGroup, c *ast.Comment, starts, ends map[int]ast.Node) (ast.Node, bool) {
+	line := physLine(fset, c.Slash)
 	if n, ok := starts[line]; ok {
-		return n
+		return n, true
 	}
-	return starts[fset.Position(cg.End()).Line+1]
+	if n, ok := ends[line]; ok {
+		return n, true
+	}
+	n := starts[physLine(fset, cg.End())+1]
+	return n, false
+}
+
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
+}
+
+func isCapPkg(pkg *types.Package) bool {
+	if pkg == nil {
+		return false
+	}
+	path := pkg.Path()
+	return path == "github.com/bharathvbcr/gosree/cap" ||
+		path == "github.com/bharathvbcr/gocap/cap" ||
+		strings.HasSuffix(path, "/cap") ||
+		pkg.Name() == "cap"
+}
+
+func capSymbol(pass *analysis.Pass, expr ast.Expr) string {
+	if expr == nil {
+		return ""
+	}
+	expr = unparen(expr)
+	switch e := expr.(type) {
+	case *ast.IndexExpr:
+		return capSymbol(pass, e.X)
+	case *ast.IndexListExpr:
+		return capSymbol(pass, e.X)
+	case *ast.Ident:
+		if pass != nil && pass.TypesInfo != nil {
+			if obj, ok := pass.TypesInfo.Uses[e]; ok && obj != nil && isCapPkg(obj.Pkg()) {
+				return obj.Name()
+			}
+			if obj, ok := pass.TypesInfo.Defs[e]; ok && obj != nil && isCapPkg(obj.Pkg()) {
+				return obj.Name()
+			}
+		}
+		switch e.Name {
+		case "Mut", "Mub", "Ref", "Rob", "Iso", "Imm",
+			"BorrowMut", "BorrowMub", "Borrow", "BorrowRef", "BorrowRob", "Move":
+			return e.Name
+		}
+	case *ast.SelectorExpr:
+		if pass != nil && pass.TypesInfo != nil {
+			if obj, ok := pass.TypesInfo.Uses[e.Sel]; ok && obj != nil && isCapPkg(obj.Pkg()) {
+				return obj.Name()
+			}
+			if xId, ok := unparen(e.X).(*ast.Ident); ok {
+				if obj, ok := pass.TypesInfo.Uses[xId]; ok && obj != nil {
+					if pkgName, ok := obj.(*types.PkgName); ok && isCapPkg(pkgName.Imported()) {
+						return e.Sel.Name
+					}
+				}
+			}
+		}
+		if xId, ok := unparen(e.X).(*ast.Ident); ok && (xId.Name == "cap" || strings.HasSuffix(xId.Name, "cap")) {
+			return e.Sel.Name
+		}
+	}
+	return ""
+}
+
+func scanParamFieldLists(pass *analysis.Pass, ix *Index, lists []*ast.FieldList) {
+	for _, fl := range lists {
+		if fl == nil {
+			continue
+		}
+		for _, f := range fl.List {
+			sym := capSymbol(pass, f.Type)
+			switch sym {
+			case "Mut", "Mub":
+				for _, id := range f.Names {
+					if v, ok := pass.TypesInfo.Defs[id].(*types.Var); ok && v != nil {
+						ix.MubVars[v] = true
+						ix.Borrows[v.Pos()] = BorrowMut
+						ix.Borrows[id.Pos()] = BorrowMut
+					}
+				}
+			case "Ref", "Rob":
+				for _, id := range f.Names {
+					if v, ok := pass.TypesInfo.Defs[id].(*types.Var); ok && v != nil {
+						ix.RobVars[v] = true
+						ix.Borrows[v.Pos()] = BorrowRob
+						ix.Borrows[id.Pos()] = BorrowRob
+					}
+				}
+			case "Iso":
+				for _, id := range f.Names {
+					if v, ok := pass.TypesInfo.Defs[id].(*types.Var); ok && v != nil {
+						ix.IsoVars[v] = true
+					}
+				}
+			}
+		}
+	}
+}
+
+func scanCapMarkers(pass *analysis.Pass, ix *Index, file *ast.File) {
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncDecl:
+			scanParamFieldLists(pass, ix, []*ast.FieldList{node.Recv, node.Type.Params})
+		case *ast.FuncLit:
+			if node.Type != nil {
+				scanParamFieldLists(pass, ix, []*ast.FieldList{node.Type.Params})
+			}
+
+		case *ast.CallExpr:
+			sym := capSymbol(pass, node.Fun)
+			switch sym {
+			case "BorrowMut", "BorrowMub":
+				ix.Borrows[node.Pos()] = BorrowMut
+			case "Borrow", "BorrowRef", "BorrowRob":
+				ix.Borrows[node.Pos()] = BorrowRob
+			}
+
+		case *ast.AssignStmt:
+			for i, rhs := range node.Rhs {
+				rhsExpr := unparen(rhs)
+				var kind BorrowKind = BorrowNone
+				if call, ok := rhsExpr.(*ast.CallExpr); ok {
+					sym := capSymbol(pass, call.Fun)
+					switch sym {
+					case "BorrowMut", "BorrowMub":
+						kind = BorrowMut
+					case "Borrow", "BorrowRef", "BorrowRob":
+						kind = BorrowRob
+					}
+				}
+				if kind != BorrowNone {
+					ix.Borrows[rhsExpr.Pos()] = kind
+					ix.Borrows[node.Pos()] = kind
+					if i < len(node.Lhs) {
+						lhsExpr := unparen(node.Lhs[i])
+						ix.Borrows[lhsExpr.Pos()] = kind
+						if id, ok := lhsExpr.(*ast.Ident); ok {
+							var v *types.Var
+							if tv, ok := pass.TypesInfo.Defs[id].(*types.Var); ok {
+								v = tv
+							} else if tv, ok := pass.TypesInfo.Uses[id].(*types.Var); ok {
+								v = tv
+							}
+							if v != nil {
+								if kind == BorrowMut {
+									ix.MubVars[v] = true
+								} else {
+									ix.RobVars[v] = true
+								}
+								ix.Borrows[v.Pos()] = kind
+							}
+						}
+					}
+				}
+			}
+
+		case *ast.GenDecl:
+			if node.Tok == token.VAR {
+				for _, spec := range node.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok {
+						continue
+					}
+					if vs.Type != nil {
+						sym := capSymbol(pass, vs.Type)
+						var kind BorrowKind = BorrowNone
+						switch sym {
+						case "Mut", "Mub":
+							kind = BorrowMut
+						case "Ref", "Rob":
+							kind = BorrowRob
+						case "Iso":
+							for _, id := range vs.Names {
+								if v, ok := pass.TypesInfo.Defs[id].(*types.Var); ok && v != nil {
+									ix.IsoVars[v] = true
+								}
+							}
+						}
+						if kind != BorrowNone {
+							ix.Borrows[vs.Pos()] = kind
+							ix.Borrows[node.Pos()] = kind
+							for _, id := range vs.Names {
+								ix.Borrows[id.Pos()] = kind
+								if v, ok := pass.TypesInfo.Defs[id].(*types.Var); ok && v != nil {
+									if kind == BorrowMut {
+										ix.MubVars[v] = true
+									} else {
+										ix.RobVars[v] = true
+									}
+									ix.Borrows[v.Pos()] = kind
+								}
+							}
+						}
+					}
+					for i, val := range vs.Values {
+						valExpr := unparen(val)
+						var kind BorrowKind = BorrowNone
+						if call, ok := valExpr.(*ast.CallExpr); ok {
+							sym := capSymbol(pass, call.Fun)
+							switch sym {
+							case "BorrowMut", "BorrowMub":
+								kind = BorrowMut
+							case "Borrow", "BorrowRef", "BorrowRob":
+								kind = BorrowRob
+							}
+						}
+						if kind != BorrowNone {
+							ix.Borrows[valExpr.Pos()] = kind
+							ix.Borrows[vs.Pos()] = kind
+							ix.Borrows[node.Pos()] = kind
+							if i < len(vs.Names) {
+								id := vs.Names[i]
+								ix.Borrows[id.Pos()] = kind
+								if v, ok := pass.TypesInfo.Defs[id].(*types.Var); ok && v != nil {
+									if kind == BorrowMut {
+										ix.MubVars[v] = true
+									} else {
+										ix.RobVars[v] = true
+									}
+									ix.Borrows[v.Pos()] = kind
+								}
+							}
+						}
+					}
+				}
+			} else if node.Tok == token.TYPE {
+				for _, spec := range node.Specs {
+					ts, ok := spec.(*ast.TypeSpec)
+					if !ok {
+						continue
+					}
+					if ts.Type != nil {
+						sym := capSymbol(pass, ts.Type)
+						if sym == "Imm" {
+							if tn, ok := pass.TypesInfo.Defs[ts.Name].(*types.TypeName); ok && tn != nil {
+								ix.ImmTypes[tn] = ts.Pos()
+								ix.ImmPrefix[tn] = "//gocap:"
+							}
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
 }
