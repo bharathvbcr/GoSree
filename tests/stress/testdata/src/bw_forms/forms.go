@@ -64,10 +64,10 @@ func typedVarAssignedLater() {
 	*b1 = 2
 }
 
-// 7. legacy //gosree: prefix.
-func legacyPrefix() {
+// 7. a directive followed by a trailing "// note".
+func trailingNote() {
 	x := 0
-	b1 := &x //gosree:mut
+	b1 := &x //gosree:mut // the first borrow
 	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	*b1 = 2

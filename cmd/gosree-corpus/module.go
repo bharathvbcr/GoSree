@@ -15,6 +15,7 @@ import (
 	"golang.org/x/tools/go/packages"
 
 	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/annot/stale"
 	"github.com/bharathvbcr/gosree/passes/ownership"
 )
 
@@ -60,6 +61,9 @@ type PackageStats struct {
 	Findings map[string]int `json:"findings"`
 	// Clean counts transfers with no finding at all: Transfers - FlaggedTransfers.
 	Clean int `json:"clean_transfers"`
+	// UnsafeStale counts the //gosree:unsafe directives that muted no finding of any rule: the length
+	// of the stale analyzer's result, taken after every pass that mutes has run.
+	UnsafeStale int `json:"unsafe_stale"`
 }
 
 // HatchRatio is SuppressedTransfers / Transfers: how often memory crossing goroutines needed the
@@ -134,6 +138,14 @@ func runModule(o moduleOpts) {
 			ps = &PackageStats{Package: act.Package.ID, Findings: map[string]int{}}
 			byID[act.Package.ID] = ps
 		}
+		if act.Analyzer == stale.Analyzer {
+			hatches, ok := act.Result.([]annot.Hatch)
+			if !ok {
+				log.Fatalf("%s returned no hatches for %s", act.Analyzer.Name, act.Package.ID)
+			}
+			ps.UnsafeStale = len(hatches)
+			continue // its SAFE007 reports are counted here, not as findings
+		}
 		for _, d := range act.Diagnostics {
 			ps.Findings[d.Category]++
 		}
@@ -153,6 +165,7 @@ func runModule(o moduleOpts) {
 		ps.Clean = ps.Transfers - ps.FlaggedTransfers
 		rep.Packages = append(rep.Packages, *ps)
 		rep.Total.add(ps.Stats)
+		rep.Total.UnsafeStale += ps.UnsafeStale
 		for c, n := range ps.Findings {
 			rep.Total.Findings[c] += n
 		}
@@ -186,7 +199,6 @@ func (ps *PackageStats) add(s ownership.Stats) {
 	t.SuppressedTransfers += s.SuppressedTransfers
 	t.Suppressed += s.Suppressed
 	t.UnsafeScope += s.UnsafeScope
-	t.UnsafeStale += s.UnsafeStale
 	t.Guarded += s.Guarded
 	t.Holds += s.Holds
 	t.Imm += s.Imm

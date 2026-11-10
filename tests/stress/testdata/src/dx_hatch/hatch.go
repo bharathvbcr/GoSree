@@ -117,8 +117,8 @@ func invisibleReason(p *int) uintptr {
 	return uintptr(u.Pointer(p)) // HIT(SAFE001) the rejected hatch mutes nothing
 }
 
-// 9. A hatch that mutes nothing. DIRECTIVES.md 2.7: "it is flagged as stale". It is only counted in
-// ownership.Stats.UnsafeStale, which `gosree ./...` never prints.
+// 9. A hatch that mutes nothing. DIRECTIVES.md: "it is flagged as stale". It is reported by the
+// safestale analyzer, which cmd/gosree does not register, so `gosree ./...` never prints it.
 func stale() int {
 	//gosree:unsafe nothing here needs it // MISS(SAFE007): stale hatch, never reported to a gosree user
 	return 1

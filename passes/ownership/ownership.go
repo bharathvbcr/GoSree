@@ -31,7 +31,6 @@ import (
 
 	"github.com/bharathvbcr/gosree/internal/annot"
 	"github.com/bharathvbcr/gosree/internal/kinds"
-	"github.com/bharathvbcr/gosree/passes/unsafeban"
 )
 
 // Rule categories.
@@ -63,9 +62,7 @@ var Analyzer = &analysis.Analyzer{
 	Name: "safeownership",
 	Doc:  "check moves of memory between goroutines, package-variable mutation, //gosree:imm types, handler writes, and borrow escapes (SAFE002-SAFE006, SAFE008, SAFE009, CAP003)",
 	Run:  run,
-	// unsafeban is required for its order only: it mutes SAFE001 findings with //gosree:unsafe too, so
-	// it must have run before this pass counts the scopes that muted nothing (Stats.UnsafeStale).
-	Requires:  []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, buildssa.Analyzer},
+	Requires:  []*analysis.Analyzer{annot.Analyzer, buildssa.Analyzer},
 	FactTypes: []analysis.Fact{new(FuncFact), new(ImmFact)},
 	// Stats is returned so harnesses can count escape hatches without parsing output.
 	ResultType: reflect.TypeFor[*Stats](),
@@ -83,13 +80,14 @@ type Stats struct {
 	FlaggedTransfers int `json:"flagged_transfers"`
 	// SuppressedTransfers counts transfers inside a //gosree:unsafe scope that had a finding to mute.
 	SuppressedTransfers int `json:"suppressed_transfers"`
-	// Suppressed counts distinct findings (position and rule) muted by //gosree:unsafe, from any rule.
+	// Suppressed counts distinct findings (position and rule) of this pass muted by //gosree:unsafe.
 	Suppressed int `json:"suppressed_findings"`
-	// UnsafeScope counts the //gosree:unsafe directives in the package, and UnsafeStale those that muted
-	// no finding of any rule. A finding is charged to the innermost scope around its own position, or,
-	// when the transfer that caused it is in a scope, to the transfer's scope.
+	// UnsafeScope counts the //gosree:unsafe directives in the package. A finding is charged to the
+	// innermost scope around its own position, or, when the transfer that caused it is in a scope, to the
+	// transfer's scope. Which scopes muted nothing is not counted here: other passes mute through the
+	// same scopes, so only the stale analyzer (internal/annot/stale), which runs after every pass that
+	// mutes, has the final answer.
 	UnsafeScope int `json:"unsafe_directives"`
-	UnsafeStale int `json:"unsafe_stale"`
 	// Guarded counts fields and package variables annotated //gosree:guarded_by, and Holds the
 	// //gosree:holds directives. Like imm and iso they are checked claims, not escape hatches: neither
 	// counts toward the hatch ratio or the override budget.
@@ -191,7 +189,6 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 	st.checkGlobals(fns)
 	st.checkGuarded(fns)
-	st.stats.UnsafeStale = st.ix.StaleScopes()
 	return st.stats, nil
 }
 

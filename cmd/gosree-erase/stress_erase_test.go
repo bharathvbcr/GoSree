@@ -45,7 +45,7 @@ type bugInfo struct {
 // It is static on purpose: the ledger must report open bugs even when only a
 // subset of the stress tests ran.
 var stressBugRegistry = map[string]bugInfo{
-	"ER-23": {"contract-drift", "PROJECT.md:107 claims unqualified \"Bit-for-bit parity\"; it holds for machine code (the README/docs wording) but not for the binary: with -trimpath and line numbers aligned, the annotated build's __gopclntab is 8 bytes larger (inlined-helper metadata, inferred), so the files differ"},
+	"ER-23": {"contract-drift", "erasure parity holds for machine code (the README/docs wording), not for the whole binary: with -trimpath and line numbers aligned, the annotated build's __gopclntab is 8 bytes larger (inlined-helper metadata, inferred), so the files differ"},
 }
 
 var (

@@ -30,6 +30,8 @@ import (
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/packages"
 
+	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/annot/stale"
 	"github.com/bharathvbcr/gosree/passes/ownership"
 )
 
@@ -718,15 +720,9 @@ func TestScaleDeterminismProcesses(t *testing.T) {
 	scaleKnownBug(t, "RB-ORDER", fmt.Sprintf("%d of 9 fresh processes printed the same findings in a different order from the first", reordered), reordered > 0)
 }
 
-// TestScaleUnsafeStaleBorrow checks the stale-hatch count (ownership Stats.UnsafeStale) when a
-// //gosree:unsafe scope mutes only a borrow-pass finding. The borrow pass asks Suppressed and never
-// calls Mute (passes/borrow/check.go:183, storage.go:63), so the scope is counted as stale although
-// it hides a BORROW004; docs/DIRECTIVES.md says a stale directive is one that suppresses nothing.
-func TestScaleUnsafeStaleBorrow(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipped in -short mode with the other generated-program tests")
-	}
-	pkgs := scaleLoad(t, scaleModule(t, scaleOne(`func Dangling() *int {
+// scaleStaleBody declares three //gosree:unsafe scopes, each hiding one finding of a different pass
+// (borrow, ownership, errcheck), and unmuted twins of the borrow and errcheck shapes.
+const scaleStaleBody = `func Dangling() *int {
 	x := 1
 	//gosree:unsafe hides a BORROW004
 	return &x
@@ -743,35 +739,68 @@ func Dangling2() *int {
 	y := 2
 	return &y
 }
-`)))
-	r := scaleAnalyze(t, cliAnalyzers(), pkgs, nil)
-	if len(r.errors) > 0 {
-		t.Fatalf("analyzer failed:\n%s", strings.Join(r.errors, "\n"))
+
+func fail() error { return nil }
+
+func Dropped() {
+	//gosree:unsafe hides an ERR001
+	fail()
+}
+
+func Dropped2() {
+	fail()
+}
+`
+
+// TestScaleUnsafeStaleBorrow checks the stale-hatch count when a //gosree:unsafe scope mutes only a
+// borrow-pass or an errcheck finding: both passes record the mute (annot.Index.Mute), and the stale
+// analyzer, which requires every pass that mutes, counts after all of them. A scope that hides a
+// BORROW004 or an ERR001 is not stale. Regression lock for RB-STALE. A count taken before every muting
+// pass has run depends on scheduling, so this runs the analysis several times.
+func TestScaleUnsafeStaleBorrow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipped in -short mode with the other generated-program tests")
 	}
-	var stats *ownership.Stats
-	borrowDiags := 0
-	for _, act := range r.graph.Roots {
-		if s, ok := act.Result.(*ownership.Stats); ok {
-			stats = s
+	for run := range 10 {
+		// Each run loads fresh packages: Mute records into the annot.Index of one analysis.
+		pkgs := scaleLoad(t, scaleModule(t, scaleOne(scaleStaleBody)))
+		r := scaleAnalyze(t, append(cliAnalyzers(), stale.Analyzer), pkgs, nil)
+		if len(r.errors) > 0 {
+			t.Fatalf("analyzer failed:\n%s", strings.Join(r.errors, "\n"))
 		}
-		for _, d := range act.Diagnostics {
-			if strings.HasPrefix(d.Message, "BORROW004") {
-				borrowDiags++
+		var stats *ownership.Stats
+		var hatches []annot.Hatch
+		borrowDiags, errDiags := 0, 0
+		for _, act := range r.graph.Roots {
+			switch res := act.Result.(type) {
+			case *ownership.Stats:
+				stats = res
+			case []annot.Hatch:
+				hatches = res
+			}
+			for _, d := range act.Diagnostics {
+				switch {
+				case strings.HasPrefix(d.Message, "BORROW004"):
+					borrowDiags++
+				case strings.HasPrefix(d.Message, "ERR001"):
+					errDiags++
+				}
 			}
 		}
+		if stats == nil {
+			t.Fatal("no ownership Stats")
+		}
+		// The unmuted twins prove each pass reports its shape, so each first scope hid one finding.
+		if borrowDiags != 1 || errDiags != 1 {
+			t.Fatalf("run %d: expected exactly the unmuted BORROW004 of Dangling2 and ERR001 of Dropped2, got %d and %d", run, borrowDiags, errDiags)
+		}
+		if stats.UnsafeScope != 3 {
+			t.Fatalf("run %d: UnsafeScope = %d, want 3", run, stats.UnsafeScope)
+		}
+		if len(hatches) != 0 {
+			t.Fatalf("run %d: RB-STALE: //gosree:unsafe scopes that mute a BORROW004 or an ERR001 are counted stale (%d of %d scopes), want 0", run, len(hatches), stats.UnsafeScope)
+		}
 	}
-	if stats == nil {
-		t.Fatal("no ownership Stats")
-	}
-	// The unmuted twin proves the borrow pass does report this shape, so the first scope hid one.
-	if borrowDiags != 1 {
-		t.Fatalf("expected exactly the unmuted BORROW004 of Dangling2, got %d", borrowDiags)
-	}
-	if stats.UnsafeScope != 2 {
-		t.Fatalf("UnsafeScope = %d, want 2", stats.UnsafeScope)
-	}
-	scaleKnownBug(t, "RB-STALE", fmt.Sprintf("a //gosree:unsafe that mutes a BORROW004 is counted stale (UnsafeStale = %d of %d scopes)", stats.UnsafeStale, stats.UnsafeScope),
-		stats.UnsafeStale == 1)
 }
 
 // scaleSortedLines sorts the lines of s, so two outputs can be compared as sets of lines.

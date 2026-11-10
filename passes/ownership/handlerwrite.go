@@ -17,9 +17,10 @@ import (
 // loads to any write (writeOf) into them. It follows the roots into static calls of this package and
 // into closures the body calls directly. At a static call into another package (or to a function
 // with no body) it reads the callee's summary instead: passing shared memory to a parameter the
-// callee may write is a write. It stops at spawn sites (the transfer rules own a goroutine the handler
-// starts) and at interface and dynamic calls, which are a stated gap. It runs inside the
-// registration's transfer check, so a //gosree:unsafe on the registration mutes every write it finds.
+// callee may write is a write. At an interface method call or a dynamic call it cannot see the callee,
+// so passing shared, non-shareable memory to one is reported as a possible write. It stops at spawn
+// sites (the transfer rules own a goroutine the handler starts). It runs inside the registration's
+// transfer check, so a //gosree:unsafe on the registration mutes every write it finds.
 
 // checkHandlerWrites reports SAFE008 for the handler registered at sp.
 func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {

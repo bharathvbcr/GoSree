@@ -47,6 +47,7 @@ import (
 	"golang.org/x/tools/go/packages"
 
 	"github.com/bharathvbcr/gosree/internal/annot"
+	"github.com/bharathvbcr/gosree/internal/annot/stale"
 	"github.com/bharathvbcr/gosree/passes/ownership"
 	"github.com/bharathvbcr/gosree/passes/unsafeban"
 )
@@ -56,7 +57,7 @@ type Report struct {
 	GoVersion string   `json:"go_version"`
 	Files     int      `json:"files"`
 	Skipped   []string `json:"skipped_files"`
-	// Annotations counts the //safe directives added to the corpus (0 for the corpus as shipped).
+	// Annotations counts the //gosree: directives added to the corpus (0 for the corpus as shipped).
 	Annotations int  `json:"annotations"`
 	Race        Side `json:"race"`
 	NoRace      Side `json:"norace"`
@@ -89,7 +90,7 @@ func main() {
 	gitRepo := flag.String("git", "", "analyse a module archived from this git repository at -rev (its -subdir), extracted under <out>; the repository is only read")
 	rev := flag.String("rev", "", "with -git: the commit to archive")
 	subdir := flag.String("subdir", "", "with -git: the module's directory inside the repository")
-	annotate := flag.String("annotate", "", "with -module or -git: add the //safe directives of this annotation table (refservice/*.tsv) to the code first; needs -git, so the code annotated is a copy")
+	annotate := flag.String("annotate", "", "with -module or -git: add the //gosree: directives of this annotation table (refservice/*.tsv) to the code first; needs -git, so the code annotated is a copy")
 	list := flag.Bool("list", false, "with -module or -git: also write every finding to <out>/module-findings.json")
 	censusFlag := flag.Bool("census", false, "with -annotate: resolve the table's production IMM_BLOCKED hatches to types and classify what stops each from being imm (writes <out>/census.json)")
 	flag.Parse()
@@ -141,7 +142,7 @@ func main() {
 	path := writeJSON(*out, "corpus-report.json", rep)
 	printSummary("gosree race corpus", rep, path)
 
-	// The same corpus with the //safe directives its lock-discipline tests would carry.
+	// The same corpus with the //gosree: directives its lock-discipline tests would carry.
 	adst, err := filepath.Abs(filepath.Join(*out, "racecorpus-annotated"))
 	if err != nil {
 		log.Fatal(err)
@@ -184,6 +185,9 @@ func measureCorpus(dir string) Report {
 	}
 	var diags []analysis.Diagnostic
 	for _, act := range analyze([]*packages.Package{test}) {
+		if act.Analyzer == stale.Analyzer {
+			continue // scored findings only; stale hatches are not race-corpus findings
+		}
 		diags = append(diags, act.Diagnostics...)
 	}
 	rep := score(test, diags)
@@ -215,10 +219,13 @@ func printAnnotated(plain, annotated Report) {
 	}
 }
 
-// analyze runs every gosree analyzer on pkgs and returns the root actions, failing on any analyzer
-// error: a pass that could not run must not look like a pass that found nothing.
+// analyze runs the analyzers whose findings the corpus scores (annot, unsafeban, ownership) and the
+// stale analyzer on pkgs, and returns the root actions, failing on any analyzer error: a pass that
+// could not run must not look like a pass that found nothing. The stale analyzer requires every pass
+// that mutes findings through //gosree:unsafe, so borrow and errcheck also run (as its dependencies,
+// not as roots), and its result is the final list of scopes that muted nothing.
 func analyze(pkgs []*packages.Package) []*checker.Action {
-	analyzers := []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer}
+	analyzers := []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer, stale.Analyzer}
 	graph, err := checker.Analyze(analyzers, pkgs, nil)
 	if err != nil {
 		log.Fatalf("analyze: %v", err)

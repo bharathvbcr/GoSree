@@ -1,4 +1,4 @@
-# Triage ledger for ScholarLM backend/go_orchestrator at bb60b53 (README item 3). One row per //safe
+# Triage ledger for ScholarLM backend/go_orchestrator at bb60b53 (README item 3). One row per //gosree:
 # directive added to the archived copy; see scholarlm-bb60b53.md for each batch's prediction and result.
 # Columns are tab-separated; in scope, line and directive, \t is a tab. mode is before (own line above
 # the anchor) or trail (appended to the anchor line). An empty line anchors on the scope line itself.

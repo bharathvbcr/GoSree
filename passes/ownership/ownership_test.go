@@ -83,10 +83,9 @@ func TestSuppression(t *testing.T) {
 		// SAFE003; suppressedSend: deferred SAFE003 + SAFE003; otherTransfer: SAFE002; useSite:
 		// SAFE003.
 		Suppressed:  8,
+		// Which scopes muted nothing is the stale analyzer's result (internal/annot/stale), not a Stats
+		// field: it is only known after every pass that mutes has run.
 		UnsafeScope: 8,
-		// Six scopes muted a finding of this pass, through the transfer they cover or at their own
-		// line, and rawPointer's muted a SAFE001; cleanTransfer's muted nothing.
-		UnsafeStale: 1,
 	}
 	if got != want {
 		t.Errorf("Stats = %+v, want %+v", got, want)

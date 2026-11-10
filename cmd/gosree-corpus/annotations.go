@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// annotation is one //safe directive added to a copy of someone else's code for a measured run: the
+// annotation is one //gosree: directive added to a copy of someone else's code for a measured run: the
 // comment a programmer would write who believes what the directive claims. Only comments are added;
 // no code changes. It is placed relative to an anchor: the line equal to line (or, when line is empty,
 // the scope line itself) inside the region that starts at the line beginning with scope (a func line,
