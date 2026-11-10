@@ -16,9 +16,22 @@ import (
 // question about paths, not about pointers. A guarded field or package variable must be unexported:
 // its accesses are checked in this package only.
 func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string, structOf map[*ast.Field]*ast.StructType, malformed func(string, ...any)) {
-	if !isIdent(args) {
+	parts := splitNames(args)
+	if len(parts) == 0 || !isIdent(parts[0]) {
 		malformed("//safe:guarded_by needs one mutex name")
 		return
+	}
+	muName := parts[0]
+	var filter map[string]bool
+	if len(parts) > 1 {
+		filter = make(map[string]bool, len(parts)-1)
+		for _, p := range parts[1:] {
+			if !isIdent(p) {
+				malformed("//safe:guarded_by needs one mutex name")
+				return
+			}
+			filter[p] = true
+		}
 	}
 	var guarded []*types.Var
 	var mu *types.Var
@@ -30,6 +43,9 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 			return
 		}
 		for _, id := range t.Names {
+			if filter != nil && !filter[id.Name] {
+				continue
+			}
 			if v, ok := pass.TypesInfo.Defs[id].(*types.Var); ok {
 				guarded = append(guarded, v)
 			}
@@ -38,9 +54,9 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 			malformed("//safe:guarded_by cannot guard an embedded field")
 			return
 		}
-		mu = structField(pass, st, args)
+		mu = structField(pass, st, muName)
 		if mu == nil {
-			malformed("//safe:guarded_by names %q, which is not a field of this struct", args)
+			malformed("//safe:guarded_by names %q, which is not a field of this struct", muName)
 			return
 		}
 	default:
@@ -50,6 +66,9 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 			return
 		}
 		for _, id := range names {
+			if filter != nil && !filter[id.Name] {
+				continue
+			}
 			v, ok := pass.TypesInfo.Defs[id].(*types.Var)
 			if !ok {
 				if _, blank := pass.TypesInfo.Defs[id]; !blank && id.Name != "_" {
@@ -64,37 +83,44 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 			return
 		}
 		if scope := guarded[0].Parent(); scope == pass.Pkg.Scope() {
-			obj, ok := scope.Lookup(args).(*types.Var)
+			obj, ok := scope.Lookup(muName).(*types.Var)
 			if !ok {
-				malformed("//safe:guarded_by names %q, which is not a package variable", args)
+				malformed("//safe:guarded_by names %q, which is not a package variable", muName)
 				return
 			}
 			mu = obj
 		} else {
 			// A local is guarded by a mutex in scope where it is declared: a local of this function or
 			// an enclosing one, or a package variable.
-			_, obj := scope.LookupParent(args, guarded[0].Pos())
+			_, obj := scope.LookupParent(muName, guarded[0].Pos())
 			v, ok := obj.(*types.Var)
 			if !ok || v.IsField() {
-				malformed("//safe:guarded_by names %q, which is not a variable in scope here", args)
+				malformed("//safe:guarded_by names %q, which is not a variable in scope here", muName)
 				return
 			}
 			mu = v
 		}
 	}
 	if why := notValueMutex(mu.Type()); why != "" {
-		malformed("//safe:guarded_by names %s, which %s", args, why)
+		malformed("//safe:guarded_by names %s, which %s", muName, why)
 		return
 	}
+	// Every guarded name is checked before any is recorded: a directive that is reported has no effect.
 	for _, v := range guarded {
 		switch {
 		case v == mu:
 			malformed("//safe:guarded_by: %s cannot guard itself", v.Name())
+			return
 		case v.Exported() && (v.IsField() || v.Parent() == pass.Pkg.Scope()):
 			malformed("//safe:guarded_by on exported %s: accesses are checked in this package only, so guard an unexported field or variable", v.Name())
-		default:
-			ix.Guarded[v] = mu
+			return
+		case ix.Guarded[v] != nil:
+			malformed("//safe:guarded_by on %s repeats an earlier guard (by %s): one guard per variable", v.Name(), ix.Guarded[v].Name())
+			return
 		}
+	}
+	for _, v := range guarded {
+		ix.Guarded[v] = mu
 	}
 }
 
@@ -130,6 +156,12 @@ func applyHolds(pass *analysis.Pass, ix *Index, target ast.Node, args string, ma
 	if why := notValueMutex(mu.Type()); why != "" {
 		malformed("//safe:holds names %s, which %s", args, why)
 		return
+	}
+	for _, held := range ix.Holds[fn] {
+		if held == mu {
+			malformed("//safe:holds %s repeats an earlier //safe:holds on %s", args, fn.Name())
+			return
+		}
 	}
 	ix.Holds[fn] = append(ix.Holds[fn], mu)
 }

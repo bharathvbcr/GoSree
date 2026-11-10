@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="/Users/bharath/Code/devtools/gocap"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # Formatting
 BOLD="\033[1m"
@@ -102,9 +102,9 @@ SKIPPED_SUITES=$(grep -c "^--- SKIP:" /tmp/gocap_e2e_out.txt || true)
 FAILED_SUITES=$(grep -c "^--- FAIL:" /tmp/gocap_e2e_out.txt || true)
 
 # Total individual test cases inventoried across tiers
-TOTAL_INVENTORIED_CASES=96
-T1_CASES=46
-T2_CASES=25
+TOTAL_INVENTORIED_CASES=102
+T1_CASES=51
+T2_CASES=26
 T3_CASES=11
 T4_CASES=14
 

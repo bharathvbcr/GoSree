@@ -2,8 +2,10 @@ package ownership
 
 import (
 	"fmt"
+	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 )
@@ -248,7 +250,11 @@ func (g *graph) instr(ins ssa.Instruction) {
 	case *ssa.Range:
 		g.join(ins, ins.X)
 	case *ssa.Extract:
-		g.join(ins, ins.Tuple)
+		if c, ok := ins.Tuple.(*ssa.Call); ok && !c.Common().IsInvoke() && c.Common().StaticCallee() != nil {
+			g.val(ins)
+		} else {
+			g.join(ins, ins.Tuple)
+		}
 	case *ssa.MakeInterface:
 		// Boxing a shareable value copies it, so the interface is fresh.
 		g.join(ins, ins.X)
@@ -485,6 +491,19 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 	}
 	fn := cc.StaticCallee()
 	if fn == nil {
+		if mc := rangeOverFuncClosure(g.fn, ins, cc); mc != nil {
+			yieldSum := g.st.summary(mc.Fn.(*ssa.Function))
+			for j, b := range mc.Bindings {
+				if yieldSum.freeLeaks(j) {
+					g.add(g.val(b), ev(evEscape, ins, "captured by a range-over-func loop body that may retain or share it"))
+				}
+				if yieldSum.writesFree(j) {
+					g.written(ins, b, "captured by a range-over-func loop body that may write it")
+				}
+			}
+			g.written(ins, cc.Value, "called dynamically; its captures may be written")
+			return
+		}
 		for _, a := range cc.Args {
 			g.add(g.val(a), ev(evEscape, ins, "passed to a dynamic function call"))
 			g.written(ins, a, "passed to a dynamic function call, which may write it")
@@ -492,6 +511,19 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		g.written(ins, cc.Value, "called dynamically; its captures may be written")
 		if result != nil {
 			g.add(g.val(result), ev(evForeign, ins, "result of a dynamic function call"))
+		}
+		return
+	}
+	if isCapMove(fn) && len(cc.Args) > 0 {
+		g.transferWithOp(ins, cc.Args[0], token.NoPos, 0, "moved by cap.Move")
+		if result != nil {
+			g.val(result)
+		}
+		return
+	}
+	if isCapBorrowHelper(fn) && len(cc.Args) > 0 {
+		if result != nil {
+			g.join(result, cc.Args[0])
 		}
 		return
 	}
@@ -515,6 +547,14 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		switch {
 		case sum.isIso(i):
 			g.transferWithOp(ins, a, token.NoPos, i, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
+			g.writtenCaptures(ins, a, "captured by a closure passed to "+name+", which may write it")
+		case sum.spawns(i):
+			what := "started on a goroutine by " + name
+			if _, closure := a.(*ssa.MakeClosure); closure {
+				what = "captured by a goroutine started by " + name
+			}
+			g.transferWithOp(ins, a, token.NoPos, i, what)
+			g.writtenCaptures(ins, a, "captured by a callback started by "+name+", which may write it")
 		case sum.leaks(i):
 			g.add(an, ev(evEscape, ins, "passed to "+name+", which may retain or share it"+note))
 		}
@@ -532,17 +572,81 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 			}
 		}
 	}
-	if result != nil && !sum.fresh {
-		g.add(g.val(result), ev(evForeign, ins, "result of "+name+" (not known to return a fresh value)"+note))
+	if result != nil {
+		if cc.Signature().Results().Len() > 1 && result.Referrers() != nil {
+			for _, r := range *result.Referrers() {
+				if ext, ok := r.(*ssa.Extract); ok && ext.Tuple == result && !sum.isFreshResult(ext.Index) {
+					g.add(g.val(ext), ev(evForeign, ins, "result of "+name+" (not known to return a fresh value)"+note))
+				}
+			}
+		} else if !sum.fresh {
+			g.add(g.val(result), ev(evForeign, ins, "result of "+name+" (not known to return a fresh value)"+note))
+		}
 	}
+}
+
+func rangeOverFuncClosure(parent *ssa.Function, ins ssa.Instruction, cc *ssa.CallCommon) *ssa.MakeClosure {
+	if len(cc.Args) != 1 {
+		return nil
+	}
+	mc, ok := cc.Args[0].(*ssa.MakeClosure)
+	if !ok {
+		return nil
+	}
+	yieldFn, ok := mc.Fn.(*ssa.Function)
+	if !ok || yieldFn == nil || yieldFn.Signature == nil {
+		return nil
+	}
+	if yieldFn.Signature.Results().Len() != 1 || yieldFn.Signature.Results().At(0).Type().Underlying() != types.Typ[types.Bool] {
+		return nil
+	}
+	if yieldFn.Signature.Params().Len() > 2 {
+		return nil
+	}
+	if yieldFn.Synthetic == "range-over-func" || strings.Contains(yieldFn.Name(), "$range") {
+		return mc
+	}
+	if _, isRange := yieldFn.Syntax().(*ast.RangeStmt); isRange {
+		return mc
+	}
+	if parent != nil && parent.Syntax() != nil {
+		found := false
+		ast.Inspect(parent.Syntax(), func(n ast.Node) bool {
+			if found || n == nil {
+				return false
+			}
+			if rng, ok := n.(*ast.RangeStmt); ok {
+				if ins.Pos() >= rng.Pos() && ins.Pos() <= rng.End() {
+					found = true
+					return false
+				}
+			}
+			return true
+		})
+		if found {
+			return mc
+		}
+	}
+	return nil
+}
+
+func extractOfResult(result ssa.Value, idx int) ssa.Value {
+	if result == nil || result.Referrers() == nil {
+		return nil
+	}
+	for _, r := range *result.Referrers() {
+		if ext, ok := r.(*ssa.Extract); ok && ext.Tuple == result && ext.Index == idx {
+			return ext
+		}
+	}
+	return nil
 }
 
 // link joins the memory of the arguments and the result that the callee links (summary.links): the
 // callee stored one into another, or returns memory of one. Each link joins the classes at the depths
-// where the callee's own graph joined them. A tuple result has one class, so a link to any of its
-// results joins all of them, which over-reports, never under-reports. A callback the callee runs on
-// another goroutine (argument skip) is a transfer, not memory joined to the others: a spawner that
-// keeps its callback (a ServeMux storing a handler) owns that link.
+// where the callee's own graph joined them. A callback the callee runs on another goroutine (argument
+// skip) is a transfer, not memory joined to the others: a spawner that keeps its callback (a ServeMux
+// storing a handler) owns that link.
 func (g *graph) link(cc *ssa.CallCommon, sum *summary, result ssa.Value, skip int) {
 	n := len(cc.Args) + cc.Signature().Results().Len()
 	at := func(pos, depth int) *node {
@@ -553,7 +657,11 @@ func (g *graph) link(cc *ssa.CallCommon, sum *summary, result ssa.Value, skip in
 		case pos < len(cc.Args):
 			v = cc.Args[pos]
 		default:
-			v = result
+			if cc.Signature().Results().Len() > 1 {
+				v = extractOfResult(result, pos-len(cc.Args))
+			} else {
+				v = result
+			}
 		}
 		if v == nil {
 			return nil
@@ -694,4 +802,61 @@ func (g *graph) buildRev() {
 			r = p
 		}
 	}
+}
+
+func isCapPkgPath(path string) bool {
+	return path == "github.com/bharathvbcr/gocap/cap" || strings.HasSuffix(path, "/cap") || path == "cap"
+}
+
+func isCapMove(fn *ssa.Function) bool {
+	if fn == nil {
+		return false
+	}
+	if obj := fn.Object(); obj != nil && obj.Pkg() != nil {
+		if isCapPkgPath(obj.Pkg().Path()) || obj.Pkg().Name() == "cap" {
+			if obj.Name() == "Move" {
+				return true
+			}
+		}
+	}
+	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+		p := fn.Pkg.Pkg.Path()
+		if isCapPkgPath(p) || fn.Pkg.Pkg.Name() == "cap" {
+			name := fn.Name()
+			if name == "Move" || strings.HasPrefix(name, "Move[") {
+				return true
+			}
+		}
+	}
+	s := fn.String()
+	return strings.Contains(s, "/cap.Move") || strings.HasPrefix(s, "cap.Move")
+}
+
+func isCapBorrowHelper(fn *ssa.Function) bool {
+	if fn == nil {
+		return false
+	}
+	if obj := fn.Object(); obj != nil && obj.Pkg() != nil {
+		if isCapPkgPath(obj.Pkg().Path()) || obj.Pkg().Name() == "cap" {
+			name := obj.Name()
+			if name == "BorrowMut" || name == "BorrowMub" || name == "Borrow" || name == "BorrowRef" || name == "BorrowRob" {
+				return true
+			}
+		}
+	}
+	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+		p := fn.Pkg.Pkg.Path()
+		if isCapPkgPath(p) || fn.Pkg.Pkg.Name() == "cap" {
+			name := fn.Name()
+			if name == "BorrowMut" || strings.HasPrefix(name, "BorrowMut[") ||
+				name == "BorrowMub" || strings.HasPrefix(name, "BorrowMub[") ||
+				name == "Borrow" || strings.HasPrefix(name, "Borrow[") ||
+				name == "BorrowRef" || strings.HasPrefix(name, "BorrowRef[") ||
+				name == "BorrowRob" || strings.HasPrefix(name, "BorrowRob[") {
+				return true
+			}
+		}
+	}
+	s := fn.String()
+	return strings.Contains(s, "/cap.Borrow") || strings.HasPrefix(s, "cap.Borrow")
 }

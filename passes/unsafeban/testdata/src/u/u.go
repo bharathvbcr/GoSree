@@ -20,6 +20,15 @@ func raw(p *int) unsafe.Pointer { return unsafe.Pointer(p) }
 func viaReflect(v reflect.Value) {
 	v.SetInt(1) // want `SAFE001: reflect.Value.SetInt writes or exposes memory through reflection`
 	_ = v.Int()
+	f := v.SetInt // want `SAFE001: reflect.Value.SetInt writes or exposes memory through reflection`
+	f(2)
+	_ = v.Addr()          // want `SAFE001: reflect.Value.Addr writes or exposes memory through reflection`
+	_ = v.Pointer()       // want `SAFE001: reflect.Value.Pointer writes or exposes memory through reflection`
+	v.Clear()             // want `SAFE001: reflect.Value.Clear writes or exposes memory through reflection`
+	v.Grow(4)             // want `SAFE001: reflect.Value.Grow writes or exposes memory through reflection`
+	_ = reflect.Copy(v, v) // want `SAFE001: reflect.Copy writes or exposes memory through reflection`
+	newAt := reflect.NewAt // want `SAFE001: reflect.NewAt writes or exposes memory through reflection`
+	_ = newAt
 }
 
 func statementHatch(p *int) {

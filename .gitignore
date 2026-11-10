@@ -1,4 +1,29 @@
-# Generated corpus copies and reports. The race corpus is copied from GOROOT on every run and never committed.
+# Generated corpus copies, reports, and compiled binaries.
+# The race corpus is copied from GOROOT on every run and never committed.
 /build/
+/gosree
+/gosree-erase
+/gosree-corpus
 /gocap
+/gocap-erase
 /gocap-corpus
+
+# Go test binaries, coverage profiles, and atomic-rewrite temp files
+*.test
+*.out
+coverage.*
+.gocap-erase-*.tmp
+
+# Agent, code-intelligence, and IDE workspace state
+/.devcouncil/
+/.claude/
+/.claude-account
+/.cursor/
+/.gemini/
+/.vscode/
+/.idea/
+
+# OS & local environment files (never commit secrets or local env)
+.DS_Store
+.env
+.env.*

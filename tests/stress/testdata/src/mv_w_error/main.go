@@ -1,0 +1,29 @@
+// WITNESS: race
+//
+// error is in the shareable override table ("assumed: error values are not mutated after
+// creation", internal/kinds/kinds.go), so a value of type error has no alias class: sending one is
+// a transfer of nothing. Here the error is a pointer to a mutable struct; the receiver asserts it
+// back and writes it while the sender keeps writing.
+package main
+
+import "sync"
+
+type RetryErr struct{ Attempts int }
+
+func (e *RetryErr) Error() string { return "retry" }
+
+func main() {
+	errs := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if r, ok := (<-errs).(*RetryErr); ok {
+			r.Attempts++
+		}
+	}()
+	e := &RetryErr{}
+	errs <- e
+	e.Attempts++ // MISS(SAFE003): e was sent on errs as an error; the receiver writes it
+	wg.Wait()
+}

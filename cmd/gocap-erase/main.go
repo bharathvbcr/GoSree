@@ -11,191 +11,473 @@
 //	-o string write result to named file (single input only)
 //	-l        list files whose formatting differs from gocap-erase
 //	-d        display diffs instead of rewriting files
+//
+// A path is a Go file, a directory (walked recursively), or dir/... (the same
+// walk). A walk skips hidden directories, vendor, testdata and symbolic links
+// below the directory it was given. With -w the invocation is all-or-nothing:
+// every file is erased in memory first and nothing is written unless all of
+// them succeeded.
+//
+// Exit status: 0 when everything requested was done (a file that needs no
+// erasure counts as done); 1 when any file could not be erased or written, a
+// path could not be used, or the options are inconsistent; 2 for invalid flags.
 package main
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
-	"go/ast"
-	"go/format"
 	"go/parser"
 	"go/token"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"golang.org/x/tools/go/ast/astutil"
 )
 
-var (
-	writeInPlace = flag.Bool("w", false, "write result to (source) file instead of stdout")
-	outputFile   = flag.String("o", "", "write result to named file (single input only)")
-	listDiffers  = flag.Bool("l", false, "list files whose formatting differs from gocap-erase")
-	showDiff     = flag.Bool("d", false, "display diffs instead of rewriting files")
-)
+// eraseFunc is the signature of Erase; tests substitute their own.
+type eraseFunc func(src []byte) ([]byte, error)
 
-func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: gocap-erase [flags] [path ...]\n\nFlags:\n")
-	flag.PrintDefaults()
+type options struct {
+	write   bool
+	list    bool
+	diff    bool
+	outPath string
+	stdin   io.Reader
+	stdout  io.Writer
+	stderr  io.Writer
+	erase   eraseFunc
 }
 
 func main() {
-	flag.Usage = usage
-	flag.Parse()
-
-	if *writeInPlace && *outputFile != "" {
-		fmt.Fprintf(os.Stderr, "error: cannot use both -w and -o\n")
-		os.Exit(1)
-	}
-
-	args := flag.Args()
-	if len(args) == 0 || (len(args) == 1 && args[0] == "-") {
-		// Stdin mode
-		if *writeInPlace {
-			fmt.Fprintf(os.Stderr, "error: cannot use -w with standard input\n")
-			os.Exit(1)
-		}
-		if err := processStream(os.Stdin, os.Stdout, "<stdin>", *outputFile); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
-
-	if *outputFile != "" && len(args) > 1 {
-		fmt.Fprintf(os.Stderr, "error: cannot use -o with multiple input files\n")
-		os.Exit(1)
-	}
-
-	hasError := false
-	for _, arg := range args {
-		fi, err := os.Stat(arg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			hasError = true
-			continue
-		}
-
-		if fi.IsDir() {
-			if *outputFile != "" {
-				fmt.Fprintf(os.Stderr, "error: cannot use -o with a directory input\n")
-				os.Exit(1)
-			}
-			err := filepath.WalkDir(arg, func(path string, d os.DirEntry, walkErr error) error {
-				if walkErr != nil {
-					return walkErr
-				}
-				if d.IsDir() {
-					name := d.Name()
-					if strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata" {
-						return filepath.SkipDir
-					}
-					return nil
-				}
-				if !strings.HasSuffix(d.Name(), ".go") {
-					return nil
-				}
-				if err := processFile(path, *writeInPlace, ""); err != nil {
-					fmt.Fprintf(os.Stderr, "%s: %v\n", path, err)
-					hasError = true
-				}
-				return nil
-			})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error walking directory %s: %v\n", arg, err)
-				hasError = true
-			}
-		} else {
-			if err := processFile(arg, *writeInPlace, *outputFile); err != nil {
-				fmt.Fprintf(os.Stderr, "%s: %v\n", arg, err)
-				hasError = true
-			}
-		}
-	}
-
-	if hasError {
-		os.Exit(1)
-	}
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-func processStream(r io.Reader, w io.Writer, filename, outPath string) error {
-	src, err := io.ReadAll(r)
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	return runWith(args, stdin, stdout, stderr, Erase)
+}
+
+func runWith(args []string, stdin io.Reader, stdout, stderr io.Writer, erase eraseFunc) int {
+	o := &options{stdin: stdin, stdout: stdout, stderr: stderr, erase: erase}
+	flags := flag.NewFlagSet("gocap-erase", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.BoolVar(&o.write, "w", false, "write result to (source) file instead of stdout")
+	flags.StringVar(&o.outPath, "o", "", "write result to named file (single input only)")
+	flags.BoolVar(&o.list, "l", false, "list files whose formatting differs from gocap-erase")
+	flags.BoolVar(&o.diff, "d", false, "display diffs instead of rewriting files")
+	flags.Usage = func() {
+		fmt.Fprintf(stderr, "Usage: gocap-erase [flags] [path ...]\n\nFlags:\n")
+		flags.PrintDefaults()
+		fmt.Fprintf(stderr, `
+Paths: a Go file, a directory (walked recursively) or dir/... (the same walk).
+A walk skips hidden directories, vendor, testdata and symbolic links (it says
+so on stderr). A symbolic link named on the command line is followed only if
+it resolves inside the current directory. A file that needs no erasure is left
+untouched and is not listed.
+
+With -w the run is all-or-nothing: nothing is written unless every file was
+erased successfully. Each file is replaced atomically (temp file and rename).
+
+Exit status: 0 everything requested was done; 1 a file could not be erased or
+written, a path could not be used, or the options conflict (with -w, nothing
+was written); 2 invalid flags.
+`)
+	}
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	if o.write && o.outPath != "" {
+		o.errorf("error: cannot use both -w and -o")
+		return 1
+	}
+
+	rest := flags.Args()
+	if len(rest) == 0 || (len(rest) == 1 && rest[0] == "-") {
+		if o.write {
+			o.errorf("error: cannot use -w with standard input")
+			return 1
+		}
+		if err := o.processStream(); err != nil {
+			o.errorf("error: %v", err)
+			return 1
+		}
+		return 0
+	}
+
+	if o.outPath != "" && len(rest) > 1 {
+		o.errorf("error: cannot use -o with multiple input files")
+		return 1
+	}
+
+	targets, ok := o.collect(rest)
+	if o.write && !o.list && !o.diff {
+		return o.writeAll(targets, ok)
+	}
+	for _, t := range targets {
+		r := o.compute(t)
+		if r.err != nil {
+			o.errorf("%s: %v", t.display, r.err)
+			ok = false
+			continue
+		}
+		if err := o.emit(t.display, r.src, r.out); err != nil {
+			o.errorf("%s: %v", t.display, err)
+			ok = false
+		}
+	}
+	if !ok {
+		return 1
+	}
+	return 0
+}
+
+func (o *options) errorf(format string, args ...any) {
+	fmt.Fprintf(o.stderr, format+"\n", args...)
+}
+
+// target is a file to process: display is the name shown to the user, real is
+// the path that is read and written.
+type target struct {
+	display string
+	real    string
+}
+
+// result is the outcome of erasing one file in memory.
+type result struct {
+	target
+	src, out []byte
+	mode     fs.FileMode
+	err      error
+}
+
+func (r result) changed() bool { return r.err == nil && !bytes.Equal(r.src, r.out) }
+
+// collect expands the path arguments into the Go files to process. ok is
+// false if any argument could not be used.
+func (o *options) collect(args []string) (targets []target, ok bool) {
+	ok = true
+	seen := map[string]bool{}
+	add := func(t target) {
+		key := t.real
+		if abs, err := filepath.Abs(t.real); err == nil {
+			key = abs
+		}
+		if !seen[key] {
+			seen[key] = true
+			targets = append(targets, t)
+		}
+	}
+
+	for _, arg := range args {
+		root, pattern := arg, false
+		if s := filepath.ToSlash(arg); s == "..." || strings.HasSuffix(s, "/...") {
+			pattern = true
+			switch base := strings.TrimSuffix(s, "..."); base {
+			case "":
+				root = "."
+			case "/":
+				root = "/"
+			default:
+				root = filepath.FromSlash(strings.TrimSuffix(base, "/"))
+			}
+		}
+
+		fi, err := os.Lstat(root)
+		if err != nil {
+			o.errorf("error: %v", err)
+			ok = false
+			continue
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			resolved, err := resolveInsideWorkingDir(root)
+			if err != nil {
+				o.errorf("error: %s: %v", arg, err)
+				ok = false
+				continue
+			}
+			if root, err = filepath.Abs(resolved); err != nil {
+				o.errorf("error: %s: %v", arg, err)
+				ok = false
+				continue
+			}
+			if fi, err = os.Stat(root); err != nil {
+				o.errorf("error: %v", err)
+				ok = false
+				continue
+			}
+		}
+
+		switch {
+		case fi.IsDir():
+			if o.outPath != "" {
+				o.errorf("error: cannot use -o with a directory input")
+				ok = false
+				continue
+			}
+			if err := o.walk(root, add); err != nil {
+				o.errorf("error walking directory %s: %v", arg, err)
+				ok = false
+			}
+		case pattern:
+			o.errorf("error: %s: %s is not a directory", arg, root)
+			ok = false
+		case fi.Mode().IsRegular():
+			add(target{display: arg, real: root})
+		default:
+			o.errorf("error: %s: not a regular file", arg)
+			ok = false
+		}
+	}
+	return targets, ok
+}
+
+// walk adds the Go files below root. The root the user named is always
+// walked, whatever its name; below it, hidden directories, vendor and testdata
+// are skipped, and symbolic links are never followed.
+func (o *options) walk(root string, add func(target)) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			o.errorf("gocap-erase: skipping symbolic link %s", path)
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if strings.HasPrefix(name, ".") || name == "vendor" || name == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".go") && d.Type().IsRegular() {
+			add(target{display: path, real: path})
+		}
+		return nil
+	})
+}
+
+// resolveInsideWorkingDir resolves a symbolic link named on the command line
+// and refuses a target outside the working directory.
+func resolveInsideWorkingDir(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	target, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	if cwd, err = filepath.EvalSymlinks(cwd); err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(cwd, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("symbolic link resolves to %s, outside the working directory; name the target itself to process it", target)
+	}
+	return target, nil
+}
+
+// compute erases one file in memory. A panic while erasing becomes an error
+// for that file.
+func (o *options) compute(t target) (r result) {
+	r.target = t
+	defer func() {
+		if p := recover(); p != nil {
+			r.out, r.err = nil, fmt.Errorf("internal error while erasing (nothing was written): %v", p)
+		}
+	}()
+	fi, err := os.Stat(t.real)
+	if err != nil {
+		r.err = fmt.Errorf("reading file: %w", err)
+		return r
+	}
+	r.mode = fi.Mode()
+	if r.src, err = os.ReadFile(t.real); err != nil {
+		r.err = fmt.Errorf("reading file: %w", err)
+		return r
+	}
+	r.out, r.err = o.erase(r.src)
+	return r
+}
+
+// emit delivers the result for the modes that do not rewrite the input file.
+func (o *options) emit(name string, src, out []byte) error {
+	differs := !bytes.Equal(src, out)
+	switch {
+	case o.list:
+		if differs {
+			fmt.Fprintln(o.stdout, name)
+		}
+		return nil
+	case o.diff:
+		if differs {
+			fmt.Fprintf(o.stdout, "--- %s\n+++ %s (erased)\n", name, name)
+			writeUnifiedDiff(o.stdout, string(src), string(out))
+		}
+		return nil
+	case o.outPath != "":
+		return os.WriteFile(o.outPath, out, 0o644)
+	}
+	_, err := o.stdout.Write(out)
+	return err
+}
+
+func (o *options) processStream() error {
+	src, err := io.ReadAll(o.stdin)
 	if err != nil {
 		return fmt.Errorf("reading input: %w", err)
 	}
-	res, err := Erase(src)
+	out, err := o.erase(src)
 	if err != nil {
 		return err
 	}
-
-	differs := !bytes.Equal(src, res)
-
-	if *listDiffers {
-		if differs {
-			fmt.Println(filename)
-		}
-		return nil
-	}
-
-	if *showDiff {
-		if differs {
-			fmt.Printf("--- %s\n+++ %s (erased)\n", filename, filename)
-			printUnifiedDiff(string(src), string(res))
-		}
-		return nil
-	}
-
-	if outPath != "" {
-		return os.WriteFile(outPath, res, 0644)
-	}
-	_, err = w.Write(res)
-	return err
+	return o.emit("<stdin>", src, out)
 }
 
+// processFile erases one file, delivering the result as the options would for
+// a single path: rewritten in place, written to outPath, or printed.
 func processFile(path string, inPlace bool, outPath string) error {
-	src, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("reading file: %w", err)
+	o := &options{write: inPlace, outPath: outPath, stdout: os.Stdout, stderr: os.Stderr, erase: Erase}
+	r := o.compute(target{display: path, real: path})
+	if r.err != nil {
+		return r.err
 	}
+	if inPlace {
+		if !r.changed() {
+			return nil
+		}
+		return o.commit([]result{r})
+	}
+	return o.emit(path, r.src, r.out)
+}
 
-	res, err := Erase(src)
+// writeAll implements -w: erase everything in memory, then write all changed
+// files, or none if anything failed.
+func (o *options) writeAll(targets []target, ok bool) int {
+	results := make([]result, len(targets))
+	failures := 0
+	for i, t := range targets {
+		r := o.compute(t)
+		if r.changed() {
+			r.err = writable(r.real)
+		}
+		results[i] = r
+		if r.err != nil {
+			o.errorf("%s: %v", t.display, r.err)
+			failures++
+		}
+	}
+	if failures > 0 || !ok {
+		o.errorf("gocap-erase: nothing was written (%d file(s) could not be erased, %d path(s) were unusable)", failures, boolInt(!ok))
+		return 1
+	}
+	var changed []result
+	for _, r := range results {
+		if r.changed() {
+			changed = append(changed, r)
+		}
+	}
+	if err := o.commit(changed); err != nil {
+		o.errorf("gocap-erase: %v", err)
+		return 1
+	}
+	return 0
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// writable reports whether path can be replaced: it can be opened for writing
+// and a temporary file can be created beside it.
+func writable(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return fmt.Errorf("not writable: %w", err)
+	}
+	f.Close()
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".gocap-erase-probe-*.tmp")
+	if err != nil {
+		return fmt.Errorf("cannot create a temporary file beside it: %w", err)
+	}
+	tmp.Close()
+	return os.Remove(tmp.Name())
+}
+
+// commit replaces each file with its erased content. Files are verified
+// unchanged since they were read, written one at a time with an atomic rename,
+// and the files already written are restored if a later write fails.
+func (o *options) commit(changed []result) error {
+	for _, r := range changed {
+		cur, err := os.ReadFile(r.real)
+		if err != nil {
+			return fmt.Errorf("%s: %w", r.display, err)
+		}
+		if !bytes.Equal(cur, r.src) {
+			return fmt.Errorf("%s: changed while it was being erased; nothing was written", r.display)
+		}
+	}
+	for i, r := range changed {
+		if err := writeAtomic(r.real, r.out, r.mode); err != nil {
+			msg := fmt.Sprintf("%s: %v", r.display, err)
+			for _, w := range changed[:i] {
+				if rerr := writeAtomic(w.real, w.src, w.mode); rerr != nil {
+					msg += fmt.Sprintf("; could not restore %s: %v", w.display, rerr)
+				}
+			}
+			return errors.New(msg)
+		}
+	}
+	return nil
+}
+
+// writeAtomic replaces path with data through a temporary file in the same
+// directory, keeping the permission bits, so a crash cannot leave a truncated
+// source file.
+func writeAtomic(path string, data []byte, mode fs.FileMode) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".gocap-erase-*.tmp")
 	if err != nil {
 		return err
 	}
-
-	differs := !bytes.Equal(src, res)
-
-	if *listDiffers {
-		if differs {
-			fmt.Println(path)
+	defer func() {
+		if err != nil {
+			os.Remove(tmp.Name())
 		}
-		return nil
+	}()
+	if _, err = tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
 	}
-
-	if *showDiff {
-		if differs {
-			fmt.Printf("--- %s\n+++ %s (erased)\n", path, path)
-			printUnifiedDiff(string(src), string(res))
-		}
-		return nil
+	if err = tmp.Chmod(mode.Perm()); err != nil {
+		tmp.Close()
+		return err
 	}
-
-	if inPlace {
-		if differs {
-			return os.WriteFile(path, res, 0644)
-		}
-		return nil
+	if err = tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
 	}
-
-	if outPath != "" {
-		return os.WriteFile(outPath, res, 0644)
+	if err = tmp.Close(); err != nil {
+		return err
 	}
-
-	_, err = os.Stdout.Write(res)
-	return err
+	return os.Rename(tmp.Name(), path)
 }
 
 type span struct {
@@ -203,10 +485,12 @@ type span struct {
 	end   int
 }
 
-// isDirective reports whether text is a gocap or legacy safe directive comment.
+// isDirective reports whether text is a gosree, gocap, or legacy safe directive comment.
 func isDirective(text string) bool {
 	t := strings.TrimSpace(text)
-	return strings.HasPrefix(t, "//gocap:") || strings.HasPrefix(t, "//safe:") ||
+	return strings.HasPrefix(t, "//gosree:") || strings.HasPrefix(t, "//sree:") ||
+		strings.HasPrefix(t, "//gocap:") || strings.HasPrefix(t, "//safe:") ||
+		strings.HasPrefix(t, "/*gosree:") || strings.HasPrefix(t, "/*sree:") ||
 		strings.HasPrefix(t, "/*gocap:") || strings.HasPrefix(t, "/*safe:")
 }
 
@@ -311,173 +595,9 @@ func stripDirectives(src []byte) []byte {
 	return res
 }
 
-// Erase transforms gocap-annotated Go source into standard Go source.
-func Erase(src []byte) ([]byte, error) {
-	// Stage 1: Strip directive comments cleanly using exact AST offsets
-	cleanSrc := stripDirectives(src)
+func printUnifiedDiff(orig, newStr string) { writeUnifiedDiff(os.Stdout, orig, newStr) }
 
-	// Stage 2: Parse cleaned AST
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "source.go", cleanSrc, parser.ParseComments)
-	if err != nil {
-		return nil, fmt.Errorf("parsing source: %w", err)
-	}
-
-	// Identify imports of gocap/cap and gocap
-	type gocapImport struct {
-		path            string
-		localName       string
-		isDot           bool
-		hasExplicitName bool
-	}
-	var imports []gocapImport
-	for _, imp := range f.Imports {
-		path := strings.Trim(imp.Path.Value, "\"")
-		if path == "github.com/bharathvbcr/gocap/cap" || path == "github.com/bharathvbcr/gocap" {
-			local := ""
-			isDot := false
-			hasExplicit := false
-			if imp.Name != nil {
-				hasExplicit = true
-				if imp.Name.Name == "." {
-					isDot = true
-				} else if imp.Name.Name != "_" {
-					local = imp.Name.Name
-				}
-			} else {
-				if path == "github.com/bharathvbcr/gocap/cap" {
-					local = "cap"
-				} else {
-					local = "gocap"
-				}
-			}
-			imports = append(imports, gocapImport{
-				path:            path,
-				localName:       local,
-				isDot:           isDot,
-				hasExplicitName: hasExplicit,
-			})
-		}
-	}
-
-	// If no gocap imports exist, format and return
-	if len(imports) == 0 {
-		var buf bytes.Buffer
-		if err := format.Node(&buf, fset, f); err != nil {
-			return nil, fmt.Errorf("formatting source: %w", err)
-		}
-		return format.Source(buf.Bytes())
-	}
-
-	isGocapSelector := func(sel *ast.SelectorExpr, names ...string) (bool, string) {
-		id, ok := sel.X.(*ast.Ident)
-		if !ok {
-			return false, ""
-		}
-		for _, imp := range imports {
-			if !imp.isDot && imp.localName != "" && id.Name == imp.localName {
-				for _, name := range names {
-					if sel.Sel.Name == name {
-						return true, name
-					}
-				}
-			}
-		}
-		return false, ""
-	}
-
-	isGocapIdent := func(id *ast.Ident, names ...string) bool {
-		for _, imp := range imports {
-			if imp.isDot {
-				for _, name := range names {
-					if id.Name == name {
-						return true
-					}
-				}
-			}
-		}
-		return false
-	}
-
-	// Stage 3: AST rewriting with astutil.Apply (post-order bottom-up)
-	f = astutil.Apply(f, nil, func(c *astutil.Cursor) bool {
-		switch n := c.Node().(type) {
-		case *ast.IndexExpr:
-			// cap.Mut[T], cap.Ref[T], cap.Iso[T], cap.Imm[T], cap.Mub[T], cap.Rob[T]
-			if sel, ok := n.X.(*ast.SelectorExpr); ok {
-				if matched, _ := isGocapSelector(sel, "Mut", "Mub", "Ref", "Rob", "Iso", "Imm"); matched {
-					c.Replace(&ast.StarExpr{Star: n.Pos(), X: n.Index})
-				}
-			} else if id, ok := n.X.(*ast.Ident); ok {
-				if isGocapIdent(id, "Mut", "Mub", "Ref", "Rob", "Iso", "Imm") {
-					c.Replace(&ast.StarExpr{Star: n.Pos(), X: n.Index})
-				}
-			}
-
-		case *ast.CallExpr:
-			// cap.BorrowMut(x), cap.Borrow(x), cap.BorrowRef(x), cap.BorrowMub(x), cap.BorrowRob(x), cap.Move(x)
-			fnExpr := n.Fun
-			if idx, ok := fnExpr.(*ast.IndexExpr); ok {
-				fnExpr = idx.X
-			} else if idxList, ok := fnExpr.(*ast.IndexListExpr); ok {
-				fnExpr = idxList.X
-			}
-
-			if sel, ok := fnExpr.(*ast.SelectorExpr); ok {
-				if matched, _ := isGocapSelector(sel, "BorrowMut", "Borrow", "BorrowRef", "BorrowMub", "BorrowRob", "Move"); matched {
-					if len(n.Args) == 1 {
-						c.Replace(n.Args[0])
-					}
-				}
-			} else if id, ok := fnExpr.(*ast.Ident); ok {
-				if isGocapIdent(id, "BorrowMut", "Borrow", "BorrowRef", "BorrowMub", "BorrowRob", "Move") {
-					if len(n.Args) == 1 {
-						c.Replace(n.Args[0])
-					}
-				}
-			}
-		}
-		return true
-	}).(*ast.File)
-
-	// Stage 4: Import cleanup
-	for _, imp := range imports {
-		if imp.isDot {
-			astutil.DeleteNamedImport(fset, f, ".", imp.path)
-			continue
-		}
-		if imp.localName == "" {
-			continue
-		}
-		stillReferenced := false
-		ast.Inspect(f, func(n ast.Node) bool {
-			if sel, ok := n.(*ast.SelectorExpr); ok {
-				if id, ok := sel.X.(*ast.Ident); ok && id.Name == imp.localName {
-					stillReferenced = true
-					return false
-				}
-			}
-			return true
-		})
-		if !stillReferenced {
-			if imp.hasExplicitName {
-				astutil.DeleteNamedImport(fset, f, imp.localName, imp.path)
-			} else {
-				astutil.DeleteImport(fset, f, imp.path)
-			}
-		}
-	}
-
-	// Stage 5: Format AST
-	var buf bytes.Buffer
-	if err := format.Node(&buf, fset, f); err != nil {
-		return nil, fmt.Errorf("formatting node: %w", err)
-	}
-
-	return format.Source(buf.Bytes())
-}
-
-func printUnifiedDiff(orig, newStr string) {
+func writeUnifiedDiff(w io.Writer, orig, newStr string) {
 	origLines := strings.Split(orig, "\n")
 	newLines := strings.Split(newStr, "\n")
 	m, n := len(origLines), len(newLines)
@@ -519,7 +639,7 @@ func printUnifiedDiff(orig, newStr string) {
 	for k := len(diff) - 1; k >= 0; k-- {
 		d := diff[k]
 		if d.op != ' ' {
-			fmt.Printf("%c%s\n", d.op, d.text)
+			fmt.Fprintf(w, "%c%s\n", d.op, d.text)
 		}
 	}
 }

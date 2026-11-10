@@ -1,5 +1,9 @@
 package t1_owner_dangling
 
+import (
+	"github.com/bharathvbcr/gocap/cap"
+)
+
 // TC-T1-3.1: Mutation of owner while read-only borrow is active rejected (BORROW003)
 func MutateOwnerDuringRob() {
 	x := 10
@@ -43,4 +47,41 @@ func ReturnStackFieldRef() *int {
 	d := LocalData{Val: 42}
 	//gocap:rob
 	return &d.Val // want `BORROW004: cannot return reference to local stack variable`
+}
+
+// TC-T1-3.6: cap.BorrowMut owner mutation rejected (BORROW003)
+func MarkerMutateOwner() {
+	x := 10
+	b := cap.BorrowMut(&x)
+	x = 20 // want `BORROW003: cannot assign to 'x' because it is borrowed`
+	*b = 30
+}
+
+// TC-T1-3.7: Double pointer alias owner mutation rejected (BORROW003)
+func DoublePointerAliasOwnerMutation() {
+	x := 10
+	b := cap.BorrowMut(&x)
+	pp := &b
+	x = 30 // want `BORROW003: cannot assign to 'x' because it is borrowed`
+	**pp = 40
+}
+
+// TC-T1-3.8: Branch-merged Phi dangling stack pointer return rejected (BORROW004)
+func DanglingPhiReturn(cond bool) *int {
+	x, y := 10, 20
+	var p *int
+	if cond {
+		p = &x
+	} else {
+		p = &y
+	}
+	return p // want `BORROW004: cannot return reference to local stack variable '[xy]'`
+}
+
+// TC-T1-3.9: Slice clear() while element is borrowed rejected (BORROW003)
+func SliceClearWhileBorrowed() {
+	s := []int{1, 2, 3}
+	r := cap.Borrow(&s[0])
+	clear(s) // want `BORROW003: cannot mutate 's' via clear\(\) because it is borrowed`
+	_ = *r
 }

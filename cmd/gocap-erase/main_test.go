@@ -391,3 +391,31 @@ func Compute(item cap.Iso[Item], multiplier cap.Mut[int]) (int, *Item) {
 		t.Fatalf("go build failed on erased package: %v\nOutput:\n%s", err, string(out))
 	}
 }
+
+func TestGoSreeDirectiveAndImportErasure(t *testing.T) {
+	src := `package test
+
+import "github.com/bharathvbcr/gosree/cap"
+
+//gosree:imm
+type Config struct{ Port int }
+
+//sree:iso item
+func Process(item cap.Iso[Config], count cap.Mut[int]) *Config {
+	//gosree:unsafe intentional
+	b := cap.BorrowMut(count)
+	*b++
+	return cap.Move(item)
+}
+`
+	res, err := Erase([]byte(src))
+	if err != nil {
+		t.Fatalf("Erase returned error: %v", err)
+	}
+	out := string(res)
+	for _, forbidden := range []string{"//gosree:", "//sree:", "github.com/bharathvbcr/gosree/cap", "cap.Iso", "cap.Mut", "cap.BorrowMut", "cap.Move"} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("erased output still contains %q:\n%s", forbidden, out)
+		}
+	}
+}

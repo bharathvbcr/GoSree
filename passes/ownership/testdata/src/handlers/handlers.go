@@ -151,11 +151,11 @@ func serve(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "o
 
 func namedFunction() { http.HandleFunc("/n", serve) }
 
-// Calls through an interface are not followed (a stated gap).
+// Calls through an interface are reported when a shared non-shareable value is passed.
 func notFollowed() {
 	var sink io.Writer = &bytes.Buffer{}
 	http.HandleFunc("/x", func(http.ResponseWriter, *http.Request) {
-		_, _ = sink.Write([]byte("x"))
+		_, _ = sink.Write([]byte("x")) // want `SAFE008: captured variable sink is passed to interface method Write, which may write it, by a handler registered with net/http\.HandleFunc`
 	})
 }
 

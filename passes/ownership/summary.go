@@ -19,15 +19,23 @@ type FuncFact struct {
 	Leaks []bool
 	// Iso[i]: parameter i is //safe:iso, so passing an argument to it moves the argument.
 	Iso []bool
+	// Spawns[i]: parameter i is a function value that the callee starts on another goroutine or sends
+	// on a channel, so passing a callback to it is a goroutine boundary.
+	Spawns []bool
 	// Fresh: every pointer-bearing result is a fresh allocation that nothing else references, or
 	// memory of the arguments it is linked to (Links).
 	Fresh bool
+	// FreshResult[k]: result k is a fresh allocation that nothing else references, or memory of the
+	// arguments it is linked to (Links).
+	FreshResult []bool
 	// Writes[i]: the function may write memory reachable from argument i (through its pointers, map
 	// or slice), itself or through functions it calls.
 	Writes []bool
 	// Links are the parameters and results whose memory the function joins, as root.Add(child) or
 	// root.First() do (see Link).
 	Links []Link
+	// Acquires are the parameter mutexes the function returns holding (lockset.go).
+	Acquires []acquire
 	// Unknown: gocap could not analyse the function (it has no body, or depends on one that could
 	// not be), so Leaks and Writes are all set by assumption, not because it was seen to do either.
 	Unknown bool
@@ -47,16 +55,19 @@ func (*ImmFact) AFact() {}
 func (f *ImmFact) String() string { return "imm" }
 
 type summary struct {
-	leakParam []bool
-	isoParam  []bool
-	leakFree  []bool
+	leakParam  []bool
+	isoParam   []bool
+	spawnParam []bool
+	leakFree   []bool
 	// writeParam[i] / writeFree[j]: the function may write memory reachable from parameter i or free
 	// variable j.
-	writeParam []bool
-	writeFree  []bool
-	fresh      bool
+	writeParam  []bool
+	writeFree   []bool
+	fresh       bool
+	freshResult []bool
 	// links are the parameters and results the function joins (FuncFact.Links).
-	links []Link
+	links    []Link
+	acquires []acquire
 	// pessimistic marks a summary for a function gocap could not analyse.
 	pessimistic bool
 }
@@ -69,6 +80,8 @@ func (s *summary) leaks(i int) bool {
 }
 
 func (s *summary) isIso(i int) bool { return i < len(s.isoParam) && s.isoParam[i] }
+
+func (s *summary) spawns(i int) bool { return i < len(s.spawnParam) && s.spawnParam[i] }
 
 func (s *summary) freeLeaks(j int) bool {
 	if s.pessimistic || j >= len(s.leakFree) {
@@ -92,6 +105,16 @@ func (s *summary) writesFree(j int) bool {
 	return s.writeFree[j]
 }
 
+func (s *summary) isFreshResult(k int) bool {
+	if s.pessimistic {
+		return false
+	}
+	if k >= 0 && k < len(s.freshResult) {
+		return s.freshResult[k]
+	}
+	return s.fresh
+}
+
 // unavailable is the note diagnostics add when a callee's behaviour is assumed rather than known, so
 // a reader can tell a callee gocap could not analyse from one it saw retain or write.
 func (s *summary) unavailable() string {
@@ -104,14 +127,24 @@ func (s *summary) unavailable() string {
 var pessimistic = &summary{pessimistic: true}
 
 func optimistic(fn *ssa.Function, st *state) *summary {
+	nRes := 0
+	if fn.Signature != nil && fn.Signature.Results() != nil {
+		nRes = fn.Signature.Results().Len()
+	}
+	fr := make([]bool, nRes)
+	for k := range fr {
+		fr[k] = true
+	}
 	s := &summary{
-		leakParam: make([]bool, len(fn.Params)),
-		isoParam:  make([]bool, len(fn.Params)),
-		leakFree:  make([]bool, len(fn.FreeVars)),
+		leakParam:  make([]bool, len(fn.Params)),
+		isoParam:   make([]bool, len(fn.Params)),
+		spawnParam: make([]bool, len(fn.Params)),
+		leakFree:   make([]bool, len(fn.FreeVars)),
 
-		writeParam: make([]bool, len(fn.Params)),
-		writeFree:  make([]bool, len(fn.FreeVars)),
-		fresh:      true,
+		writeParam:  make([]bool, len(fn.Params)),
+		writeFree:   make([]bool, len(fn.FreeVars)),
+		fresh:       true,
+		freshResult: fr,
 	}
 	for i, p := range fn.Params {
 		s.isoParam[i] = st.isIsoParam(p)
@@ -148,7 +181,16 @@ func (st *state) summary(fn *ssa.Function) *summary {
 		}
 		return pessimistic
 	}
-	s := &summary{leakParam: f.Leaks, isoParam: f.Iso, writeParam: f.Writes, fresh: f.Fresh, links: f.Links}
+	s := &summary{
+		leakParam:   f.Leaks,
+		isoParam:    f.Iso,
+		spawnParam:  f.Spawns,
+		writeParam:  f.Writes,
+		fresh:       f.Fresh,
+		freshResult: f.FreshResult,
+		links:       f.Links,
+		acquires:    f.Acquires,
+	}
 	if obj.Pkg().Path() == atomicPkg {
 		s.writeParam = make([]bool, len(f.Writes))
 	}
@@ -170,7 +212,7 @@ func atomicSummary(n int) *summary {
 
 func (st *state) isIsoParam(p *ssa.Parameter) bool {
 	v, ok := p.Object().(*types.Var)
-	return ok && st.ix.IsoVars[v]
+	return ok && st.ix.IsIso(v)
 }
 
 // summarise computes a function's summary from its graph.
@@ -226,6 +268,9 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 				return true
 			})
 			s.writeParam[i] = fwdHas(g, n, isWrite)
+			if _, isSig := p.Type().Underlying().(*types.Signature); isSig && !s.isoParam[i] {
+				s.spawnParam[i] = regionHas(g, n, func(e event) bool { return e.kind == evTransfer })
+			}
 		}
 	}
 	for j, fv := range fn.FreeVars {
@@ -252,6 +297,13 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 			if n == nil {
 				continue
 			}
+			for k2 := k + 1; k2 < len(ret.Results); k2++ {
+				if n2 := g.val(ret.Results[k2]); n2 != nil {
+					if d, e, ok := g.meetDepth(n, n2); ok {
+						links = append(links, newLink(np+k, d, np+k2, e))
+					}
+				}
+			}
 			if regionScan(g, n, func(e event) bool {
 				switch {
 				case e.kind == evReturn || e.kind == evWrite:
@@ -262,6 +314,9 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 				return true
 			}) {
 				s.fresh = false
+				if k < len(s.freshResult) {
+					s.freshResult[k] = false
+				}
 			}
 		}
 	}
@@ -331,7 +386,9 @@ func fwdHas(g *graph, n *node, bad func(event) bool) bool {
 }
 
 func sameSummary(a, b *summary) bool {
-	return a.fresh == b.fresh && slices.Equal(a.leakParam, b.leakParam) && slices.Equal(a.leakFree, b.leakFree) &&
+	return a.fresh == b.fresh && slices.Equal(a.freshResult, b.freshResult) &&
+		slices.Equal(a.leakParam, b.leakParam) && slices.Equal(a.spawnParam, b.spawnParam) &&
+		slices.Equal(a.leakFree, b.leakFree) &&
 		slices.Equal(a.writeParam, b.writeParam) && slices.Equal(a.writeFree, b.writeFree) && slices.Equal(a.links, b.links)
 }
 
@@ -340,6 +397,16 @@ func orInto(prev, next []bool) []bool {
 	out := append([]bool(nil), next...)
 	for i := range out {
 		out[i] = out[i] || prev[i]
+	}
+	return out
+}
+
+func andInto(prev, next []bool) []bool {
+	out := append([]bool(nil), next...)
+	for i := range out {
+		if i < len(prev) {
+			out[i] = out[i] && prev[i]
+		}
 	}
 	return out
 }
@@ -376,7 +443,9 @@ func mergePessimistic(prev, next *summary) *summary {
 	}
 	out := *next
 	out.fresh = prev.fresh && next.fresh
+	out.freshResult = andInto(prev.freshResult, next.freshResult)
 	out.leakParam = orInto(prev.leakParam, next.leakParam)
+	out.spawnParam = orInto(prev.spawnParam, next.spawnParam)
 	out.leakFree = orInto(prev.leakFree, next.leakFree)
 	out.writeParam = orInto(prev.writeParam, next.writeParam)
 	out.writeFree = orInto(prev.writeFree, next.writeFree)

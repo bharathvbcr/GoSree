@@ -1,5 +1,7 @@
 package lib
 
+import "sync"
+
 type Thing struct {
 	n    int
 	data []byte
@@ -23,3 +25,9 @@ func Size(t *Thing) int { return t.n + len(t.data) }
 //
 //safe:iso t
 func Consume(ch chan *Thing, t *Thing) { ch <- t }
+
+// LockMu acquires a parameter mutex and returns holding it.
+func LockMu(mu *sync.Mutex) { mu.Lock() }
+
+// Spawn starts its callback argument on a new goroutine.
+func Spawn(fn func()) { go fn() }

@@ -26,19 +26,61 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 			continue
 		}
 		forEachInstr(fn, func(ins ssa.Instruction) {
-			w, ok := writeOf(ins)
-			if !ok || w.grows {
-				return // append changes a package variable only through the store of its result
-			}
-			addr := w.addr
-			g, ok := globalRoot(addr)
-			if !ok || g.Pkg != st.ssa.Pkg {
+			if w, ok := writeOf(ins); ok {
+				if w.grows {
+					return // append changes a package variable only through the store of its result
+				}
+				addr := w.addr
+				g, ok := globalRoot(addr)
+				if !ok || g.Pkg != st.ssa.Pkg {
+					return
+				}
+				if _, guarded := st.slotOf(addr); guarded {
+					return // SAFE009 checks guarded variables and fields at every access
+				}
+				writes[g] = append(writes[g], posOf(ins, ins))
 				return
 			}
-			if _, guarded := st.slotOf(addr); guarded {
-				return // SAFE009 checks guarded variables and fields at every access
+			c, ok := ins.(ssa.CallInstruction)
+			if !ok {
+				return
 			}
-			writes[g] = append(writes[g], posOf(ins, ins))
+			cc := c.Common()
+			if _, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
+				return
+			}
+			if cc.IsInvoke() {
+				for _, v := range append([]ssa.Value{cc.Value}, cc.Args...) {
+					if g, ok := st.globalMutArg(v); ok {
+						writes[g] = append(writes[g], posOf(ins, ins))
+					}
+				}
+				return
+			}
+			callee := cc.StaticCallee()
+			if callee == nil {
+				for _, v := range cc.Args {
+					if g, ok := st.globalMutArg(v); ok {
+						writes[g] = append(writes[g], posOf(ins, ins))
+					}
+				}
+				return
+			}
+			if callee.Pkg == st.ssa.Pkg && initOnly[callee] {
+				return
+			}
+			if callee.Pkg != nil && callee.Pkg.Pkg != nil && callee.Pkg.Pkg.Path() == "testing" && callee.Name() == "MainStart" {
+				return
+			}
+			sum := st.summary(callee)
+			for i, a := range cc.Args {
+				if !sum.writes(i) {
+					continue
+				}
+				if g, ok := st.globalMutArg(a); ok {
+					writes[g] = append(writes[g], posOf(ins, ins))
+				}
+			}
 		})
 	}
 	globals := make([]*ssa.Global, 0, len(writes))
@@ -135,9 +177,31 @@ func forEachInstr(fn *ssa.Function, f func(ssa.Instruction)) {
 	}
 }
 
-// globalRoot follows field, index, slice and load steps back to a package variable.
+func (st *state) globalMutArg(v ssa.Value) (*ssa.Global, bool) {
+	if v == nil || st.cls.Shareable(v.Type()) {
+		return nil, false
+	}
+	if _, guarded := st.slotOf(v); guarded {
+		return nil, false
+	}
+	g, ok := globalRoot(v)
+	if !ok || g.Pkg != st.ssa.Pkg {
+		return nil, false
+	}
+	return g, true
+}
+
+// globalRoot follows field, index, slice, phi, local cell store, and getter call steps back to a package variable.
 func globalRoot(v ssa.Value) (*ssa.Global, bool) {
+	return globalRootSeen(v, map[ssa.Value]bool{})
+}
+
+func globalRootSeen(v ssa.Value, seen map[ssa.Value]bool) (*ssa.Global, bool) {
 	for range 64 {
+		if v == nil || seen[v] || len(seen) >= 64 {
+			return nil, false
+		}
+		seen[v] = true
 		switch x := v.(type) {
 		case *ssa.Global:
 			return x, true
@@ -153,11 +217,74 @@ func globalRoot(v ssa.Value) (*ssa.Global, bool) {
 			v = x.X
 		case *ssa.ChangeType:
 			v = x.X
+		case *ssa.Convert:
+			v = x.X
+		case *ssa.MakeInterface:
+			v = x.X
+		case *ssa.ChangeInterface:
+			v = x.X
+		case *ssa.TypeAssert:
+			v = x.X
+		case *ssa.Phi:
+			for _, e := range x.Edges {
+				if g, ok := globalRootSeen(e, seen); ok {
+					return g, true
+				}
+			}
+			return nil, false
 		case *ssa.UnOp:
 			if x.Op != token.MUL {
 				return nil, false
 			}
+			var alloc *ssa.Alloc
+			if a, ok := x.X.(*ssa.Alloc); ok {
+				alloc = a
+			} else if fa, ok := x.X.(*ssa.FieldAddr); ok {
+				alloc, _ = fa.X.(*ssa.Alloc)
+			}
+			if alloc != nil && alloc.Referrers() != nil {
+				for _, ref := range *alloc.Referrers() {
+					if st, ok := ref.(*ssa.Store); ok && st.Addr == alloc {
+						if g, ok := globalRootSeen(st.Val, seen); ok {
+							return g, true
+						}
+					}
+					if fa, ok := ref.(*ssa.FieldAddr); ok && fa.Referrers() != nil {
+						for _, r2 := range *fa.Referrers() {
+							if st, ok := r2.(*ssa.Store); ok && st.Addr == fa {
+								if g, ok := globalRootSeen(st.Val, seen); ok {
+									return g, true
+								}
+							}
+						}
+					}
+					if ia, ok := ref.(*ssa.IndexAddr); ok && ia.Referrers() != nil {
+						for _, r2 := range *ia.Referrers() {
+							if st, ok := r2.(*ssa.Store); ok && st.Addr == ia {
+								if g, ok := globalRootSeen(st.Val, seen); ok {
+									return g, true
+								}
+							}
+						}
+					}
+				}
+			}
 			v = x.X
+		case *ssa.Call:
+			callee := x.Call.StaticCallee()
+			if callee == nil || len(callee.Blocks) == 0 {
+				return nil, false
+			}
+			for _, b := range callee.Blocks {
+				for _, ins := range b.Instrs {
+					if ret, ok := ins.(*ssa.Return); ok && len(ret.Results) == 1 {
+						if g, ok := globalRootSeen(ret.Results[0], seen); ok {
+							return g, true
+						}
+					}
+				}
+			}
+			return nil, false
 		default:
 			return nil, false
 		}

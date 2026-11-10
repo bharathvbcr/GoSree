@@ -6,8 +6,11 @@ import (
 	"go/token"
 	"go/types"
 	"sort"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
+
+	"github.com/bharathvbcr/gocap/internal/annot"
 )
 
 // checkTransfers checks every place a value crosses to another goroutine (or to an owned parameter):
@@ -34,10 +37,10 @@ func (st *state) checkTransfers(g *graph) {
 }
 
 func (st *state) checkTransfer(g *graph, t transfer) {
-	if sp, ok := spawnOf(t.instr); ok && sp.repeated && t.v == sp.fn {
+	borrowEscaped := st.checkBorrowEscape(g, t)
+	if sp, ok := spawnOf(t.instr); ok && sp.repeated && t.v == sp.fn && !borrowEscaped {
 		st.checkHandlerWrites(sp, t.pos)
 	}
-	borrowEscaped := st.checkBorrowEscape(g, t)
 	if borrowEscaped && t.what != "captured by a goroutine" {
 		return
 	}
@@ -64,7 +67,18 @@ func (st *state) checkTransfer(g *graph, t transfer) {
 		}
 	}
 	what := describe(t.v)
-	if !borrowEscaped && len(foreign) > 0 {
+	isForwardedCallback := false
+	if param, ok := t.v.(*ssa.Parameter); ok {
+		if _, isSig := param.Type().Underlying().(*types.Signature); isSig && param.Parent() != nil {
+			for i, p := range param.Parent().Params {
+				if p == param && st.summary(param.Parent()).spawns(i) {
+					isForwardedCallback = true
+					break
+				}
+			}
+		}
+	}
+	if !borrowEscaped && !isForwardedCallback && len(foreign) > 0 {
 		e := earliest(foreign)
 		why := "it may alias " + e.desc + st.at(e.pos)
 		if e.desc == what {
@@ -218,10 +232,21 @@ func (st *state) checkBorrowEscape(g *graph, t transfer) bool {
 		}
 	}
 
-	// 2. Goroutine closure capture
-	if t.what == "captured by a goroutine" || t.what == "started as a goroutine" {
-		if goIns, ok := t.instr.(*ssa.Go); ok {
-			borrows := st.identifyCapturedBorrows(g, goIns)
+	// 2. Goroutine closure capture (go statement or spawner callback)
+	if sp, ok := spawnOf(t.instr); ok {
+		if t.what == "captured by a goroutine" || t.what == "started as a goroutine" || sp.via != "" {
+			borrows := st.identifyCapturedBorrowsSpawn(g, sp)
+			if len(borrows) > 0 {
+				for _, b := range borrows {
+					msg := fmt.Sprintf("stack-scoped borrow '%s' (%s) cannot cross goroutine boundary: cannot be captured by a goroutine", b.name, b.kindStr)
+					st.report(t.pos, BorrowEscape, msg)
+				}
+				return true
+			}
+		}
+	} else if callIns, ok := t.instr.(*ssa.Call); ok {
+		if mc := resolveClosureVal(t.v, 0); mc != nil {
+			borrows := st.identifyCapturedBorrowsSpawn(g, spawnSite{ins: callIns, fn: t.v, arg: t.index, via: t.what})
 			if len(borrows) > 0 {
 				for _, b := range borrows {
 					msg := fmt.Sprintf("stack-scoped borrow '%s' (%s) cannot cross goroutine boundary: cannot be captured by a goroutine", b.name, b.kindStr)
@@ -236,6 +261,15 @@ func (st *state) checkBorrowEscape(g *graph, t transfer) bool {
 	if t.what == "passed to a goroutine" || t.what == "receiver of a method started as a goroutine" || t.what == "started as a goroutine" {
 		if vr, name, kindStr := st.identifyBorrow(g, t); vr != nil {
 			msg := fmt.Sprintf("stack-scoped borrow '%s' (%s) cannot cross goroutine boundary: cannot be passed as argument to go statement", name, kindStr)
+			st.report(t.pos, BorrowEscape, msg)
+			return true
+		}
+	}
+
+	// 4. Moving a borrow via cap.Move or passing a borrow to an owned (iso) parameter
+	if t.what == "moved by cap.Move" || strings.HasPrefix(t.what, "passed to owned parameter ") {
+		if vr, name, kindStr := st.identifyBorrow(g, t); vr != nil {
+			msg := fmt.Sprintf("stack-scoped borrow '%s' (%s) cannot cross goroutine boundary: cannot be %s", name, kindStr, t.what)
 			st.report(t.pos, BorrowEscape, msg)
 			return true
 		}
@@ -275,12 +309,46 @@ func (st *state) borrowVarFromIdent(id *ast.Ident) *types.Var {
 	return nil
 }
 
-func (st *state) extractBorrowFromSend(snd *ast.SendStmt) *types.Var {
-	if snd == nil {
-		return nil
+func (st *state) borrowFromExpr(expr ast.Expr) (*types.Var, string, string) {
+	if expr == nil {
+		return nil, "", ""
 	}
-	id := rootIdent(snd.Value)
-	return st.borrowVarFromIdent(id)
+	if id := rootIdent(expr); id != nil {
+		if vr := st.borrowVarFromIdent(id); vr != nil {
+			if kStr, isB := st.borrowKind(vr); isB {
+				return vr, vr.Name(), kStr
+			}
+		}
+	}
+	unwrapped := unparen(expr)
+	if call, ok := unwrapped.(*ast.CallExpr); ok && len(call.Args) > 0 {
+		if k := st.ix.BorrowAt(call.Pos()); k != annot.BorrowNone {
+			kStr := `\rob`
+			if k == annot.BorrowMut {
+				kStr = `\mub`
+			}
+			arg := unparen(call.Args[0])
+			if ue, ok := arg.(*ast.UnaryExpr); ok && ue.Op == token.AND {
+				arg = unparen(ue.X)
+			}
+			if id := rootIdent(arg); id != nil {
+				if v, ok := st.pass.TypesInfo.Uses[id].(*types.Var); ok && v != nil {
+					return v, id.Name, kStr
+				}
+				if v, ok := st.pass.TypesInfo.Defs[id].(*types.Var); ok && v != nil {
+					return v, id.Name, kStr
+				}
+			}
+		}
+	}
+	return nil, "", ""
+}
+
+func (st *state) extractBorrowFromSend(snd *ast.SendStmt) (*types.Var, string, string) {
+	if snd == nil {
+		return nil, "", ""
+	}
+	return st.borrowFromExpr(snd.Value)
 }
 
 func (st *state) borrowFromVal(v ssa.Value) (*types.Var, string, string) {
@@ -357,10 +425,8 @@ func (st *state) identifyBorrow(g *graph, t transfer) (*types.Var, string, strin
 		})
 
 		if matchedSend != nil {
-			if vr := st.extractBorrowFromSend(matchedSend); vr != nil {
-				if kStr, isB := st.borrowKind(vr); isB {
-					return vr, vr.Name(), kStr
-				}
+			if vr, name, kStr := st.extractBorrowFromSend(matchedSend); vr != nil {
+				return vr, name, kStr
 			}
 		}
 		return st.borrowFromVal(t.v)
@@ -384,10 +450,8 @@ func (st *state) identifyBorrow(g *graph, t transfer) (*types.Var, string, strin
 			return true
 		})
 		if targetSend != nil {
-			if vr := st.extractBorrowFromSend(targetSend); vr != nil {
-				if kStr, isB := st.borrowKind(vr); isB {
-					return vr, vr.Name(), kStr
-				}
+			if vr, name, kStr := st.extractBorrowFromSend(targetSend); vr != nil {
+				return vr, name, kStr
 			}
 		}
 		return st.borrowFromVal(t.v)
@@ -429,35 +493,62 @@ func (st *state) identifyBorrow(g *graph, t transfer) (*types.Var, string, strin
 					}
 				}
 				if targetArg != nil {
-					if id := rootIdent(targetArg); id != nil {
-						if vr := st.borrowVarFromIdent(id); vr != nil {
-							if kStr, isB := st.borrowKind(vr); isB {
-								return vr, vr.Name(), kStr
-							}
-						}
+					if vr, name, kStr := st.borrowFromExpr(targetArg); vr != nil {
+						return vr, name, kStr
 					}
 				}
 				return st.borrowFromVal(t.v)
 			} else if t.what == "receiver of a method started as a goroutine" {
 				if sel, ok := unparen(targetGo.Call.Fun).(*ast.SelectorExpr); ok {
-					if id := rootIdent(sel.X); id != nil {
-						if vr := st.borrowVarFromIdent(id); vr != nil {
-							if kStr, isB := st.borrowKind(vr); isB {
-								return vr, vr.Name(), kStr
-							}
-						}
+					if vr, name, kStr := st.borrowFromExpr(sel.X); vr != nil {
+						return vr, name, kStr
 					}
 				}
 				return st.borrowFromVal(t.v)
 			} else if t.what == "started as a goroutine" {
-				if id, ok := unparen(targetGo.Call.Fun).(*ast.Ident); ok {
-					if vr := st.borrowVarFromIdent(id); vr != nil {
-						if kStr, isB := st.borrowKind(vr); isB {
-							return vr, vr.Name(), kStr
-						}
-					}
+				if vr, name, kStr := st.borrowFromExpr(targetGo.Call.Fun); vr != nil {
+					return vr, name, kStr
 				}
 				return st.borrowFromVal(t.v)
+			}
+		}
+	}
+
+	// 4. Function/method call (cap.Move or owned //gocap:iso / cap.Iso parameter)
+	if callIns, ok := t.instr.(*ssa.Call); ok {
+		var targetCall *ast.CallExpr
+		ast.Inspect(syntax, func(n ast.Node) bool {
+			if n == nil || targetCall != nil {
+				return false
+			}
+			if ce, ok := n.(*ast.CallExpr); ok && (ce.Pos() == t.pos || ce.Lparen == t.pos || st.pass.Fset.Position(ce.Pos()).Line == targetLine) {
+				if st.ix.BorrowAt(ce.Pos()) == annot.BorrowNone {
+					targetCall = ce
+					return false
+				}
+			}
+			return true
+		})
+		if targetCall != nil {
+			var targetArg ast.Expr
+			cc := callIns.Common()
+			if !cc.IsInvoke() {
+				if sel, ok := unparen(targetCall.Fun).(*ast.SelectorExpr); ok && (cc.Method != nil || len(cc.Args) == len(targetCall.Args)+1) {
+					if t.index == 0 {
+						targetArg = sel.X
+					} else if t.index > 0 && t.index-1 < len(targetCall.Args) {
+						targetArg = targetCall.Args[t.index-1]
+					}
+				} else if t.index >= 0 && t.index < len(targetCall.Args) {
+					targetArg = targetCall.Args[t.index]
+				}
+			} else if t.index >= 0 && t.index < len(targetCall.Args) {
+				targetArg = targetCall.Args[t.index]
+			}
+			if targetArg != nil {
+				if vr, name, kStr := st.borrowFromExpr(targetArg); vr != nil {
+					return vr, name, kStr
+				}
 			}
 		}
 	}
@@ -504,14 +595,22 @@ func (st *state) findBorrowsInLit(fl *ast.FuncLit) []capturedBorrow {
 }
 
 func (st *state) identifyCapturedBorrows(g *graph, goIns *ssa.Go) []capturedBorrow {
-	syntax := g.fn.Syntax()
-	if syntax == nil {
+	sp, ok := spawnOf(goIns)
+	if !ok {
 		return nil
 	}
-	targetLine := st.pass.Fset.Position(goIns.Pos()).Line
+	return st.identifyCapturedBorrowsSpawn(g, sp)
+}
 
-	// 1. Try SSA resolution: if goIns.Common().Value resolves to MakeClosure
-	if mc := resolveClosureVal(goIns.Common().Value, 0); mc != nil {
+func (st *state) identifyCapturedBorrowsSpawn(g *graph, sp spawnSite) []capturedBorrow {
+	syntax := g.fn.Syntax()
+	if syntax == nil || sp.ins == nil {
+		return nil
+	}
+	targetLine := st.pass.Fset.Position(sp.ins.Pos()).Line
+
+	// 1. Try SSA resolution: if sp.fn resolves to MakeClosure
+	if mc := resolveClosureVal(sp.fn, 0); mc != nil {
 		if fn, ok := mc.Fn.(*ssa.Function); ok && fn != nil {
 			if fl, ok := fn.Syntax().(*ast.FuncLit); ok {
 				if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
@@ -534,28 +633,39 @@ func (st *state) identifyCapturedBorrows(g *graph, goIns *ssa.Go) []capturedBorr
 	}
 
 	ast.Inspect(syntax, func(n ast.Node) bool {
-		gs, ok := n.(*ast.GoStmt)
-		if !ok || st.pass.Fset.Position(gs.Pos()).Line != targetLine {
-			return true
-		}
-
-		// Case 2a: Direct FuncLit (go func() { ... }())
-		if fl, ok := unparen(gs.Call.Fun).(*ast.FuncLit); ok {
-			if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
-				addBorrows(borrows)
-				return false
+		switch node := n.(type) {
+		case *ast.GoStmt:
+			if st.pass.Fset.Position(node.Pos()).Line != targetLine {
+				return true
 			}
-		}
-
-		// Case 2b: Variable-bound closure (go fn())
-		if id, ok := unparen(gs.Call.Fun).(*ast.Ident); ok {
-			ast.Inspect(syntax, func(node ast.Node) bool {
-				switch stmt := node.(type) {
-				case *ast.AssignStmt:
-					for i, lhs := range stmt.Lhs {
-						if lid := rootIdent(lhs); lid != nil && lid.Name == id.Name {
-							if i < len(stmt.Rhs) {
-								if fl, ok := unparen(stmt.Rhs[i]).(*ast.FuncLit); ok {
+			// Case 2a: Direct FuncLit (go func() { ... }())
+			if fl, ok := unparen(node.Call.Fun).(*ast.FuncLit); ok {
+				if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
+					addBorrows(borrows)
+					return false
+				}
+			}
+			// Case 2b: Variable-bound closure (go fn())
+			if id, ok := unparen(node.Call.Fun).(*ast.Ident); ok {
+				ast.Inspect(syntax, func(sub ast.Node) bool {
+					switch stmt := sub.(type) {
+					case *ast.AssignStmt:
+						for i, lhs := range stmt.Lhs {
+							if lid := rootIdent(lhs); lid != nil && lid.Name == id.Name {
+								if i < len(stmt.Rhs) {
+									if fl, ok := unparen(stmt.Rhs[i]).(*ast.FuncLit); ok {
+										if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
+											addBorrows(borrows)
+											return false
+										}
+									}
+								}
+							}
+						}
+					case *ast.ValueSpec:
+						for i, name := range stmt.Names {
+							if name.Name == id.Name && i < len(stmt.Values) {
+								if fl, ok := unparen(stmt.Values[i]).(*ast.FuncLit); ok {
 									if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
 										addBorrows(borrows)
 										return false
@@ -564,25 +674,26 @@ func (st *state) identifyCapturedBorrows(g *graph, goIns *ssa.Go) []capturedBorr
 							}
 						}
 					}
-				case *ast.ValueSpec:
-					for i, name := range stmt.Names {
-						if name.Name == id.Name && i < len(stmt.Values) {
-							if fl, ok := unparen(stmt.Values[i]).(*ast.FuncLit); ok {
-								if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
-									addBorrows(borrows)
-									return false
-								}
-							}
-						}
+					return true
+				})
+				if len(foundBorrows) > 0 {
+					return false
+				}
+			}
+			return false
+		case *ast.CallExpr:
+			if st.pass.Fset.Position(node.Pos()).Line != targetLine {
+				return true
+			}
+			for _, arg := range node.Args {
+				if fl, ok := unparen(arg).(*ast.FuncLit); ok {
+					if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
+						addBorrows(borrows)
 					}
 				}
-				return true
-			})
-			if len(foundBorrows) > 0 {
-				return false
 			}
 		}
-		return false
+		return true
 	})
 
 	if len(foundBorrows) > 0 {

@@ -209,6 +209,15 @@ func (st *state) exportFacts(fns []*ssa.Function) {
 	if len(st.pass.Analyzer.FactTypes) == 0 {
 		return
 	}
+	var acq map[*ssa.Function][]acquire
+	if st.hasLockOps(fns) {
+		gs := &guardState{
+			releases: st.releaseSummaries(fns),
+			before:   map[*ssa.Function]map[ssa.Instruction]lockset{},
+			visiting: map[*ssa.Function]bool{},
+		}
+		acq = st.acquireSummaries(gs, fns)
+	}
 	for _, fn := range fns {
 		obj, ok := fn.Object().(*types.Func)
 		// Only exported functions can be called statically from another package; calls that reach an
@@ -231,9 +240,14 @@ func (st *state) exportFacts(fns []*ssa.Function) {
 			}
 		} else {
 			f.Leaks = append([]bool(nil), s.leakParam...)
+			f.Spawns = append([]bool(nil), s.spawnParam...)
 			f.Writes = append([]bool(nil), s.writeParam...)
 			f.Links = append([]Link(nil), s.links...)
 			f.Fresh = s.fresh
+			f.FreshResult = append([]bool(nil), s.freshResult...)
+			if acq != nil {
+				f.Acquires = append([]acquire(nil), acq[fn]...)
+			}
 		}
 		st.pass.ExportObjectFact(obj, f)
 	}
@@ -249,9 +263,17 @@ func (st *state) report(pos token.Pos, cat, msg string) {
 }
 
 // reportRelated reports a finding with related positions (the writes behind a declaration-site
-// SAFE006, say). Suppression and de-duplication go by the finding's own position.
+// SAFE006, say). Suppression goes by the finding's own position and rule. De-duplication does too for
+// a finding a transfer causes away from itself (a use after it, a handler's write): a use that several
+// transfers reach is one finding, reported for the first; the message names the transfer, so keying
+// on it would repeat the finding once per transfer. Any other finding is keyed on its message as
+// well, since distinct messages at one position are distinct defects (two borrows one go statement
+// captures; an address taken and a field written).
 func (st *state) reportRelated(pos token.Pos, cat, msg string, related []analysis.RelatedInformation) {
 	k := reportKey{pos, cat, msg}
+	if st.transferAt.IsValid() && pos != st.transferAt {
+		k.extra = ""
+	}
 	st.findings++
 	// A finding a transfer causes away from the transfer (a use after it, a handler's write) points
 	// back at it, so a reader, and a hatch, can find the transfer.

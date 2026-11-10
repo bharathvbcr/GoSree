@@ -38,3 +38,26 @@ func shareImm(ch chan *ServerConfig) string {
 	}()
 	return c.host // Clean Pass: immutable values can be read concurrently
 }
+
+// TC-T1-7.6: //safe:imm struct with mutable channel rejected (SAFE005)
+//
+//safe:imm
+type BadChanConfig struct { // want `SAFE005: //safe:imm type BadChanConfig is not immutable: field ch has type chan \*int`
+	ch chan *int
+}
+
+// TC-T1-7.7: //safe:imm struct with array of mutable channel rejected (SAFE005)
+//
+//safe:imm
+type BadArrayChanConfig struct { // want `SAFE005: //safe:imm type BadArrayChanConfig is not immutable: field chs has type \[2\]chan \*int`
+	chs [2]chan *int
+}
+
+// TC-T1-7.8: Mutating //safe:imm field via helper pointer call rejected (SAFE005)
+func writeIntPtr(p *int) {
+	*p = 8080
+}
+
+func mutateImmFieldViaCall(c *ServerConfig) {
+	writeIntPtr(&c.port) // want `SAFE005: write to a field of ServerConfig, which is //safe:imm; imm values are only written by their composite literal`
+}

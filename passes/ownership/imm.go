@@ -49,6 +49,41 @@ func (st *state) validateImm() {
 	}
 }
 
+func immNestedProblem(fieldPath string, fieldType, curType, rootNamed types.Type, cls *kinds.Classifier, seen map[types.Type]bool) string {
+	cur := types.Unalias(curType)
+	if seen[cur] {
+		return ""
+	}
+	if _, isNamed := cur.(*types.Named); isNamed && cur != rootNamed {
+		return ""
+	}
+	seen[cur] = true
+	switch u := cur.Underlying().(type) {
+	case *types.Chan:
+		if !cls.Shareable(u.Elem()) {
+			return fmt.Sprintf("field %s has type %s", fieldPath, fieldType)
+		}
+		if prob := immNestedProblem(fieldPath, fieldType, u.Elem(), rootNamed, cls, seen); prob != "" {
+			return prob
+		}
+	case *types.Array:
+		if prob := immNestedProblem(fieldPath, fieldType, u.Elem(), rootNamed, cls, seen); prob != "" {
+			return prob
+		}
+	case *types.Struct:
+		for sf := range u.Fields() {
+			subPath := fieldPath + "." + sf.Name()
+			if sf.Exported() {
+				return fmt.Sprintf("field %s is exported, so other packages could write it", subPath)
+			}
+			if prob := immNestedProblem(subPath, sf.Type(), sf.Type(), rootNamed, cls, seen); prob != "" {
+				return prob
+			}
+		}
+	}
+	return ""
+}
+
 func immShapeProblem(tn *types.TypeName, cls *kinds.Classifier, guarded map[*types.Var]*types.Var) string {
 	if _, isNamed := tn.Type().(*types.Named); !isNamed {
 		return "it must be a defined struct type"
@@ -63,6 +98,9 @@ func immShapeProblem(tn *types.TypeName, cls *kinds.Classifier, guarded map[*typ
 		}
 		if guarded[f.Origin()] != nil {
 			continue
+		}
+		if prob := immNestedProblem(f.Name(), f.Type(), f.Type(), tn.Type(), cls, map[types.Type]bool{}); prob != "" {
+			return prob
 		}
 		if !cls.Shareable(f.Type()) {
 			return fmt.Sprintf("field %s has type %s, which can hold shared mutable memory (imm fields may be pointer-free values, strings, pointers to imm types, or shared-by-design types)", f.Name(), f.Type())
@@ -111,9 +149,159 @@ func (st *state) checkImmStores(fn *ssa.Function) {
 			st.checkImmStore(ins)
 		case *ssa.Alloc:
 			st.checkImmAddr(ins)
+		case *ssa.FieldAddr:
+			st.checkImmFieldCall(ins)
+		default:
+			if w, ok := writeOf(ins); ok {
+				st.checkImmWrite(ins, w.addr)
+			}
 		}
 	})
 	st.checkImmBorrows(fn)
+}
+
+func (st *state) checkImmWrite(ins ssa.Instruction, addr ssa.Value) {
+	immType, x, firstPos := st.traceImmAddr(addr, map[ssa.Value]bool{})
+	if immType == nil {
+		return
+	}
+	if a, ok := x.(*ssa.Alloc); ok && a.Comment == "complit" && st.inComplit(a, firstPos) {
+		return
+	}
+	pos := ins.Pos()
+	if !pos.IsValid() {
+		pos = firstPos
+	}
+	prefix := st.immPrefixOf(immType)
+	st.report(pos, Imm, fmt.Sprintf("write to a field of %s, which is %s; imm values are only written by their composite literal", typeName(immType), prefix))
+}
+
+func (st *state) traceImmAddr(v ssa.Value, seen map[ssa.Value]bool) (types.Type, ssa.Value, token.Pos) {
+	var immType types.Type
+	x := v
+	firstPos := token.NoPos
+	for x != nil && !seen[x] && len(seen) < 64 {
+		seen[x] = true
+		switch a := x.(type) {
+		case *ssa.FieldAddr:
+			if _, guarded := st.guardedAt(a); guarded {
+				return nil, nil, token.NoPos // a guarded field is written under its mutex; SAFE009 checks it
+			}
+			if t := pointee(a.X.Type()); t != nil && st.isImmNamed(t) && immType == nil {
+				immType = t
+			}
+			if !firstPos.IsValid() {
+				firstPos = a.Pos()
+			}
+			x = a.X
+		case *ssa.IndexAddr:
+			if !firstPos.IsValid() {
+				firstPos = a.Pos()
+			}
+			x = a.X
+		case *ssa.Slice:
+			if !firstPos.IsValid() {
+				firstPos = a.Pos()
+			}
+			x = a.X
+		case *ssa.ChangeType:
+			x = a.X
+		case *ssa.Convert:
+			x = a.X
+		case *ssa.Phi:
+			for _, e := range a.Edges {
+				if it, root, fp := st.traceImmAddr(e, seen); it != nil {
+					if !firstPos.IsValid() {
+						firstPos = fp
+					}
+					return it, root, firstPos
+				}
+			}
+			return immType, x, firstPos
+		case *ssa.UnOp:
+			if a.Op == token.MUL && a.X != nil && a.X.Referrers() != nil {
+				for _, ref := range *a.X.Referrers() {
+					if store, ok := ref.(*ssa.Store); ok && store.Addr == a.X {
+						if it, root, fp := st.traceImmAddr(store.Val, seen); it != nil {
+							if !firstPos.IsValid() {
+								firstPos = fp
+							}
+							return it, root, firstPos
+						}
+					}
+				}
+			}
+			return immType, x, firstPos
+		default:
+			return immType, x, firstPos
+		}
+	}
+	return immType, x, firstPos
+}
+
+func (st *state) checkImmFieldCall(fa *ssa.FieldAddr) {
+	if _, guarded := st.guardedAt(fa); guarded {
+		return
+	}
+	if st.cls != nil && st.cls.Shareable(fa.Type()) {
+		return
+	}
+	immType := pointee(fa.X.Type())
+	if immType == nil || !st.isImmNamed(immType) {
+		return
+	}
+	if a, ok := fa.X.(*ssa.Alloc); ok && a.Comment == "complit" && st.inComplit(a, fa.Pos()) {
+		return
+	}
+	st.checkImmDerivedCalls(fa, immType, fa, map[ssa.Value]bool{})
+}
+
+func (st *state) checkImmDerivedCalls(fa *ssa.FieldAddr, immType types.Type, val ssa.Value, seen map[ssa.Value]bool) {
+	if val == nil || seen[val] || val.Referrers() == nil {
+		return
+	}
+	seen[val] = true
+	for _, ref := range *val.Referrers() {
+		switch r := ref.(type) {
+		case *ssa.FieldAddr, *ssa.IndexAddr, *ssa.Slice, *ssa.ChangeType, *ssa.Convert:
+			st.checkImmDerivedCalls(fa, immType, r.(ssa.Value), seen)
+		case *ssa.Call:
+			cc := r.Common()
+			if _, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
+				continue
+			}
+			callee := cc.StaticCallee()
+			if isCapBorrowHelper(callee) {
+				continue
+			}
+			for i, arg := range cc.Args {
+				if arg != val {
+					continue
+				}
+				if callee != nil && i < len(callee.Params) {
+					if vr, ok := callee.Params[i].Object().(*types.Var); ok {
+						if st.ix.IsRob(vr) {
+							continue
+						}
+						if st.ix.IsMub(vr) {
+							continue // checkImmBorrows reports this
+						}
+					}
+					if sum := st.sums[callee]; sum != nil && !sum.pessimistic {
+						if i < len(sum.writeParam) && !sum.writeParam[i] && i < len(sum.leakParam) && !sum.leakParam[i] {
+							continue
+						}
+					}
+				}
+				pos := r.Pos()
+				if !pos.IsValid() {
+					pos = fa.Pos()
+				}
+				prefix := st.immPrefixOf(immType)
+				st.report(pos, Imm, fmt.Sprintf("write to a field of %s, which is %s; imm values are only written by their composite literal", typeName(immType), prefix))
+			}
+		}
+	}
 }
 
 func (st *state) checkImmStore(s *ssa.Store) {
@@ -129,32 +317,7 @@ func (st *state) checkImmStore(s *ssa.Store) {
 		return
 	}
 	// Field or element store: walk back to the root, noting whether any step goes through imm memory.
-	var immType types.Type
-	x := s.Addr
-	firstPos := token.NoPos
-loop:
-	for {
-		switch a := x.(type) {
-		case *ssa.FieldAddr:
-			if _, guarded := st.guardedAt(a); guarded {
-				return // a guarded field is written under its mutex; SAFE009 checks it
-			}
-			if t := pointee(a.X.Type()); t != nil && st.isImmNamed(t) && immType == nil {
-				immType = t
-			}
-			if !firstPos.IsValid() {
-				firstPos = a.Pos()
-			}
-			x = a.X
-		case *ssa.IndexAddr:
-			if !firstPos.IsValid() {
-				firstPos = a.Pos()
-			}
-			x = a.X
-		default:
-			break loop
-		}
-	}
+	immType, x, firstPos := st.traceImmAddr(s.Addr, map[ssa.Value]bool{})
 	if immType == nil {
 		return
 	}

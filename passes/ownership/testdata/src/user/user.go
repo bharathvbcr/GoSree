@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"lib"
+	"sync"
 )
 
 func freshFromOtherPackage(ch chan *lib.Thing) {
@@ -76,4 +77,23 @@ func appendMove(ch chan []int) {
 	ch <- b
 	a = append(a, 2) // want `SAFE003: slice made here is used after it was sent on a channel`
 	_ = a
+}
+
+// Cross-package lock acquire summary (FuncFact.Acquires) and spawner summary (FuncFact.Spawns).
+func crossPackageLockAndSpawn() {
+	var mu sync.Mutex
+	x := 0 //safe:guarded_by mu
+	_ = x
+	go func() {
+		lib.LockMu(&mu)
+		x = 1
+		mu.Unlock()
+	}()
+	lib.LockMu(&mu)
+	x = 2
+	mu.Unlock()
+
+	t := lib.NewThing()
+	lib.Spawn(func() { _ = lib.Size(t) })
+	_ = lib.Size(t) // want `SAFE003: variable t is used after it was captured by a goroutine started by lib\.Spawn`
 }
