@@ -87,10 +87,12 @@ sequenceDiagram
     participant Sync as Local sync.WaitGroup
     participant Worker as Worker Goroutine
 
-    Parent->>Parent: item := &WorkItem{Data: 100} (\iso)
+    Parent->>Parent: item := new(WorkItem) (\iso)
     Parent->>Sync: wg.Add(1)
-    Parent->>Worker: go func() { item.Process(); wg.Done() }()
+    Parent->>Worker: spawn go func() capturing item
     Note over Parent: item is MOVED (Access here is SAFE003)
+    Worker->>Worker: item.Process()
+    Worker-->>Sync: wg.Done()
     Parent->>Sync: wg.Wait()
     Note over Parent,Sync: JOIN POINT REACHED: Worker finished and released item
     Note over Parent: Ownership of item RESTORED to Parent

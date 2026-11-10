@@ -166,7 +166,7 @@ Tracks memory crossing goroutine boundaries and enforces strict reference capabi
 ```mermaid
 stateDiagram-v2
     [*] --> Unowned: Parameter / Callee / Package Var
-    [*] --> Owned_Iso: Fresh Allocation (&T{}, make, new) / Channel Recv / //gocap:iso Param
+    [*] --> Owned_Iso: Fresh Allocation (new, make) / Channel Recv / //gosree:iso Param
 
     state Owned_Iso {
         [*] --> Active: Single Owner
@@ -177,7 +177,7 @@ stateDiagram-v2
     }
 
     state Deeply_Immutable_Imm {
-        [*] --> Frozen: Verified transitive pointer-free or //gocap:imm
+        [*] --> Frozen: Verified transitive pointer-free or //gosree:imm
         Frozen --> Shared: Free goroutine & channel sharing without lock
     }
 
@@ -256,10 +256,12 @@ sequenceDiagram
     participant Parent as Parent Goroutine
     participant Child as Spawned Goroutine (go func)
 
-    Parent->>Parent: x := &Job{} (Owner)
+    Parent->>Parent: x := new(Job) (Owner)
     Parent->>Parent: wg.Add(1)
-    Parent->>Child: go func() { ... x.Work() ... wg.Done() }()
+    Parent->>Child: spawn go func() capturing x
     Note over Parent: x is MOVED (SAFE003 if accessed here)
+    Child->>Child: x.Work()
+    Child-->>Parent: wg.Done()
     Parent->>Parent: wg.Wait() (JOIN POINT)
     Note over Parent: x OWNERSHIP RESTORED to Parent
     Parent->>Parent: use(x) (ACCEPTED - No SAFE003)

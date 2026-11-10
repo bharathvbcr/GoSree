@@ -370,8 +370,10 @@ sequenceDiagram
 
     Parent->>Parent: x := 0
     Parent->>Parent: wg.Add(1)
-    Parent->>Child: go func() { x = 1; wg.Done() }()
+    Parent->>Child: spawn go func() capturing x
     Note over Parent: x is MOVED (Access here is SAFE003)
+    Child->>Child: x = 1
+    Child-->>Parent: wg.Done()
     Parent->>Parent: wg.Wait() (JOIN POINT)
     Note over Parent: x OWNERSHIP RESTORED
     Parent->>Parent: use(x) (ACCEPTED - Valid access)
