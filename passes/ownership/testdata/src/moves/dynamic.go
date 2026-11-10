@@ -33,6 +33,21 @@ func boundMethodRetains() {
 	}()
 }
 
+// sendLater returns a closure that sends its capture when it runs.
+func sendLater(ch chan *Job, j *Job) func() {
+	return func() { ch <- j } // want `SAFE002: captured variable j is sent on a channel but is not owned here`
+}
+
+// A returned closure reaches the caller through sendLater's result, which is fresh and carries j:
+// starting it as a goroutine moves j with it, so the go statement is a clean transfer and the write
+// after it is a use after the move.
+func factoryResultIsOwned(ch chan *Job) {
+	j := &Job{}
+	f := sendLater(ch, j)
+	go f()
+	j.ID = 1 // want `SAFE003: composite literal is used after it was started as a goroutine`
+}
+
 // A closure that only reads its capture retains nothing, so passing it to run leaves j owned.
 func closureReadsThroughDynamicCall() {
 	j := &Job{}

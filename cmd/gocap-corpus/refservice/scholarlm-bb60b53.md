@@ -354,6 +354,13 @@ Prediction: 0 violations (ruling); under 5% of compared parameters (mine). Both 
   is a static call, a defer, a go statement or a spawner or iso argument. Tests in `moves/dynamic.go`
   fail on `3c9677c`.
 
+Narrowed when item 4 merged with main: a returned closure is no longer charged. It reaches the caller through
+the result, which main's fresh-result summaries link to the captures. Charging it made every closure
+factory (`http.StripPrefix`, `sync.OnceFunc`) leak its arguments: 14 false findings across main's
+stress fixtures, and `factoryResultIsOwned` in `moves/dynamic.go` fails without the narrowing. What a
+returned closure's body keeps when the caller calls it through a function value is still charged
+nowhere.
+
 Final: 409 compared, 0 unreviewed violations. Race corpus 229/36 and 229/42, unchanged. ScholarLM with
 the closure fix (the baseline for what follows): production 476 / 345 / 72.5% unchanged, 18 more muted
 findings at hatched transfers, no new remaining finding; `-tests` 1,798 / 1,020 flagged / 451 / 25.1%.

@@ -502,6 +502,13 @@ func (g *graph) closureUsedOnlyAtCallSites(mc *ssa.MakeClosure, v ssa.Value, dep
 			}
 		case *ssa.Go:
 			// The function a go statement starts, or an argument passed to it: a transfer either way.
+		case *ssa.Return:
+			// A returned closure reaches the caller through the result, which the summary links to
+			// the captures; charging an escape as well would make every closure factory
+			// (http.StripPrefix, sync.OnceFunc) leak its arguments and return a value that is not
+			// fresh. What the body keeps when the caller later calls it through a function value is
+			// not charged anywhere: the hole this function closes for arguments stays open for
+			// results.
 		case ssa.CallInstruction:
 			cc := r.Common()
 			if cc.Value == v && v == mc {
