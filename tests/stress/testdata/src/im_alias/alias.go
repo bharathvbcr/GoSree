@@ -57,11 +57,11 @@ func promotedInPlace(c *Config) {
 	c.in.hits++ // HIT(SAFE005)
 }
 
-// Attack: slicing an array field gives a []int whose element stores are not traced back
+// Attack: slicing an array field gives a []int whose element stores are traced back
 // (witness: im_w_slice).
 func sliceArray(c *Config) {
 	s := c.arr[:]
-	s[0] = 1 // MISS(SAFE005): c.arr[:] aliases imm memory; the IndexAddr's root is an ssa.Slice, which traceImmAddr does not follow
+	s[0] = 1 // HIT(SAFE005): c.arr[:] aliases imm memory
 }
 
 // Control: indexing the array field in place is caught.
@@ -71,7 +71,7 @@ func indexArray(c *Config) {
 
 // Attack: the builtin copy into a slice of the array field.
 func copyIntoArray(c *Config) {
-	copy(c.arr[:], []int{1, 2}) // MISS(SAFE005): copy writes the imm array through c.arr[:]; the field address reaches copy through a Slice, not as a direct call argument
+	copy(c.arr[:], []int{1, 2}) // HIT(SAFE005): copy writes the imm array through c.arr[:]
 }
 
 // Locked: atomic add on a field of an imm value.
@@ -79,10 +79,9 @@ func atomicAdd(c *Config) {
 	atomic.AddInt64(&c.n, 1) // HIT(SAFE005)
 }
 
-// Attack: a variadic ...any callee receives the field address boxed in an interface inside a
-// slice, so the FieldAddr is not a direct call argument.
+// Attack: a variadic ...any callee receives the field address boxed in an interface inside a slice.
 func sscan(c *Config) {
-	_, _ = fmt.Sscan("7", &c.port) // MISS(SAFE005): Sscan stores through &c.port; the address reaches the call via MakeInterface and a []any, which checkImmFieldCall does not follow
+	_, _ = fmt.Sscan("7", &c.port) // HIT(SAFE005): Sscan stores through &c.port
 }
 
 // Locked: whole-value overwrite of the embedded non-imm struct through its address.
@@ -92,19 +91,18 @@ func overwriteInner(c *Config) {
 
 func resetInner(i *inner) { *i = inner{} }
 
-// portAddr returns an interior pointer into an imm value: the FieldAddr's only referrer is the
-// Return, so nothing is reported here, and the caller's store is through a plain *int.
+// portAddr returns an interior pointer into an imm value.
 func (c *Config) portAddr() *int { return &c.port }
 
 // Attack: write through an interior pointer returned by an accessor (witness: im_w_accessor).
 func viaAccessor(c *Config) {
-	*c.portAddr() = 9 // MISS(SAFE005): writes c.port through the *int that portAddr returned
+	*c.portAddr() = 9 // HIT(SAFE005): writes c.port through the *int that portAddr returned
 }
 
 // Attack: the field address is parked in a slice before reaching the helper.
 func viaSlot(c *Config) {
 	ps := []*int{&c.port}
-	setInt(ps[0], 3) // MISS(SAFE005): &c.port reaches setInt through a slice element, so it is not a direct call argument
+	setInt(ps[0], 3) // HIT(SAFE005): &c.port reaches setInt through a slice element
 }
 
 // Control: overwriting the embedded struct in place is caught.

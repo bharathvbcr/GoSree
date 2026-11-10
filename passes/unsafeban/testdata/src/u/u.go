@@ -29,6 +29,27 @@ func viaReflect(v reflect.Value) {
 	_ = reflect.Copy(v, v) // want `SAFE001: reflect.Copy writes or exposes memory through reflection`
 	newAt := reflect.NewAt // want `SAFE001: reflect.NewAt writes or exposes memory through reflection`
 	_ = newAt
+	swap := reflect.Swapper([]int{1, 2}) // want `SAFE001: reflect.Swapper writes or exposes memory through reflection`
+	_ = swap
+}
+
+type intSetter interface {
+	SetInt(int64)
+	Pointer() uintptr
+}
+
+func viaReflectIface(v reflect.Value) {
+	var s intSetter = v
+	s.SetInt(1)      // want `SAFE001: reflect.Value.SetInt writes or exposes memory through reflection`
+	_ = s.Pointer()  // want `SAFE001: reflect.Value.Pointer writes or exposes memory through reflection`
+	fn := s.SetInt   // want `SAFE001: reflect.Value.SetInt writes or exposes memory through reflection`
+	fn(2)
+	v.Send(v)        // want `SAFE001: reflect.Value.Send writes or exposes memory through reflection`
+	_ = v.TrySend(v) // want `SAFE001: reflect.Value.TrySend writes or exposes memory through reflection`
+}
+
+func viaReflectConstraint[T interface{ SetInt(int64) }](t T) {
+	t.SetInt(1) // want `SAFE001: reflect.Value.SetInt writes or exposes memory through reflection`
 }
 
 func statementHatch(p *int) {

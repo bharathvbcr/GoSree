@@ -12,13 +12,13 @@
 [![Runtime Overhead](https://img.shields.io/badge/runtime%20overhead-0%20bytes%20%2F%200%20instrs-2ea44f?style=flat-square)](docs/TOOLING_AND_ERASURE.md)
 [![Go Race Corpus](https://img.shields.io/badge/race%20corpus%20recall-229%2F234%20(97.9%25)-00ADD8?style=flat-square)](#measured-on-the-go-race-detectors-corpus)
 
-[Quick Start](#quick-start) · [Capabilities](#capability--directive-overview) · [Rules (`SAFE` / `BORROW` / `CAP`)](#rules--diagnostics) · [How It Works](#how-it-works) · [Fork-Join](#fork-join) · [Race Corpus](#measured-on-the-go-race-detectors-corpus) · [Docs](docs/)
+[Quick Start](#quick-start) · [Capabilities](#capability--directive-overview) · [Rules (`SAFE` / `BORROW` / `CAP` / `ERR`)](#rules--diagnostics) · [How It Works](#how-it-works) · [Fork-Join](#fork-join) · [Race Corpus](#measured-on-the-go-race-detectors-corpus) · [Docs](docs/)
 
 </div>
 
 ---
 
-**GoSree** (`gosree`, formerly `gocap`) is a suite of static analysis passes built on `golang.org/x/tools/go/analysis` and `golang.org/x/tools/go/ssa` that brings Rust-style memory safety, reference capabilities (`\iso`, `\imm`, `\mub`, `\rob`), mutex lockset verification (`guarded_by`, `holds`), and second-class borrow checking with Non-Lexical Lifetimes (NLL) to the places where Go programs share memory between goroutines.
+**GoSree** (`gosree`, formerly `gocap`) is a suite of static analysis passes built on `golang.org/x/tools/go/analysis` and `golang.org/x/tools/go/ssa`—paired with an in-process **Rust CFG/SSA monotone fixpoint engine** (`rust/gosree-errsolve`) hosted via **Gusset** (`internal/gusseterr`)—that brings Rust-style memory safety, reference capabilities (`\iso`, `\imm`, `\mub`, `\rob`), mutex lockset verification (`guarded_by`, `holds`), second-class borrow checking with Non-Lexical Lifetimes (NLL), and `Result<T, E>` error-handling discipline (`ERR001`–`ERR005`) to ordinary Go.
 
 > **Why *GoSree*?**  
 > In Sanskrit, **श्री (*śrī*)**—from the verbal root **श्रि (*śri*)**—means *"that on which something safely rests, a foundation or refuge, order and harmony."* In English, **SREE** stands for **S**tatic **R**ace & **E**scape **E**nforcer (and **S**econd-class **R**eferences & **E**xclusive **E**rasure).
@@ -59,6 +59,7 @@ flowchart TD
         UnsafeBan["Unsafe Ban Pass\n(passes/unsafeban)\nSAFE001"]
         Borrow["Second-Class Borrow Checker\n(passes/borrow)\nBORROW001 - BORROW004"]
         Ownership["Ownership & Capabilities Pass\n(passes/ownership)\nSAFE002 - SAFE009, CAP003"]
+        Errcheck["Error-Discipline Pass (safeerr)\n(passes/errcheck)\nERR001 - ERR005"]
     end
 
     subgraph Engines ["Core Analysis Engines"]
@@ -67,10 +68,12 @@ flowchart TD
         Locksets["Forward Must-Lockset\n(passes/ownership/lockset.go)"]
         ForkJoin["Fork-Join Synchronization\n(passes/ownership/forkjoin.go)"]
         ImmValidator["Deep Immutability Validator\n(passes/ownership/imm.go)"]
+        Wire["Wire frame\n(internal/gusseterr/wire.go)"]
+        Solver["Rust solver via Gusset (cgo)\nor pure-Go oracle (no cgo)\n(rust/gosree-errsolve, internal/gusseterr)"]
     end
 
     subgraph Output ["Drivers & Toolchain Integration"]
-        Driver["cmd/gosree & cmd/gocap (multichecker)"]
+        Driver["cmd/gosree & cmd/gocap (multichecker)\ncmd/gocap adds a flag/exit-code preflight"]
         Vet["go vet -vettool=build/gosree ./..."]
         Eraser["cmd/gocap-erase (AST Rewriter)"]
     end
@@ -83,6 +86,10 @@ flowchart TD
     SSA --> Borrow
     SSA --> Ownership
     Parser --> UnsafeBan
+    Annot --> Errcheck
+    SSA --> Errcheck
+    Errcheck --> Wire
+    Wire --> Solver
 
     Borrow --> NLL
     Ownership --> Steensgaard
@@ -93,18 +100,42 @@ flowchart TD
     UnsafeBan --> Driver
     Borrow --> Driver
     Ownership --> Driver
+    Errcheck --> Driver
     Driver --> Vet
     Src --> Eraser
 ```
+
+### Analyzers
+
+`cmd/gosree` and `cmd/gocap` register the same five analyzers, in this order ([`cmd/gosree/main.go`](cmd/gosree/main.go), [`cmd/gocap/main.go`](cmd/gocap/main.go)):
+
+| Analyzer (`-NAME` flag) | Package | Rules |
+|---|---|---|
+| `safeannot` | [`internal/annot`](internal/annot/annot.go) | Directive parsing; `SAFE007` |
+| `safeunsafe` | [`passes/unsafeban`](passes/unsafeban/unsafeban.go) | `SAFE001` |
+| `safeownership` | [`passes/ownership`](passes/ownership/ownership.go) | `SAFE002`–`SAFE006`, `SAFE008`, `SAFE009`, `CAP003` |
+| `borrow` | [`passes/borrow`](passes/borrow/borrow.go) | `BORROW001`–`BORROW004` |
+| `safeerr` | [`passes/errcheck`](passes/errcheck/errcheck.go) | `ERR001`–`ERR005` |
+
+A sixth analyzer, `safestale` ([`internal/annot/stale`](internal/annot/stale/stale.go)), requires the five above and reports escape hatches that mute nothing. Neither driver registers it; only its own test runs it.
 
 ---
 
 ## Quick Start
 
 ### 1. Build the Analyzer
+
+The error-discipline pass (`safeerr`) solves its dataflow lattice in a Rust engine linked in-process through [Gusset](https://github.com/bharathvbcr/gusset). With cgo on a unix target, build the Rust archive first:
+
 ```bash
+# Prerequisites: a Rust toolchain, and the gusset checkout as a sibling directory (../gusset)
+(cd rust && cargo build --release)     # produces rust/target/release/libgusset.a (gitignored)
 go build -o build/gosree ./cmd/gosree
 ```
+
+- **Sibling checkout:** `go.mod` has `replace github.com/bharathvbcr/gusset => ../gusset`, and `rust/gusset-engine` depends on `../../../gusset/crates/gusset` by path, so gusset must sit next to this repository.
+- **Skipping `cargo build` fails at link time:** the cgo directive in [`internal/gusseterr/engine_unix.go`](internal/gusseterr/engine_unix.go) adds `-L rust/target/release` and expects the symbol `gosree_gusset_init`. Without that archive `go build ./cmd/gosree` ends with `Undefined symbols ... _gosree_gusset_init`.
+- **Without cgo (`CGO_ENABLED=0`) or on a non-unix target** no Rust is needed: [`engine_other.go`](internal/gusseterr/engine_other.go) solves with the pure-Go reference oracle ([`oracle.go`](internal/gusseterr/oracle.go)), which produces the same results bit for bit. Findings are the same; only speed and heap use differ. `errcheck.Summary.UsedRustGusset` reports which engine ran.
 
 ### 2. Run Verification via `go vet` (or Standalone)
 ```bash
@@ -117,17 +148,34 @@ go vet -vettool=$(pwd)/build/gosree ./...
 
 ### 3. Run the Verification Suites
 ```bash
-# Run all unit and analysis pass tests
+# Run all unit and analysis pass tests (needs the Rust archive from step 1 when cgo is on).
+# One known failure: passes/ownership TestEscapeOracleNoFreshOrWritesOracle.
 go test ./...
 
-# Run the dual-track 4-tier E2E acceptance test suite (96 test cases across AC1-AC7)
+# Run the dual-track 4-tier E2E acceptance test suite (12 top-level Go tests in tests/e2e)
 bash tests/run_acceptance_tests.sh
 
 # Run the adversarial stress & runtime witness suite
 go test ./tests/stress
 ```
 
-### 4. Optional: AST Erasure Tool (`cmd/gocap-erase`)
+### 4. `cmd/gocap`: exit codes and refused flags
+
+`cmd/gocap` runs the same analyzers as `cmd/gosree`, behind a command-line preflight ([`cmd/gocap/preflight.go`](cmd/gocap/preflight.go)) so that a CI gate cannot pass by accident. `cmd/gosree` is the plain multichecker without it.
+
+| Exit | Meaning |
+|---|---|
+| `0` | Every package loaded, type-checked and analysed, and nothing was reported |
+| `1` | A package could not be loaded or type-checked, or an analyzer failed: no verdict |
+| `2` | Usage error: an unsupported flag, or one refused because it would change the verdict |
+| `3` | Every package was analysed and at least one finding was reported |
+
+- **`-fix` and `-diff` are refused (exit 2).** GoSree offers no suggested fixes, and the driver exits 0 and prints nothing in those modes.
+- **`-tags a,b` is forwarded to the `go` command** through `GOFLAGS`, because the driver itself accepts and ignores it. The list must be comma-separated.
+- **`-json`**: the driver exits 0 even with findings, so `gocap` re-runs it as a child process and derives the exit code from the JSON. A failed analysis outranks findings.
+- **Warnings on stderr** when a flag makes a run cover less: `-test=false` (test files are not analysed), and `-NAME=false` or `-NAME` for an analyzer, which switches other passes off (exit 0 then does not mean those rules were checked).
+
+### 5. Optional: AST Erasure Tool (`cmd/gocap-erase`)
 Strip generic marker types (`cap.Mut[T]` → `*T`), helper intrinsics (`cap.BorrowMut(x)` → `x`), directive comments (`//gosree:`, `//sree:`, `//gocap:`, `//safe:`), and `cap` imports into dependency-free Go source:
 ```bash
 go build -o build/gosree-erase ./cmd/gocap-erase
@@ -142,11 +190,12 @@ build/gosree-erase -w ./...   # rewrite files in place atomically
 Comprehensive guides, specifications, and reference manuals are located in [`docs/`](docs/):
 
 - 📘 **[Architecture & Subsystem Design](docs/ARCHITECTURE.md)**: Deep dive into the static analysis pipeline, Steensgaard alias graph with pointer depths, SSA CFG traversal, and module interactions.
-- 📋 **[Rules & Diagnostics Reference](docs/RULES.md)**: Complete catalog of all diagnostic codes (`SAFE001`–`SAFE009`, `BORROW001`–`BORROW004`, `CAP003`) with failing/passing examples and remediation patterns.
+- 📋 **[Rules & Diagnostics Reference](docs/RULES.md)**: Complete catalog of all diagnostic codes (`SAFE001`–`SAFE009`, `BORROW001`–`BORROW004`, `CAP003`, `ERR001`–`ERR005`) with failing/passing examples and remediation patterns.
 - 🏷️ **[Directives & Capability Markers](docs/DIRECTIVES.md)**: Specification for comment directives (`//gosree:...`, `//sree:...`, `//gocap:...`, `//safe:...`), attachment rules, and `cap.*` marker types.
 - ⏳ **[Second-Class Borrows & Non-Lexical Lifetimes (NLL)](docs/BORROW_CHECKING_AND_NLL.md)**: How second-class borrows avoid Rust's explicit lifetime parameters (`'a`), storage constraints, and flow-sensitive SSA conflict resolution.
 - 🔀 **[Concurrency Model & Goroutine Boundaries](docs/CONCURRENCY_MODEL.md)**: Goroutine boundary invariants, spawner taxonomy, fork-join join points, HTTP handler self-races, and mutex locksets.
 - 🛠️ **[Tooling, Erasure & Verification Guide](docs/TOOLING_AND_ERASURE.md)**: User guide for `cmd/gosree` (`cmd/gocap`), `cmd/gocap-erase`, `cmd/gocap-corpus`, and the 4-tier acceptance test suite.
+- 🦀 **[Error Discipline (`safeerr`, `ERR001`–`ERR005`)](docs/ERROR_DISCIPLINE.md)**: The `passes/errcheck` pass, its binary wire format, the Rust solver hosted through Gusset, and the pure-Go reference oracle.
 - 🗺️ **[Roadmap & Abandon Criterion](docs/ROADMAP.md)**: Build order with each item's prediction and measured result, and the hatch-ratio criterion for abandoning the project.
 - 🧪 **[Adversarial Stress Suite & Findings](tests/stress/FINDINGS.md)**: Locked regression hits, runtime race/panic witnesses, scale bounds, and distance-to-Rust ledger.
 
@@ -161,15 +210,20 @@ Comprehensive guides, specifications, and reference manuals are located in [`doc
 | [**SAFE003**](docs/RULES.md#safe003-use-after-move) | `passes/ownership` | A value is used after it was moved; `SAFE003-forkjoin` category marks uses reached only after a channel receive, `select`, `WaitGroup.Wait` or `Lock` that is not a [join](docs/CONCURRENCY_MODEL.md#3-fork-join-synchronization-recovery) for that move |
 | [**SAFE004**](docs/RULES.md#safe004-moved-value-escapes-elsewhere) | `passes/ownership` | A moved value also escapes elsewhere (stored in a package variable, kept by a callee, returned) |
 | [**SAFE005**](docs/RULES.md#safe005-deep-immutability-violation) | `passes/ownership` | A `//gosree:imm` / `//safe:imm` type is malformed, or is written after its composite literal |
-| [**SAFE006**](docs/RULES.md#safe006-unguarded-package-variable-mutation) | `passes/ownership` | A package variable is written outside initialisation and is not `//safe:guarded_by`; reported once at the declaration, with each write as a related position |
+| [**SAFE006**](docs/RULES.md#safe006-package-global-mutation) | `passes/ownership` | A package variable is written outside initialisation and is not `//safe:guarded_by`; reported once at the declaration, with each write as a related position |
 | [**SAFE007**](docs/RULES.md#safe007-malformed-directive) | `internal/annot` | A malformed `//gosree:`, `//sree:`, `//gocap:`, or `//safe:` directive |
 | [**SAFE008**](docs/RULES.md#safe008-self-racing-handler-writes) | `passes/ownership` | A handler (a callback that runs concurrently with itself) writes memory it shares with its other invocations: what it captured, or its receiver |
-| [**SAFE009**](docs/RULES.md#safe009-mutex-lockset-violation) | `passes/ownership` | `//safe:guarded_by` memory is accessed without its mutex held, a `//safe:holds` function is called without it, or a value read from guarded memory leaves the lock |
-| [**BORROW001**](docs/RULES.md#borrow001-storage-of-second-class-borrow) | `passes/borrow` | Second-class borrow stored in struct field or package global variable (transient stack structs excepted) |
+| [**SAFE009**](docs/RULES.md#safe009-guarded-memory-access-violation) | `passes/ownership` | `//safe:guarded_by` memory is accessed without its mutex held, a `//safe:holds` function is called without it, or a value read from guarded memory leaves the lock |
+| [**BORROW001**](docs/RULES.md#borrow001-second-class-borrow-storage-violation) | `passes/borrow` | Second-class borrow stored in struct field or package global variable (transient stack structs excepted) |
 | [**BORROW002**](docs/RULES.md#borrow002-conflicting-borrows) | `passes/borrow` | Conflicting simultaneous mutable borrows or mutable-immutable aliasing (NLL flow-sensitive) |
 | [**BORROW003**](docs/RULES.md#borrow003-owner-mutation-during-active-borrow) | `passes/borrow` | Owner variable mutated or moved while an active second-class borrow exists |
-| [**BORROW004**](docs/RULES.md#borrow004-dangling-local-stack-reference-return) | `passes/borrow` | Function returns reference or pointer to local stack-allocated variable |
-| [**CAP003**](docs/RULES.md#cap003-stack-borrow-escapes-to-concurrency-boundary) | `passes/ownership` | Stack-scoped borrow (`\mub` or `\rob`) crosses goroutine boundary via channel send, `go` closure capture, or `go` argument |
+| [**BORROW004**](docs/RULES.md#borrow004-dangling-stack-reference-return) | `passes/borrow` | Function returns reference or pointer to local stack-allocated variable |
+| [**CAP003**](docs/RULES.md#cap003-stack-scoped-borrow-concurrency-escape) | `passes/ownership` | Stack-scoped borrow (`\mub` or `\rob`) crosses goroutine boundary via channel send, `go` closure capture, or `go` argument |
+| [**ERR001**](docs/RULES.md#err001-must-use-error-return-discarded) | `passes/errcheck` + `rust/gosree-errsolve` | Error return silently discarded as statement, `go`, or `defer` (`#[must_use]` discipline) |
+| [**ERR002**](docs/RULES.md#err002-unchecked-companion-result-unwrap) | `passes/errcheck` + `rust/gosree-errsolve` | `(T, error)` companion value used after `_` discard or before proving `err == nil` |
+| [**ERR003**](docs/RULES.md#err003-shadowed-overwritten-or-inverted-error) | `passes/errcheck` + `rust/gosree-errsolve` | Error lost via inner `err :=` shadow, unread overwrite, or `if err != nil { return nil }` |
+| [**ERR004**](docs/RULES.md#err004-typed-nil-concrete-error-interface-boxing) | `passes/errcheck` + `rust/gosree-errsolve` | Concrete `*T` error pointer that may be `nil` boxed into an `error` interface |
+| [**ERR005**](docs/RULES.md#err005-writable-resource-close-error-discarded) | `passes/errcheck` + `rust/gosree-errsolve` | `Close()` / `defer f.Close()` on writable or written resource discards flush error |
 
 ---
 
@@ -216,7 +270,7 @@ func SequentialBorrows() {
 
 In a garbage-collected Go program, use-after-free and out-of-bounds access cannot happen unless memory is corrupted by a **data race**: a torn write to a two-word interface or slice header can pair a type with the wrong pointer. So GoSree checks ownership where a value crosses to another goroutine: a `go` statement (its arguments and the closure it starts), a callback handed to a function that runs it on another goroutine (`time.AfterFunc`, `context.AfterFunc`, `sync.WaitGroup.Go`, `errgroup.Group.Go`/`TryGo`, `net/http` handler registration, or any function whose `FuncFact.Spawns` summary marks a callback parameter as spawned), a channel send, and an argument for a `//gosree:iso` / `//safe:iso` parameter. A closure's captured variables cross only when the closure itself does. Inside one goroutine, ordinary Go aliasing is left alone (unless opted into second-class borrows).
 
-The standard-library callback functions are a curated table in [`passes/ownership/spawn.go`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/spawn.go), an assumption about each callee like the type overrides. A function that runs its callback before returning (`sync.Once.Do`, `testing.T.Run` without `Parallel`, `slices.SortFunc`) is an ordinary call. An HTTP handler runs on every request's goroutine, concurrently with itself, so it never owns what it captured (moving a capture on is `SAFE002`), never hands anything back, and must not write memory it shares with its other invocations (`SAFE008`).
+The standard-library callback functions are a curated table in [`passes/ownership/spawn.go`](passes/ownership/spawn.go), an assumption about each callee like the type overrides. A function that runs its callback before returning (`sync.Once.Do`, `testing.T.Run` without `Parallel`, `slices.SortFunc`) is an ordinary call. An HTTP handler runs on every request's goroutine, concurrently with itself, so it never owns what it captured (moving a capture on is `SAFE002`), never hands anything back, and must not write memory it shares with its other invocations (`SAFE008`).
 
 ```mermaid
 stateDiagram-v2
@@ -341,9 +395,9 @@ A `//safe:unsafe` (or `//gosree:unsafe`) on a transfer (a `go` statement, a send
 
 An owned value is one that starts as a fresh allocation (`&T{}`, `new`, `make`), a value received from a channel, a `//safe:iso` parameter, or the result of a function whose summary says it returns fresh memory. It stays owned while nothing outside its own object graph points into it.
 
-Shareable without ownership: pointer-free values, strings, channels, verified imm types and pointers to them, and a curated override table (`sync` and `sync/atomic` types, `*testing.T`, `context.Context`, `context.CancelFunc`, `error`, `time.Time`, `*regexp.Regexp`, `*log.Logger`, `*slog.Logger`, `net.Listener`, ...). Each override is an **assumption, not a proof**; see [`internal/kinds/kinds.go`](file:///Users/bharath/Code/devtools/gocap/internal/kinds/kinds.go). The `error` entry is the weakest one: it rests on the convention that errors are not mutated after creation.
+Shareable without ownership: pointer-free values, strings, channels, verified imm types and pointers to them, and a curated override table (`sync` and `sync/atomic` types, `*testing.T`, `context.Context`, `context.CancelFunc`, `error`, `time.Time`, `*regexp.Regexp`, `*log.Logger`, `*slog.Logger`, `net.Listener`, ...). Each override is an **assumption, not a proof**; see [`internal/kinds/kinds.go`](internal/kinds/kinds.go). The `error` entry is the weakest one: it rests on the convention that errors are not mutated after creation.
 
-A second table, [`internal/kinds/funcs.go`](file:///Users/bharath/Code/devtools/gocap/internal/kinds/funcs.go), replaces the summary of a function of another package with an assumption, keyed by `types.Func.FullName`. It holds four entries, each saying its result is fresh: `context.WithCancel` and `context.WithTimeout` (a `CancelFunc` is documented safe to call from any goroutine), `io.ReadAll` and `encoding/json.Marshal`. An entry states every flag and asserts only what its reason supports, so these keep their arguments leaked and written. The call tables (spawners, lock operations, function overrides) are checked by one resolver: when GoSree analyses the package an entry belongs to, the entry must name a function of it with matching arity, or the analysis fails. `TestCallTablesResolve` runs the same check on the current toolchain for every package but `golang.org/x/sync/errgroup`, which this module does not depend on; its entries are checked only when GoSree analyses a program that imports it. `TestOverrideBudget` fails once type overrides, function overrides and spawners together exceed 100 entries; today they hold 42 (29 + 4 + 9). Lock operations and `sync/atomic` define what a lock or a synchronised write is, rather than vouching for a callee, so they are not counted.
+A second table, [`internal/kinds/funcs.go`](internal/kinds/funcs.go), replaces the summary of a function of another package with an assumption, keyed by `types.Func.FullName`. It holds four entries, each saying its result is fresh: `context.WithCancel` and `context.WithTimeout` (a `CancelFunc` is documented safe to call from any goroutine), `io.ReadAll` and `encoding/json.Marshal`. An entry states every flag and asserts only what its reason supports, so these keep their arguments leaked and written. The call tables (spawners, lock operations, function overrides) are checked by one resolver: when GoSree analyses the package an entry belongs to, the entry must name a function of it with matching arity, or the analysis fails. `TestCallTablesResolve` runs the same check on the current toolchain for every package but `golang.org/x/sync/errgroup`, which this module does not depend on; its entries are checked only when GoSree analyses a program that imports it. `TestOverrideBudget` fails once type overrides, function overrides and spawners together exceed 100 entries; today they hold 42 (29 + 4 + 9). Lock operations and `sync/atomic` define what a lock or a synchronised write is, rather than vouching for a callee, so they are not counted.
 
 ---
 
@@ -353,15 +407,16 @@ A second table, [`internal/kinds/funcs.go`](file:///Users/bharath/Code/devtools/
 - **Summaries:** each function gets a summary saying which arguments it may retain or share, which it may write, which arguments and results it links, whether it returns fresh memory, which locks it acquires, and which callback parameters it spawns. Summaries are computed to a greatest fixpoint within a package and exported as analysis facts (`FuncFact`) for exported functions, so they cross package boundaries. That includes the standard library: `(*bytes.Buffer).WriteString` is shown not to retain its receiver. Functions without bodies, interface calls, dynamic calls and wrappers are treated as retaining and writing everything.
   - **Writes:** an argument is written when a write lies on its forward pointee chain: the memory it points to, and what that points to. Containers that point into it do not count, so `fmt.Println(p)`, which puts `p` in a variadic slice, does not write `p`. A write to guarded memory is left to `SAFE009`.
   - **Links:** a function that joins two arguments' memory (`root.Add(child)`) or returns memory of one (`root.First()`) links them instead of leaking them. The caller joins the same memory, at the pointer depth where the callee joined it, so two owned arguments stay owned as one region, and a foreign one makes the other foreign. A copy (`cp := *c; return &cp`) is linked one pointer down, so writing the copy is not writing `c`.
-- **Change from the design advice:** the original plan took standard-library escape information from the compiler (`go build -gcflags=-m`). The MVP uses the same summary facts for every package instead, which gives one mechanism and no parsing of compiler output. An escape oracle test in [`passes/ownership/escape_oracle_test.go`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/escape_oracle_test.go) checks summary alignment against `-gcflags=-m`.
+- **Error-discipline lattice (`passes/errcheck` + `rust/gosree-errsolve` via Gusset):** `safeerr` lowers package SSA CFGs into a compact binary wire frame and solves a product of five monotone lattices (`Origin`, `NilVal`, `ErrVar`, `Writable`, `ErrLink`; see [docs/ERROR_DISCIPLINE.md](docs/ERROR_DISCIPLINE.md#23-what-the-solver-tracks)) + intra-package concrete-error callgraph fixpoint in Rust (`#![forbid(unsafe_code)]` inside `rust/gosree-errsolve`, linked into Go via `rust/gusset-engine` and `github.com/bharathvbcr/gusset` with panic-firewall isolation, `Counting<System>` Rust heap telemetry, and a bit-exact pure-Go reference oracle in `internal/gusseterr`). On 200-function cyclic packages (`BenchmarkSolvePackageAB`), the in-process Rust/Gusset solver runs in **1.140 ms** vs **2.867 ms** for the pure-Go oracle (**2.51× faster**, **266× less Go heap**: `18.8 KB` / `8 allocs` vs `4.99 MB` / `72,624 allocs`).
+- **Change from the design advice:** the original plan took standard-library escape information from the compiler (`go build -gcflags=-m`). The MVP uses the same summary facts for every package instead, which gives one mechanism and no parsing of compiler output. An escape oracle test in [`passes/ownership/escape_oracle_test.go`](passes/ownership/escape_oracle_test.go) checks summary alignment against `-gcflags=-m`.
 
-The only direct external dependency is `golang.org/x/tools`.
+External dependencies are `golang.org/x/tools` and `github.com/bharathvbcr/gusset` (in-process Go↔Rust bridge).
 
 ---
 
 ## Fork-join
 
-A goroutine can hand back what it was given. A move made by `go F(...)` ends at a **join**: a parent instruction after which `F` provably no longer touches the moved memory. A use the parent reaches only through joins is not a use after the move ([`passes/ownership/forkjoin.go`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/forkjoin.go)).
+A goroutine can hand back what it was given. A move made by `go F(...)` ends at a **join**: a parent instruction after which `F` provably no longer touches the moved memory. A use the parent reaches only through joins is not a use after the move ([`passes/ownership/forkjoin.go`](passes/ownership/forkjoin.go)).
 
 ```mermaid
 sequenceDiagram
@@ -418,7 +473,7 @@ Two assumptions remain. The memory-model facts above are taken from the Go speci
 
 ## Measured on the Go race detector's corpus
 
-`go run ./cmd/gocap-corpus -out build` copies `$GOROOT/src/runtime/race/testdata` into `build/` (never committed), runs the analyzer unannotated, and writes `build/corpus-report.json`. It then scores a second copy carrying the `//safe:guarded_by` directives listed in [`annotations.go`](file:///Users/bharath/Code/devtools/gocap/cmd/gocap-corpus/annotations.go) and writes `build/corpus-report-annotated.json` ([below](#the-annotated-copy)). A test function counts as flagged if the analyzer reports anything in it or in a same-package function it calls. A finding also counts where its related positions are, so a declaration-site `SAFE006` counts for the functions whose writes make the variable mutable.
+`go run ./cmd/gocap-corpus -out build` copies `$GOROOT/src/runtime/race/testdata` into `build/` (never committed), runs the analyzer unannotated, and writes `build/corpus-report.json`. It then scores a second copy carrying the `//safe:guarded_by` directives listed in [`annotations.go`](cmd/gocap-corpus/annotations.go) and writes `build/corpus-report-annotated.json` ([below](#the-annotated-copy)). A test function counts as flagged if the analyzer reports anything in it or in a same-package function it calls. A finding also counts where its related positions are, so a declaration-site `SAFE006` counts for the functions whose writes make the variable mutable.
 
 go1.27.3, 22 of 24 files. Skipped: `cgo_test.go` imports `internal/testenv` and `synctest_test.go` imports `internal/synctest`; neither can build outside GOROOT.
 
@@ -536,7 +591,7 @@ go run ./cmd/gocap-corpus -git ~/src/repo -rev <sha> -subdir backend/svc \
 
 ### 1. Acceptance Test Suite (Dual-Track 4-Tier Suite)
 ```bash
-# Run all 96 acceptance tests
+# Run the acceptance suite (12 top-level Go tests, tiers 1-4)
 bash tests/run_acceptance_tests.sh
 
 # Or run tier-filtered
@@ -551,6 +606,8 @@ bash tests/run_acceptance_tests.sh --tier 4
 go test ./...
 ```
 
+The full run takes several minutes. On the current working tree every package passes except one pre-existing failure: `passes/ownership` `TestEscapeOracleNoFreshOrWritesOracle` (`--- FAIL`). The suite is not all green.
+
 ### 3. Adversarial Stress & Runtime Witness Suite
 ```bash
 go test ./tests/stress                      # markers, determinism, runtime witnesses, scale, vet parity
@@ -559,10 +616,11 @@ go test ./tests/stress -run TestStress -v   # print the per-rule HIT / MISS / FP
 ```
 
 Each rule has `analysistest` cases with `// want` expectations, so a disabled rule fails its test:
-- [`cmd/gosree/`](file:///Users/bharath/Code/devtools/gocap/cmd/gosree/main.go) & [`cmd/gocap/`](file:///Users/bharath/Code/devtools/gocap/cmd/gocap/main.go): Multichecker CLI drivers for standalone and `go vet -vettool` execution.
-- [`tests/e2e/`](file:///Users/bharath/Code/devtools/gocap/tests/e2e/): Dual-track 4-tier E2E acceptance suite covering AC1–AC7.
-- [`tests/stress/`](file:///Users/bharath/Code/devtools/gocap/tests/stress/README.md): Adversarial fixtures (`HIT`, `MISS`, `FP`, `WITNESS: race`, `WITNESS: panic`), scaling bounds, and standalone vs. `go vet -vettool` parity checks.
-- [`passes/borrow/`](file:///Users/bharath/Code/devtools/gocap/passes/borrow/borrow.go): Second-class borrow storage checks (`storage.go`), SSA NLL conflict detection, owner invalidation, and dangling returns (`check.go`).
-- [`passes/ownership/`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/ownership.go): Reference capabilities (`imm.go`, `check.go`), alias graph unification (`graph.go`), mutex locksets (`lockset.go`), HTTP handler writes (`handlerwrite.go`), and fork-join recovery (`forkjoin.go`).
-- [`cmd/gocap-erase/`](file:///Users/bharath/Code/devtools/gocap/cmd/gocap-erase/main.go): AST rewriting verification ensuring machine-instruction parity against unannotated Go.
-- [`cmd/gocap-corpus/`](file:///Users/bharath/Code/devtools/gocap/cmd/gocap-corpus/main.go): Race detector test corpus validation and reference microservice triage tracking.
+- [`cmd/gosree/`](cmd/gosree/main.go) & [`cmd/gocap/`](cmd/gocap/main.go): Multichecker CLI drivers for standalone and `go vet -vettool` execution; `cmd/gocap` adds the exit-code and flag preflight ([`preflight.go`](cmd/gocap/preflight.go), tested in `cmd/gocap/main_test.go`).
+- [`passes/errcheck/`](passes/errcheck/errcheck.go) & [`internal/gusseterr/`](internal/gusseterr/wire.go): Error-discipline pass (`safeerr`), the wire frame, the cgo engine, and the pure-Go oracle (`parity_test.go` checks them against each other when the native engine is active; `bench_test.go`).
+- [`tests/e2e/`](tests/e2e/): Dual-track 4-tier E2E acceptance suite: 12 top-level Go tests over 12 `analysistest` packages (64 lines carrying `// want`). Tier 1 is organised by acceptance criteria AC1–AC7 (see the comments in `tier1_feature_test.go`); no total case count is asserted here.
+- [`tests/stress/`](tests/stress/README.md): Adversarial fixtures (`HIT`, `MISS`, `FP`, `WITNESS: race`, `WITNESS: panic`), scaling bounds, and standalone vs. `go vet -vettool` parity checks.
+- [`passes/borrow/`](passes/borrow/borrow.go): Second-class borrow storage checks (`storage.go`), SSA NLL conflict detection, owner invalidation, and dangling returns (`check.go`).
+- [`passes/ownership/`](passes/ownership/ownership.go): Reference capabilities (`imm.go`, `check.go`), alias graph unification (`graph.go`), mutex locksets (`lockset.go`), HTTP handler writes (`handlerwrite.go`), and fork-join recovery (`forkjoin.go`).
+- [`cmd/gocap-erase/`](cmd/gocap-erase/main.go): AST rewriting verification ensuring machine-instruction parity against unannotated Go.
+- [`cmd/gocap-corpus/`](cmd/gocap-corpus/main.go): Race detector test corpus validation and reference microservice triage tracking.

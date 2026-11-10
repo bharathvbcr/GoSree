@@ -106,6 +106,17 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 				}
 				return
 			}
+			for _, a := range cc.Args {
+				if mc := resolveClosureVal(a, 0); mc != nil {
+					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
+						for j, b := range mc.Bindings {
+							if root, ok := sharedRoot(b, r); ok && j < len(argFn.FreeVars) {
+								add(argFn, argFn.FreeVars[j], r[root])
+							}
+						}
+					}
+				}
+			}
 			if len(callee.Blocks) == 0 || !st.followable(callee) {
 				st.checkCalleeWrites(ins, cc, callee, r, sp, regPos, once)
 				return
@@ -167,6 +178,37 @@ func handlerRoots(prog *ssa.Program, sp spawnSite) (*ssa.Function, map[ssa.Value
 		case *ssa.ChangeType:
 			v = x.X
 			continue
+		case *ssa.Call:
+			if callee := x.Call.StaticCallee(); callee != nil && len(callee.Blocks) > 0 {
+				var retVal ssa.Value
+				for _, b := range callee.Blocks {
+					for _, ins := range b.Instrs {
+						if ret, ok := ins.(*ssa.Return); ok && len(ret.Results) == 1 {
+							retVal = ret.Results[0]
+							break
+						}
+					}
+					if retVal != nil {
+						break
+					}
+				}
+				if retVal != nil {
+					v = retVal
+					continue
+				}
+			}
+			var innerArg ssa.Value
+			for _, a := range x.Call.Args {
+				if spawnedFunc(prog, a, true) != nil {
+					innerArg = a
+					break
+				}
+			}
+			if innerArg != nil {
+				v = innerArg
+				continue
+			}
+			return nil, nil
 		case *ssa.MakeInterface:
 			if fn := spawnedFunc(prog, x, true); fn != nil {
 				if _, isClosure := unwrapToClosure(x); !isClosure {

@@ -27,7 +27,7 @@ func main() {
 	}()
 	view := c.arr[:]
 	for i := 0; i < 1000; i++ {
-		view[0] = i // MISS(SAFE005): writes c.arr[0] of the shared imm value through a slice of the array field
+		view[0] = i // HIT(SAFE005): writes c.arr[0] of the shared imm value through a slice of the array field
 	}
 	wg.Wait()
 }

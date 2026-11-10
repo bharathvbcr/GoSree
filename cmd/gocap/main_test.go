@@ -59,6 +59,7 @@ func TestGocapFlags(t *testing.T) {
 	expected := map[string]bool{
 		"borrow":        false,
 		"safeannot":     false,
+		"safeerr":       false,
 		"safeownership": false,
 		"safeunsafe":    false,
 	}
@@ -81,10 +82,33 @@ func TestGocapHelp(t *testing.T) {
 	out, _ := cmd.CombinedOutput()
 	helpStr := string(out)
 
-	analyzers := []string{"borrow", "safeannot", "safeownership", "safeunsafe"}
+	analyzers := []string{"borrow", "safeannot", "safeerr", "safeownership", "safeunsafe"}
 	for _, a := range analyzers {
 		if !strings.Contains(helpStr, "-"+a) {
 			t.Errorf("help output missing flag -%s", a)
+		}
+	}
+}
+
+// TestGocapSafeErrViolation verifies that gocap CLI reports ERR001-ERR005 from safeerr.
+func TestGocapSafeErrViolation(t *testing.T) {
+	bin := getGocapBin(t)
+	repoRoot := filepath.Clean(filepath.Join("..", ".."))
+	errPkg := filepath.Join(repoRoot, "passes", "errcheck", "testdata", "src", "errbasic")
+
+	cmd := exec.Command(bin, errPkg)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit code on errbasic package, got exit 0")
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 3 {
+		t.Errorf("expected exit code 3, got %v", err)
+	}
+	outStr := string(out)
+	for _, code := range []string{"ERR001", "ERR002", "ERR003", "ERR004", "ERR005"} {
+		if !strings.Contains(outStr, code) {
+			t.Errorf("expected %s in gocap CLI output, got:\n%s", code, outStr)
 		}
 	}
 }

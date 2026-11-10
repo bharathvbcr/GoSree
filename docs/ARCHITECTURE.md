@@ -1,18 +1,18 @@
 # GoSree (`gosree` / `gocap`) Architecture Specification
 
-[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Tooling](TOOLING_AND_ERASURE.md)
+[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Error Discipline](ERROR_DISCIPLINE.md) | [Tooling](TOOLING_AND_ERASURE.md)
 
 ---
 
-**GoSree** (`gosree`, formerly `gocap`) is a static analysis suite for ordinary Go that enforces Rust-style memory safety, reference capabilities, second-class borrow checking with Non-Lexical Lifetimes (NLL), and mutex lock discipline, with zero runtime cost and clean erasure to standard Go code.
+**GoSree** (`gosree`, formerly `gocap`) is a static analysis suite for ordinary Go that enforces Rust-style memory safety, reference capabilities, second-class borrow checking with Non-Lexical Lifetimes (NLL), mutex lock discipline, and Rust-style error discipline (`ERR001`-`ERR005`), with zero runtime cost and clean erasure to standard Go code.
 
-This document describes the architectural subsystems, static analysis pipelines, mathematical formulations, and data structures implemented in `gocap`.
+This document describes the architectural subsystems, static analysis pipelines, mathematical formulations, and data structures implemented in `gocap`. The error-discipline subsystem is summarized in [section 3.5](#35-error-discipline-passeserrcheck-and-internalgusseterr); its rules and engine internals are in [ERROR_DISCIPLINE.md](ERROR_DISCIPLINE.md).
 
 ---
 
 ## 1. High-Level System Architecture
 
-`gocap` operates as a set of modular analyzers built on the official Go analysis framework ([`golang.org/x/tools/go/analysis`](file:///Users/bharath/Code/devtools/gocap/go.mod#L5)) and SSA intermediate representation ([`golang.org/x/tools/go/ssa`](file:///Users/bharath/Code/devtools/gocap/passes/borrow/check.go#L11)).
+`gocap` operates as a set of modular analyzers built on the official Go analysis framework ([`golang.org/x/tools/go/analysis`](../go.mod#L7)) and SSA intermediate representation ([`golang.org/x/tools/go/ssa`](../passes/borrow/check.go#L12)).
 
 ```mermaid
 flowchart TD
@@ -30,6 +30,7 @@ flowchart TD
         UnsafeBan["Unsafe Ban Pass\n(passes/unsafeban)\nSAFE001"]
         Borrow["Second-Class Borrow Checker\n(passes/borrow)\nBORROW001 - BORROW004"]
         Ownership["Ownership & Capabilities Pass\n(passes/ownership)\nSAFE002 - SAFE009, CAP003"]
+        ErrCheck["Error Discipline Pass\n(passes/errcheck, safeerr)\nERR001 - ERR005"]
     end
 
     subgraph CoreEngines ["Core Analysis Engines"]
@@ -38,6 +39,10 @@ flowchart TD
         Locksets["Forward Must-Lockset\n(passes/ownership/lockset.go)"]
         ForkJoin["Fork-Join Join Points\n(passes/ownership/forkjoin.go)"]
         ImmValidator["Transitive Deep Immutability\n(passes/ownership/imm.go)"]
+        Lower["SSA CFG lowering + AST scan\n(passes/errcheck/lower.go, astscan.go)"]
+        Bridge["Wire frame GSE1 / GSR1\n(internal/gusseterr)"]
+        RustEngine["Rust solver via gusset\n(rust/gosree-errsolve)\nunix and cgo only"]
+        GoOracle["Pure-Go reference oracle\n(internal/gusseterr/oracle.go)\n!unix or !cgo"]
     end
 
     subgraph Tooling ["Toolchain & Drivers"]
@@ -54,16 +59,23 @@ flowchart TD
     SSA --> Borrow
     SSA --> Ownership
     Parser --> UnsafeBan
+    Annot --> ErrCheck
+    SSA --> ErrCheck
 
     Borrow --> NLL
     Ownership --> Steensgaard
     Ownership --> Locksets
     Ownership --> ForkJoin
     Ownership --> ImmValidator
+    ErrCheck --> Lower
+    Lower --> Bridge
+    Bridge --> RustEngine
+    Bridge --> GoOracle
 
     UnsafeBan --> Driver
     Borrow --> Driver
     Ownership --> Driver
+    ErrCheck --> Driver
     Driver --> Vet
     Src --> Eraser
 ```
@@ -83,6 +95,8 @@ sequenceDiagram
     participant Unsafe as passes/unsafeban
     participant Borrow as passes/borrow
     participant Own as passes/ownership
+    participant Err as passes/errcheck
+    participant Solver as internal/gusseterr (Rust or Go oracle)
 
     Driver->>Annot: Parse AST comments & build annot.Index
     Annot-->>Driver: Return *annot.Index
@@ -97,6 +111,12 @@ sequenceDiagram
         Borrow->>Borrow: Phase 1: Struct & global declaration checks (BORROW001)
         Borrow->>Borrow: Phase 2: Flow-sensitive SSA CFG borrow analysis (BORROW002-004)
         Borrow-->>Driver: Diagnostics (BORROW001-BORROW004)
+    and Error Discipline
+        Driver->>Err: Run safeerr (Requires: annot, buildssa)
+        Err->>Err: Lower each SSA function CFG and scan its AST into FuncIR
+        Err->>Solver: One batched GSE1 frame per package
+        Solver-->>Err: GSR1 findings and may-return-nil bits
+        Err-->>Driver: Diagnostics (ERR001-ERR005) and FuncFacts
     end
 
     Note over Driver,Own: passes/ownership requires passes/unsafeban (ordering dependency for stats & suppression)
@@ -117,11 +137,11 @@ sequenceDiagram
 
 ## 3. Subsystem Breakdown
 
-### 3.1 Directive & Annotation Engine ([`internal/annot`](file:///Users/bharath/Code/devtools/gocap/internal/annot/annot.go#L1-L75))
+### 3.1 Directive & Annotation Engine ([`internal/annot`](../internal/annot/annot.go#L1-L75))
 
 The directive engine extracts safety claims, capabilities, and suppression scopes without altering Go syntax or semantics.
 
-- **Comment Group Parsing:** Traverses [`ast.File.Comments`](file:///Users/bharath/Code/devtools/gocap/internal/annot/annot.go#L198), mapping comment tokens to AST declarations, statements, and fields.
+- **Comment Group Parsing:** Traverses [`ast.File.Comments`](../internal/annot/annot.go#L253), mapping comment tokens to AST declarations, statements, and fields.
 - **Prefix Support:**
   - Modern canonical prefix: `//gocap:...`
   - Legacy backward-compatible prefix: `//safe:...`
@@ -132,9 +152,9 @@ The directive engine extracts safety claims, capabilities, and suppression scope
   - Concurrency locks: `//safe:guarded_by <mu>`, `//safe:holds <mu>`
   - Local borrow bindings: `//gocap:mut`, `//gocap:rob`
   - Scoped suppressions: `//gocap:unsafe <reason>`, `//safe:unsafe <reason>`
-- **Output Data Structure:** Produces an [`*annot.Index`](file:///Users/bharath/Code/devtools/gocap/internal/annot/annot.go#L71-L96) exported as an `analysis.Pass` result.
+- **Output Data Structure:** Produces an [`*annot.Index`](../internal/annot/annot.go#L89-L114) exported as an `analysis.Pass` result.
 
-### 3.2 Second-Class Borrow Checker ([`passes/borrow`](file:///Users/bharath/Code/devtools/gocap/passes/borrow/borrow.go#L1-L36))
+### 3.2 Second-Class Borrow Checker ([`passes/borrow`](../passes/borrow/borrow.go#L1-L36))
 
 Implements second-class references inspired by academic formulations of second-class values (references that cannot be stored into first-class heap memory).
 
@@ -153,13 +173,14 @@ flowchart LR
     end
 ```
 
-- **`BORROW001` (Storage Violation):** Second-class borrows cannot be placed in struct fields or package globals ([`passes/borrow/storage.go`](file:///Users/bharath/Code/devtools/gocap/passes/borrow/storage.go#L17-L77)).
+- **`BORROW001` (Storage Violation):** Second-class borrows cannot be placed in struct fields or package globals ([`passes/borrow/storage.go`](../passes/borrow/storage.go#L17-L77)).
   - *Transient Stack Struct Exception:* Local structs allocated on the stack that never escape the current activation frame may hold second-class borrows as lightweight tuples.
-- **`BORROW002` (Conflicting Borrows):** Simultaneous mutable borrows of the same memory allocation or mutable-immutable aliasing within overlapping live ranges ([`passes/borrow/check.go`](file:///Users/bharath/Code/devtools/gocap/passes/borrow/check.go#L17-L22)).
+- **`BORROW002` (Conflicting Borrows):** Simultaneous mutable borrows of the same memory allocation or mutable-immutable aliasing within overlapping live ranges ([`passes/borrow/check.go`](../passes/borrow/check.go#L17-L22)).
 - **`BORROW003` (Owner Invalidation):** Mutation or moving of the underlying owner while an active borrow is in scope.
 - **`BORROW004` (Dangling Stack Return):** Returning a pointer or borrow to a local stack-allocated variable beyond the enclosing activation frame.
+- **Interprocedural identity helpers:** Both phases look through same-package callees that return one of their parameters or store it in a package global (`calleeReturnsParam`, `calleeStoresParamInGlobal` in [`storage.go`](../passes/borrow/storage.go#L1636-L1685); `calleeReturnedParamIndex`, `calleeMutatesParam` in [`check.go`](../passes/borrow/check.go#L1747)), so a borrow laundered through an identity-style helper is still tracked. `BORROW001` also covers sends in a `select` and calls to instantiated generic `cap.Borrow*` helpers.
 
-### 3.3 Reference Capabilities & Concurrency Boundaries ([`passes/ownership`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/ownership.go#L1-L65))
+### 3.3 Reference Capabilities & Concurrency Boundaries ([`passes/ownership`](../passes/ownership/ownership.go#L1-L65))
 
 Tracks memory crossing goroutine boundaries and enforces strict reference capability invariants.
 
@@ -192,12 +213,51 @@ stateDiagram-v2
   - `\imm` (Immutable): Transitive immutability. Structs whose fields are pointer-free, strings, channels, or pointers to `\imm` types. Can be shared freely across goroutines without invalidation (`SAFE005`).
   - `\mub` / `\rob` (Mutable / Read-Only Second-Class Borrows): Confined to the stack frame. Cannot cross goroutine boundaries via channel sends or `go` statements (`CAP003`).
 - **Mutex Lockset Forward Must-Analysis (`SAFE009`):**
-  - Path-sensitive forward flow analysis tracking the set of held mutexes along CFG edges ([`passes/ownership/lockset.go`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/lockset.go)).
+  - Path-sensitive forward flow analysis tracking the set of held mutexes along CFG edges ([`passes/ownership/lockset.go`](../passes/ownership/lockset.go)).
   - Enforces that memory marked `//safe:guarded_by mu` is never accessed unless `mu` is held.
-  - Verifies that functions annotated `//safe:holds mu` are invoked with `mu` locked.
+  - Verifies that functions annotated `//safe:holds mu` are invoked with `mu` locked. A `go` call to such a function never counts as holding the lock, and a `defer` counts only if the lock is held at every reachable return and no later-registered `defer` releases it first (`lockset.go:1117-1160`). A `//safe:holds` helper that unlocks the mutex directly or through a callee that releases it is reported as malformed (`lockset.go:1066-1100`).
+  - Lock and unlock calls made through a bound method value (`f := mu.Lock; f()`) are recognised (`lockOp`, `lockset.go:342-366`).
 - **Self-Racing Handler Analysis (`SAFE008`):**
-  - HTTP handlers registered with `net/http` execute concurrently across requests ([`passes/ownership/handlerwrite.go`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/handlerwrite.go)).
+  - HTTP handlers registered with `net/http` execute concurrently across requests ([`passes/ownership/handlerwrite.go`](../passes/ownership/handlerwrite.go)).
   - Flags writes to shared receiver state or captured variables unless protected by `//safe:guarded_by`.
+  - Handler roots are resolved through factory and middleware calls (`handlerRoots` follows a call to its single returned value or to a spawned-function argument), and closures passed as arguments to a followed callee have their captured bindings tracked.
+- **Package-variable writes (`SAFE006`):** [`globals.go`](../passes/ownership/globals.go#L21) reports a package variable written outside initialisation. "Initialisation" is `init`, the package initialiser, and functions or closures whose every caller is a synchronous call or `defer` from initialisation and whose value is never spawned or stored (`initFuncs`, `globals.go:107`).
+- **Deep immutability writes (`SAFE005`):** [`imm.go`](../passes/ownership/imm.go#L163) treats a struct or array that contains an `\imm` value (`immInValueType`) as immutable memory, and traces writes through calls that return a pointer into it.
+
+### 3.4 Unsafe Ban ([`passes/unsafeban`](../passes/unsafeban/unsafeban.go))
+
+`safeunsafe` (`SAFE001`) is AST-only: it needs `annot.Analyzer` and nothing else, and `safeownership` requires it. It reports `unsafe` pointer-creating members, cgo, `//go:linkname`, `//go:noescape`, and reflection that writes or exposes memory. Method calls on an interface-typed receiver count as `reflect.Value` writes only when `reflect.Value` implements that interface (`reflectValueImplements`, `unsafeban.go:133`); the method set it matches includes `Set`, `Pointer`, `Addr`, `Send` and `TrySend` (`isReflectValueInterfaceMethod`, `unsafeban.go:151`).
+
+### 3.5 Error Discipline ([`passes/errcheck`](../passes/errcheck/errcheck.go) and [`internal/gusseterr`](../internal/gusseterr/wire.go))
+
+`safeerr` enforces `ERR001`-`ERR005` (discarded errors, unchecked companion values, lost or shadowed errors, typed-nil errors, dropped `Close()` on writable resources). Rule semantics and engine internals are in [ERROR_DISCIPLINE.md](ERROR_DISCIPLINE.md); this section covers only where it sits in the system.
+
+**Ordering.** `safeerr` requires `annot.Analyzer` and `buildssa.Analyzer` only (`errcheck.go:71`). It does not depend on `unsafeban`, `ownership` or `borrow`, so it is independent of them; the multichecker lists it last (`cmd/gosree/main.go:18`, `cmd/gocap/main.go:39`). The `safestale` analyzer (`internal/annot/stale`) requires all five analyzers, so that a `//gocap:unsafe` is judged stale only after every rule, including `ERR*`, has had the chance to mute against it. It is defined but unregistered: only `annot`, `unsafeban`, `ownership`, `borrow` and `errcheck` run in `cmd/gosree` and `cmd/gocap`, and `safestale` is exercised only by its own test.
+
+```mermaid
+flowchart LR
+    SSAin["buildssa SrcFuncs\n+ closures (AnonFuncs)"] --> Lower["lowerAll\n(lower.go)"]
+    ASTin["fn.Syntax()"] --> Scan["scanFuncAST\n(astscan.go)"]
+    Scan --> Lower
+    Lower --> Encode["EncodePackage\nGSE1 request frame"]
+    Encode --> Choose{"unix and cgo?"}
+    Choose -- Yes --> Native["Rust solver in-process\nvia gusset\n(engine_unix.go)"]
+    Choose -- No --> Oracle["Pure-Go oracle\n(engine_other.go, oracle.go)"]
+    Native --> Decode["DecodeResult\nGSR1 response frame"]
+    Oracle --> Decode
+    Decode --> Report["Dedupe per line and rule\nmute via annot.Index\nsort, pass.Report"]
+```
+
+**Data flow.**
+1. `run` collects every source function and its anonymous closures (`collectPackageFuncs`, `errcheck.go:194`).
+2. Each function's SSA CFG is lowered to a `gusseterr.FuncIR`, with facts the AST supplies (shadowing, blanked tuple assignments, discarded calls) merged in (`lowerFunc`, `lower.go:93`; `scanFuncAST`, `astscan.go:86`).
+3. `gusseterr.Solve` encodes the whole package as one batched request frame, crosses into the solver once, and decodes the response (`engine_unix.go:178`). On `unix && cgo` the solver is the Rust crate `rust/gosree-errsolve`, linked in-process through gusset (`rust/gusset-engine` builds the `gusset` static library). On `!unix || !cgo` the same call runs the pure-Go oracle (`engine_other.go:24`, `engine_other.go:30`), which is documented as bit-exact; `internal/gusseterr/parity_test.go` compares the two.
+4. A solver error fails the package analysis (`errcheck.go:107`); it is not reported as a clean result.
+
+**Where results surface.**
+- Diagnostics: `pass.Report` with `Category` set to the `ERR00n` code, de-duplicated per (file, line, rule, sub-kind), sorted by position, and suppressed by `//gocap:unsafe` / `//gosree:unsafe` through `annot.Index` (`errcheck.go:154-185`).
+- Facts: an exported function returning a concrete pointer type that implements `error` exports a `FuncFact{MayReturnNilConcrete}`, so downstream packages can judge typed-nil boxing across package boundaries (`errcheck.go:111-117`).
+- Result: the analyzer returns a `*errcheck.Summary` (`FunctionsAnalyzed`, `FindingsReported`, `FindingsMuted`, `UsedRustGusset`) for harnesses and tests (`errcheck.go:59-64`).
 
 ---
 
@@ -205,7 +265,7 @@ stateDiagram-v2
 
 ### 4.1 Steensgaard Points-To & Alias Analysis
 
-In [`passes/ownership/graph.go`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/graph.go), alias relationships within each function are computed using a Steensgaard-style unification algorithm:
+In [`passes/ownership/graph.go`](../passes/ownership/graph.go), alias relationships within each function are computed using a Steensgaard-style unification algorithm:
 
 - Equivalence classes are represented as disjoint union-find sets with path compression:
   $$\text{find}(n) = \begin{cases} n & \text{if } n.\text{parent} = \text{nil} \\ \text{find}(n.\text{parent}) & \text{otherwise} \end{cases}$$
@@ -215,7 +275,7 @@ In [`passes/ownership/graph.go`](file:///Users/bharath/Code/devtools/gocap/passe
 
 ### 4.2 Non-Lexical Lifetimes (NLL) on SSA CFGs
 
-In [`passes/borrow/check.go`](file:///Users/bharath/Code/devtools/gocap/passes/borrow/check.go), lifetimes are not lexical scopes. Instead, they are defined by the forward reachability of the last SSA instruction that reads or writes the borrow:
+In [`passes/borrow/check.go`](../passes/borrow/check.go), lifetimes are not lexical scopes. Instead, they are defined by the forward reachability of the last SSA instruction that reads or writes the borrow:
 
 ```mermaid
 flowchart TD
@@ -232,7 +292,7 @@ flowchart TD
 
 ### 4.3 Mutex Lockset Forward Must-Analysis
 
-In [`passes/ownership/lockset.go`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/lockset.go), lock tracking is a forward dataflow must-analysis:
+In [`passes/ownership/lockset.go`](../passes/ownership/lockset.go), lock tracking is a forward dataflow must-analysis:
 
 $$\mathcal{In}(B) = \bigcap_{P \in \text{pred}(B)} \mathcal{Out}(P)$$
 
@@ -249,7 +309,7 @@ $$\mathcal{Out}(B) = (\mathcal{In}(B) \setminus \text{Unlocked}(B)) \cup \text{L
 
 When a goroutine is launched with moved ownership, standard Rust-style semantics would permanently transfer the value. Go programs, however, commonly employ fork-join concurrency patterns (`sync.WaitGroup` or rendezvous channels).
 
-In [`passes/ownership/forkjoin.go`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/forkjoin.go), `gocap` models fork-join recovery:
+In [`passes/ownership/forkjoin.go`](../passes/ownership/forkjoin.go), `gocap` models fork-join recovery:
 
 ```mermaid
 sequenceDiagram
@@ -296,7 +356,7 @@ flowchart LR
 ```
 
 - **Comment Directives:** Directives are parsed as standard Go comments. The official compiler (`go build`) ignores them completely.
-- **Generic Marker Types ([`cap/cap.go`](file:///Users/bharath/Code/devtools/gocap/cap/cap.go)):**
+- **Generic Marker Types ([`cap/cap.go`](../cap/cap.go)):**
   ```go
   type Mut[T any] = *T
   type Ref[T any] = *T
@@ -304,7 +364,7 @@ flowchart LR
   type Imm[T any] = *T
   ```
   Type aliases are resolved at compile time with zero indirection. Helper functions (`BorrowMut`, `Move`) are trivial identity operations that inline completely.
-- **AST Eraser ([`cmd/gocap-erase`](file:///Users/bharath/Code/devtools/gocap/cmd/gocap-erase/main.go)):** Automatically transforms code using `cap.*` markers back into idiomatic raw Go pointers and removes unnecessary imports.
+- **AST Eraser ([`cmd/gocap-erase`](../cmd/gocap-erase/main.go)):** Automatically transforms code using `cap.*` markers back into idiomatic raw Go pointers and removes unnecessary imports.
 
 ---
 
@@ -318,9 +378,17 @@ flowchart TD
     cmd_gocap --> passes_unsafeban["passes/unsafeban"]
     cmd_gocap --> passes_borrow["passes/borrow"]
     cmd_gocap --> passes_ownership["passes/ownership"]
+    cmd_gocap --> passes_errcheck["passes/errcheck"]
 
     passes_borrow --> internal_annot
     passes_ownership --> internal_annot
+    passes_errcheck --> internal_annot
+    passes_errcheck --> internal_gusseterr["internal/gusseterr"]
+    internal_gusseterr -.->|"unix and cgo"| rust_engine["rust/gosree-errsolve\n(via gusset)"]
+    internal_stale["internal/annot/stale (defined, unregistered)"] --> passes_errcheck
+    internal_stale --> passes_ownership
+    internal_stale --> passes_borrow
+    internal_stale --> passes_unsafeban
     passes_ownership --> internal_kinds["internal/kinds"]
     passes_ownership --> passes_unsafeban
 
@@ -338,6 +406,21 @@ flowchart TD
         passes_ownership_imm["imm.go (Deep immutability)"]
     end
     passes_ownership -.-> passes_ownership_internals
+
+    subgraph passes_errcheck_internals ["passes/errcheck (Internal Modules)"]
+        passes_errcheck_main["errcheck.go (analyzer, ERR001-005, FuncFact)"]
+        passes_errcheck_lower["lower.go (SSA CFG to FuncIR)"]
+        passes_errcheck_astscan["astscan.go (AST facts)"]
+    end
+    passes_errcheck -.-> passes_errcheck_internals
+
+    subgraph gusseterr_internals ["internal/gusseterr (Internal Modules)"]
+        gusseterr_wire["wire.go (GSE1/GSR1 frames)"]
+        gusseterr_unix["engine_unix.go (unix and cgo)"]
+        gusseterr_other["engine_other.go (!unix or !cgo)"]
+        gusseterr_oracle["oracle.go (pure-Go solver)"]
+    end
+    internal_gusseterr -.-> gusseterr_internals
 
     cmd_gocap_erase["cmd/gocap-erase"] -.->|rewrites| cap_pkg["cap"]
 ```

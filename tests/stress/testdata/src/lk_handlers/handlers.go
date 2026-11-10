@@ -25,11 +25,10 @@ func direct(mux *http.ServeMux) {
 type Wrapped struct{ n int }
 
 func (c *Wrapped) ServeHTTP(http.ResponseWriter, *http.Request) {
-	c.n++ // MISS(SAFE008): registered through http.StripPrefix; every request shares c (RULES.md SAFE008 covers any net/http.Handler)
+	c.n++ // HIT(SAFE008): registered through http.StripPrefix; every request shares c
 }
 
-// A handler wrapped by a standard decorator before registration: the registered value is a call
-// result, which handlerRoots does not resolve.
+// A handler wrapped by a standard decorator before registration.
 func stripped(mux *http.ServeMux) {
 	mux.Handle("/w/", http.StripPrefix("/w", &Wrapped{}))
 }
@@ -49,7 +48,7 @@ func server() *http.Server {
 func makeHandler() http.HandlerFunc {
 	hits := 0
 	return func(http.ResponseWriter, *http.Request) {
-		hits++ // MISS(SAFE008): the handler is a factory result; handlerRoots stops at the call (RULES.md SAFE008 covers any net/http.Handler)
+		hits++ // HIT(SAFE008): the handler is a factory result
 	}
 }
 
@@ -80,12 +79,11 @@ func routes(mux *http.ServeMux) {
 
 func run(f func()) { f() }
 
-// A write in a closure the handler hands to a helper: sharedRoot does not look into a closure's
-// bindings, so the helper's dynamic call is never followed.
+// A write in a closure the handler hands to a helper.
 func viaHelper(mux *http.ServeMux) {
 	total := 0
 	mux.HandleFunc("/h", func(http.ResponseWriter, *http.Request) {
-		run(func() { total++ }) // MISS(SAFE008): the closure runs in the handler through run; sharedRoot does not look into closure bindings (RULES.md SAFE008 covers any net/http.Handler)
+		run(func() { total++ }) // HIT(SAFE008): the closure runs in the handler through run
 	})
 }
 

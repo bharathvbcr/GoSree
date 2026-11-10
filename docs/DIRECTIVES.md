@@ -1,12 +1,12 @@
 # GoSree (`gosree` / `gocap`) Directives & Capability Markers Reference
 
-[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Tooling](TOOLING_AND_ERASURE.md)
+[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Error Discipline](ERROR_DISCIPLINE.md) | [Tooling](TOOLING_AND_ERASURE.md)
 
 ---
 
 **GoSree** (`gosree`) offers two syntactic mechanisms for expressing safety capabilities and second-class borrows in Go code:
 1. **Comment Directives (`//gosree:...`, `//sree:...`, `//gocap:...`, and `//safe:...`)**: Native zero-cost annotations embedded directly in comments. Recognized by GoSree analyzers, invisible to the Go compiler.
-2. **Generic Marker Types (`cap.Mut[T]`, `cap.Ref[T]`, `cap.Iso[T]`, `cap.Imm[T]`)**: Type-level expressions provided by package `github.com/bharathvbcr/gocap/cap` (and `github.com/bharathvbcr/gosree/cap`).
+2. **Generic Marker Types (`cap.Mut[T]`, `cap.Ref[T]`, `cap.Iso[T]`, `cap.Imm[T]`)**: Type-level expressions provided by package `github.com/bharathvbcr/gocap/cap`. The marker scanner also recognizes the path `github.com/bharathvbcr/gosree/cap` and any package named `cap` or whose path ends in `/cap` (`internal/annot/annot.go:731`), but this repository ships only the `gocap/cap` package.
 
 ---
 
@@ -15,11 +15,14 @@
 All GoSree comment directives adhere to standard Go comment conventions:
 - **No whitespace** between the leading slashes and the directive prefix (`//gosree:`, `//sree:`, `//gocap:`, or `//safe:`).
 - Directives may appear as line comments (`//gosree:...`) or inline block comments (`/*gosree:...*/`).
+- **All four prefixes are equivalent and accept every verb.** There is no precedence between them: each comment is parsed independently, and the prefix used only changes how diagnostics echo it (for example `//gocap:imm` vs `//safe:imm` in `SAFE005`; some hints always print `//safe:` or `//gocap:`).
+- A trailing `// note` after a directive is commentary, not arguments. The verb ends at any whitespace.
+- An unknown verb, or a near-miss such as `// gocap:iso p`, `//Safe:holds mu` or `/* gocap:mut */`, is never silently dropped: it is reported as `SAFE007`. The near-miss scan checks only the `gocap:` and `safe:` spellings (`internal/annot/nearmiss.go`), so a misspelled `//gosree:`/`//sree:` is caught only as an unknown verb.
 
 ```mermaid
 flowchart TD
     Comment["Comment: //gocap:mub dst, src\nor //safe:guarded_by mu"] --> Scanner{"Lexical Scanner\n(internal/annot)"}
-    Scanner --> MatchPrefix{"Prefix Match?\n(//gocap: or //safe:)"}
+    Scanner --> MatchPrefix{"Prefix Match?\n(//gosree: //sree: //gocap: //safe:)"}
     MatchPrefix -- Matched --> StripLead["Extract Verb & Arguments\n(Both prefixes accept all verbs)"]
     StripLead --> ParseVerb["Parse Verb:\nmub, rob, mut, ref, iso, imm, guarded_by, holds, unsafe"]
     ParseVerb --> Attach["Resolve AST Attachment\n(Doc, Preceding Line, Trailing Line)"]
@@ -48,7 +51,7 @@ func Worker(job *Job) {
 }
 ```
 
-- **Scope:** Function declarations.
+- **Scope:** Function and method declarations (receiver included); parameters may also be typed `cap.Iso[T]`.
 - **Multiple Arguments:** `//gocap:iso p, q` marks multiple parameters.
 - **Caller Effect:** The caller's argument binding is moved; subsequent caller access triggers `SAFE003`.
 - **Callee Effect:** The callee can move the value onto a channel or into a spawned goroutine without triggering `SAFE002`.
@@ -67,10 +70,11 @@ type ServerConfig struct {
 }
 ```
 
-- **Scope:** Struct `type` declarations.
+- **Scope:** A defined struct `type` declaration, with no arguments (`//gocap:imm` takes none; repeating it is `SAFE007`). `type X cap.Imm[...]` is also recorded as an imm candidate.
 - **Verification (`SAFE005`):**
-  - All struct fields must be pointer-free types, strings, channels, or pointers to other verified `//gocap:imm` types.
-  - Slices, maps, and untyped interfaces are forbidden unless guarded.
+  - Every field must be unexported.
+  - Fields must be pointer-free types, strings, channels of shareable types, or pointers to other verified `//gocap:imm` types.
+  - Slices, maps, and interfaces are forbidden unless the field is `//safe:guarded_by`.
 - **Effect:** Pointers to `\imm` types can be shared across arbitrary goroutines and channels without triggering ownership moves (`SAFE003`) or invalidations.
 
 ---
@@ -150,7 +154,8 @@ type SafeCounter struct {
 }
 ```
 
-- **Scope:** Unexported struct fields, package globals, local variables.
+- **Scope:** Unexported struct fields, unexported package variables, local variables. The mutex must be a sibling field, a package variable, or a local in scope, of type `sync.Mutex`/`sync.RWMutex`. Guarding an exported name, guarding the mutex itself, or a second guard on one variable is `SAFE007`.
+- **Several names on one declaration:** extra names after the mutex (`//safe:guarded_by mu a`) restrict the guard to those names.
 - **Access Discipline (`SAFE009`):**
   - Read access requires `mu.Lock()` or `mu.RLock()`.
   - Write access requires `mu.Lock()`.
@@ -183,9 +188,11 @@ Selectively suppresses diagnostics for the attached statement, spec, or function
 externalLibrary.UnsafeCall(ptr)
 ```
 
-- **Requirement:** A non-empty reason string must be provided.
-- **Auditability:** Tracked by `cmd/gocap-corpus` to compute the repository escape hatch ratio.
-- **Stale Detection:** If an attached `//gocap:unsafe` directive suppresses zero diagnostics, it is flagged as stale.
+- **Requirement:** A reason with at least one letter or digit. A missing or invisible-only reason, an unattached hatch, a hatch on the line of an opening brace, or an exact duplicate scope is `SAFE007`.
+- **Coverage:** On its own line above a statement, or in a declaration's doc comment, it covers the whole statement or declaration. At the end of a code line it covers that line's statement except the bodies of multi-line blocks in it.
+- **Which passes honor it:** `unsafeban`, `ownership`, `borrow` (`passes/borrow/check.go:184`, `storage.go:63`) and `errcheck` (mutes `ERR001`-`ERR005`, `passes/errcheck/errcheck.go`). Note `borrow` only asks `Suppressed` and never calls `Mute`, so a hatch that only suppresses borrow findings would count as stale. All four prefixes work (`errbasic` testdata uses `//gocap:unsafe` and `//gosree:unsafe`).
+- **Auditability:** `cmd/gocap-corpus` reports a hatch ratio (suppressed transfers over all transfers).
+- **Stale Detection:** The `safestale` analyzer (`internal/annot/stale`) reports a hatch that mutes nothing as `SAFE007`, but neither `cmd/gosree` nor `cmd/gocap` registers it, so shipped binaries do not emit that diagnostic. The ownership pass still counts such scopes in its stats (`UnsafeStale`).
 
 ---
 
@@ -219,6 +226,8 @@ type Iso[T any] = *T
 // Imm represents a deeply immutable pointer reference (\imm *T)
 type Imm[T any] = *T
 ```
+
+`cap.Mub` and `cap.Rob` are additional aliases of `Mut` and `Ref` (`cap/cap.go`).
 
 ### 3.2 Intrinsics & Helper Expressions
 ```go

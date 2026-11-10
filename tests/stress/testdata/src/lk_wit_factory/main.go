@@ -14,7 +14,7 @@ import (
 func countingHandler() http.HandlerFunc {
 	hits := 0
 	return func(w http.ResponseWriter, _ *http.Request) {
-		hits++ // MISS(SAFE008): every request runs this closure and shares hits
+		hits++ // HIT(SAFE008): every request runs this closure and shares hits
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

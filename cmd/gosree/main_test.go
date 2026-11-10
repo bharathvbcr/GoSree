@@ -28,6 +28,7 @@ func TestGoSreeCLI(t *testing.T) {
 	want := map[string]bool{
 		"borrow":        false,
 		"safeannot":     false,
+		"safeerr":       false,
 		"safeownership": false,
 		"safeunsafe":    false,
 	}

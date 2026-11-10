@@ -9,10 +9,11 @@ import (
 
 	"github.com/bharathvbcr/gocap/internal/annot"
 	"github.com/bharathvbcr/gocap/passes/borrow"
+	"github.com/bharathvbcr/gocap/passes/errcheck"
 	"github.com/bharathvbcr/gocap/passes/ownership"
 	"github.com/bharathvbcr/gocap/passes/unsafeban"
 )
 
 func main() {
-	multichecker.Main(annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer, borrow.Analyzer)
+	multichecker.Main(annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer, borrow.Analyzer, errcheck.Analyzer)
 }

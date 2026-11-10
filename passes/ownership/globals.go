@@ -101,9 +101,9 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 	}
 }
 
-// initFuncs returns the functions that run only during initialisation: init functions (and closures
-// inside them), the package initialiser, and functions whose every static caller is one of those and
-// whose value is never taken.
+// initFuncs returns the functions that run only synchronously during initialisation: top-level init
+// functions, the package initialiser, and functions/closures whose every caller is a synchronous
+// call or defer from one of those and whose value is never spawned or stored.
 func (st *state) initFuncs(fns []*ssa.Function) map[*ssa.Function]bool {
 	out := map[*ssa.Function]bool{}
 	for _, fn := range fns {
@@ -119,10 +119,43 @@ func (st *state) initFuncs(fns []*ssa.Function) map[*ssa.Function]bool {
 	for _, fn := range fns {
 		forEachInstr(fn, func(ins ssa.Instruction) {
 			var static *ssa.Function
-			if c, ok := ins.(ssa.CallInstruction); ok && !c.Common().IsInvoke() {
-				if f, ok := c.Common().Value.(*ssa.Function); ok {
-					static = f
-					callers[f] = append(callers[f], fn)
+			switch c := ins.(type) {
+			case *ssa.Call, *ssa.Defer:
+				cc := c.(ssa.CallInstruction).Common()
+				if !cc.IsInvoke() {
+					if f, ok := cc.Value.(*ssa.Function); ok {
+						static = f
+						callers[f] = append(callers[f], fn)
+					}
+				}
+			case *ssa.MakeClosure:
+				if mcFn, ok := c.Fn.(*ssa.Function); ok {
+					refs := c.Referrers()
+					syncOnly := refs != nil && len(*refs) > 0
+					if syncOnly {
+						for _, ref := range *refs {
+							switch rc := ref.(type) {
+							case *ssa.Call, *ssa.Defer:
+								cc := rc.(ssa.CallInstruction).Common()
+								if cc.IsInvoke() || cc.Value != c {
+									syncOnly = false
+								}
+								for _, arg := range cc.Args {
+									if arg == c {
+										syncOnly = false
+									}
+								}
+							default:
+								syncOnly = false
+							}
+						}
+					}
+					if syncOnly {
+						static = mcFn
+						callers[mcFn] = append(callers[mcFn], fn)
+					} else {
+						taken[mcFn] = true
+					}
 				}
 			}
 			for _, op := range ins.Operands(nil) {
@@ -158,13 +191,14 @@ func (st *state) initFuncs(fns []*ssa.Function) map[*ssa.Function]bool {
 }
 
 func isInit(fn *ssa.Function) bool {
-	for f := fn; f != nil; f = f.Parent() {
-		if f.Name() == "init" && f.Signature.Recv() == nil && f.Parent() == nil {
-			return true
-		}
-		if len(f.Name()) > 5 && f.Name()[:5] == "init#" {
-			return true
-		}
+	if fn == nil || fn.Parent() != nil {
+		return false
+	}
+	if fn.Name() == "init" && fn.Signature.Recv() == nil {
+		return true
+	}
+	if len(fn.Name()) > 5 && fn.Name()[:5] == "init#" {
+		return true
 	}
 	return false
 }
@@ -281,6 +315,11 @@ func globalRootSeen(v ssa.Value, seen map[ssa.Value]bool) (*ssa.Global, bool) {
 						if g, ok := globalRootSeen(ret.Results[0], seen); ok {
 							return g, true
 						}
+						if pi := paramRootIndex(ret.Results[0], callee); pi >= 0 && pi < len(x.Call.Args) {
+							if g, ok := globalRootSeen(x.Call.Args[pi], seen); ok {
+								return g, true
+							}
+						}
 					}
 				}
 			}
@@ -290,4 +329,29 @@ func globalRootSeen(v ssa.Value, seen map[ssa.Value]bool) (*ssa.Global, bool) {
 		}
 	}
 	return nil, false
+}
+
+func paramRootIndex(v ssa.Value, callee *ssa.Function) int {
+	for range 16 {
+		for i, p := range callee.Params {
+			if v == p {
+				return i
+			}
+		}
+		switch x := v.(type) {
+		case *ssa.FieldAddr:
+			v = x.X
+		case *ssa.IndexAddr:
+			v = x.X
+		case *ssa.Slice:
+			v = x.X
+		case *ssa.ChangeType:
+			v = x.X
+		case *ssa.Convert:
+			v = x.X
+		default:
+			return -1
+		}
+	}
+	return -1
 }

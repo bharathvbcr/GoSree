@@ -32,20 +32,20 @@ func (s *S) lockedCall() {
 // A go statement runs the helper on a new goroutine, which never holds the caller's lock.
 func (s *S) goHelper() {
 	s.mu.Lock()
-	go s.bumpLocked() // MISS(SAFE009): the new goroutine does not hold s.mu; the holds check looks only at *ssa.Call (RULES.md SAFE009: holds functions must be invoked with mu held)
+	go s.bumpLocked() // HIT(SAFE009): the new goroutine does not hold s.mu
 	s.mu.Unlock()
 }
 
 // A deferred helper registered before the deferred Unlock runs after it (LIFO).
 func (s *S) deferAfterUnlock() {
 	s.mu.Lock()
-	defer s.bumpLocked() // MISS(SAFE009): runs after the deferred Unlock (LIFO), without s.mu (RULES.md SAFE009: holds functions must be invoked with mu held)
+	defer s.bumpLocked() // HIT(SAFE009): runs after the deferred Unlock (LIFO), without s.mu
 	defer s.mu.Unlock()
 }
 
 // A deferred helper with no lock anywhere.
 func (s *S) deferNoLock() {
-	defer s.bumpLocked() // MISS(SAFE009): no lock at all; a deferred call is never checked (RULES.md SAFE009: holds functions must be invoked with mu held)
+	defer s.bumpLocked() // HIT(SAFE009): no lock at all
 }
 
 // Control: correct order, the helper runs before the Unlock.

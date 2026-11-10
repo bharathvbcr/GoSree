@@ -378,6 +378,159 @@ func TestClosureAndGoroutineUnlockKillsLock() { // want TestClosureAndGoroutineU
 	x2 = 2 // want `SAFE009: local variable x2 is guarded by mu2 but is written here without holding it`
 }
 
+// ============================================================================
+// Round 5 Deep Adversarial Stress Tests
+// ============================================================================
+
+// 27. Multi-return aliasing between returned values -> SAFE003
+func newAliasedNodePair() (*Node, *Node) {
+	n := &Node{Val: 1}
+	return n, n
+}
+
+func TestMultiReturnAliasUseAfterMove(ch chan *Node) { // want TestMultiReturnAliasUseAfterMove:"ownership summary"
+	a, b := newAliasedNodePair()
+	ch <- a
+	b.Val = 2 // want `SAFE003: this value is used after it was sent on a channel \(line \d+\)`
+}
+
+// 28. CAP003: Borrow laundered through conditional Phi or nested closure crossing goroutine boundary
+func TestBorrowPhiAndNestedClosureEscape(ch chan *int, cond bool, safe *int) { // want TestBorrowPhiAndNestedClosureEscape:"ownership summary"
+	x := 10
+	b := cap.BorrowMut(&x)
+	res := safe
+	if cond {
+		res = b
+	}
+	ch <- res // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
+
+	y := 20
+	by := cap.BorrowMut(&y)
+	inner := func() {
+		*by = 30
+	}
+	go func() { // want `CAP003: stack-scoped borrow 'by' \(\\mub\) cannot cross goroutine boundary: cannot be captured by a goroutine`
+		inner()
+	}()
+}
+
+// 29. SAFE005: Mutating //gocap:imm via pointer type conversion, accessor method, slice slot, clear(immSlice), and array store
+type MutableRateLayout struct {
+	rate int
+}
+
+func (c *ImmConfig) ratePtr() *int {
+	return &c.rate
+}
+
+func TestImmTypeConvAccessorSliceAndArrayStore(c *ImmConfig, cs []ImmConfig, arrPtr *[2]ImmConfig) { // want TestImmTypeConvAccessorSliceAndArrayStore:"ownership summary"
+	(*MutableRateLayout)(c).rate = 9 // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+	*c.ratePtr() = 10                // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+	ps := []*int{&c.rate}
+	mutateIntPtr(ps[0])      // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+	clear(cs)                // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+	*arrPtr = [2]ImmConfig{} // want `SAFE005: store through a \*\[2\]marker_ownership\.ImmConfig overwrites an immutable value`
+}
+
+// 30. SAFE006: init() spawning a goroutine that mutates an unguarded package variable
+var initGoroutineGlobal int = 1 // want `SAFE006: package variable initGoroutineGlobal is written outside init`
+
+func init() {
+	go func() {
+		initGoroutineGlobal = 2
+	}()
+}
+
+// 31. SAFE008: HTTP handler mutating shared state via closure passed to helper, factory function, and http.StripPrefix
+func runHandlerClosure(fn func()) {
+	fn()
+}
+
+func makeCountingHandler() http.HandlerFunc {
+	n := 0
+	return func(w http.ResponseWriter, r *http.Request) {
+		n++ // want `SAFE008: captured variable n is written here by a handler registered with \(\*net/http\.ServeMux\)\.HandleFunc`
+	}
+}
+
+type StripPrefixCounter struct {
+	hits int
+}
+
+func (s *StripPrefixCounter) ServeHTTP(w http.ResponseWriter, r *http.Request) { // want ServeHTTP:"ownership summary"
+	s.hits++ // want `SAFE008: receiver s is written here by a handler registered with \(\*net/http\.ServeMux\)\.Handle`
+}
+
+func TestHandlerHelperClosureFactoryAndStripPrefix(mux *http.ServeMux) { // want TestHandlerHelperClosureFactoryAndStripPrefix:"ownership summary"
+	sharedCount := 0
+	http.HandleFunc("/helper-closure", func(w http.ResponseWriter, r *http.Request) {
+		runHandlerClosure(func() {
+			sharedCount++ // want `SAFE008: captured variable sharedCount is written here by a handler registered with net/http\.HandleFunc`
+		})
+	})
+	mux.HandleFunc("/factory", makeCountingHandler())
+	mux.Handle("/strip", http.StripPrefix("/strip", &StripPrefixCounter{}))
+}
+
+// 32. SAFE007 & SAFE009: //safe:holds unlocking via defer/helper, calling //safe:holds via go/defer after unlock, and method-value unlock
+type GuardedCounter struct {
+	mu  sync.Mutex
+	val int //safe:guarded_by mu
+}
+
+func unlockGuardedCounter(g *GuardedCounter) {
+	g.mu.Unlock()
+}
+
+//safe:holds mu
+func (g *GuardedCounter) badDeferUnlock() {
+	defer g.mu.Unlock() // want `SAFE007: badDeferUnlock is //safe:holds mu but unlocks it here`
+	g.val++
+}
+
+//safe:holds mu
+func (g *GuardedCounter) badHelperUnlock() {
+	unlockGuardedCounter(g) // want `SAFE007: badHelperUnlock is //safe:holds mu but unlocks it here`
+}
+
+//safe:holds mu
+func (g *GuardedCounter) bumpHeld() {
+	g.val++
+}
+
+func TestHoldsGoDeferAndMethodValUnlock(g2 *GuardedCounter) { // want TestHoldsGoDeferAndMethodValUnlock:"ownership summary"
+	g1 := &GuardedCounter{}
+	go g1.bumpHeld() // want `SAFE009: bumpHeld requires mu to be held \(//safe:holds mu\), but it is not held here`
+
+	g2.mu.Lock()
+	defer g2.bumpHeld() // want `SAFE009: bumpHeld requires mu to be held \(//safe:holds mu\), but it is not held here`
+	unlock := g2.mu.Unlock
+	unlock()
+	g2.val = 10 // want `SAFE009: field val is guarded by mu but is written here without holding it`
+}
+
+func idIntPtrHelper(p *int) *int { return p }
+
+var unguardedIdentityGlobal int = 1 // want `SAFE006: package variable unguardedIdentityGlobal is written outside init`
+
+// Test 33: Identity helper pass-through for CAP003, SAFE005, SAFE006, and deferred helper unlock for SAFE009
+func TestIdentityPassThroughAndDeferHelperUnlock(c *ImmConfig, g *GuardedCounter, ch chan *int) { // want TestIdentityPassThroughAndDeferHelperUnlock:"ownership summary"
+	x := 10
+	b := cap.BorrowMut(&x)
+	ch <- idIntPtrHelper(b) // want `CAP003: stack-scoped borrow 'b' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
+
+	*idIntPtrHelper(&c.rate) = 77        // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+	mutateIntPtr(idIntPtrHelper(&c.rate)) // want `SAFE005: write to a field of ImmConfig, which is //gocap:imm; imm values are only written by their composite literal`
+
+	*idIntPtrHelper(&unguardedIdentityGlobal) = 88
+
+	g.mu.Lock()
+	defer g.bumpHeld()            // want `SAFE009: bumpHeld requires mu to be held \(//safe:holds mu\), but it is not held here`
+	defer unlockGuardedCounter(g)
+}
+
+
+
 
 
 

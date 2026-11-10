@@ -1,0 +1,10 @@
+[package]
+name = "gosree-errsolve"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "GoSree abstract-interpretation CFG/SSA solver for error-discipline rules (ERR001..ERR005)"
+
+[lib]
+name = "gosree_errsolve"
+path = "src/lib.rs"

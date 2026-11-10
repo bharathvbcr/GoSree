@@ -276,4 +276,152 @@ func TestDanglingReturnViaSliceLit() *int {
 	return s[0] // want `BORROW004: cannot return reference to local stack variable 'x'`
 }
 
+// ============================================================================
+// Round 5 Deep Adversarial Stress Tests
+// ============================================================================
+
+// Test 27: Cyclic pointer dereference in loop does not stack-overflow baseAllocSeen and still catches BORROW004
+type LinkedPtr struct{ next *LinkedPtr }
+
+func TestCyclicPointerDerefNoStackOverflow(cond bool) *LinkedPtr {
+	var root LinkedPtr
+	p := &root
+	for cond {
+		p = p.next
+	}
+	return &root // want `BORROW004: cannot return reference to local stack variable 'root'`
+}
+
+// Test 28: Multi-hop pointer alias, sub-slice, and interface type assertion borrow conflicts -> BORROW002
+func TestMultiHopAndSubsliceAndIfaceBorrowConflicts(s []int, i any) {
+	x := 10
+	p := &x
+	q := p
+	b1 := cap.BorrowMut(p)
+	b2 := cap.BorrowMut(q) // want `BORROW002: cannot borrow 'x' as mutable more than once at a time`
+	*b2 = 1
+	*b1 = 2
+
+	t := s[1:]
+	sb1 := cap.BorrowMut(&s[1])
+	sb2 := cap.BorrowMut(&t[0]) // want `BORROW002: cannot borrow 's' as mutable more than once at a time`
+	*sb2 = 3
+	*sb1 = 4
+
+	c1 := i.(*CounterVal)
+	c2 := i.(*CounterVal)
+	ib1 := cap.BorrowMut(&c1.n)
+	ib2 := cap.BorrowMut(&c2.n) // want `BORROW002: cannot borrow 'i' as mutable more than once at a time`
+	*ib2 = 5
+	*ib1 = 6
+}
+
+// Test 29: Passing pre-existing pointer alias to cap.Mut[T] parameter while owner is borrowed -> BORROW002
+func TestPreExistingAliasPassedToMutParam() {
+	x := 10
+	p := &x
+	r := cap.Borrow(&x)
+	useOneMutGeneric(p) // want `BORROW002: cannot borrow 'x' as mutable because it is also borrowed as read-only`
+	_ = *r
+}
+
+// Test 30: Owner invalidation via (*p)++, copy(s[:]), clear(s[:]), append(s[:1]), and range assign -> BORROW003
+func TestSliceResliceAndIncDecAndRangeInvalidation(src []int) {
+	x := 10
+	p := &x
+	r := cap.Borrow(&x)
+	(*p)++ // want `BORROW003: cannot assign to 'x' because it is borrowed at line \d+`
+	for x = range 3 { // want `BORROW003: cannot assign to 'x' because it is borrowed at line \d+`
+		_ = *r
+	}
+
+	s := make([]int, 2, 4)
+	sr := cap.Borrow(&s[0])
+	copy(s[:], src)      // want `BORROW003: cannot mutate 's' via copy\(\) because it is borrowed at line \d+`
+	clear(s[:])          // want `BORROW003: cannot mutate 's' via clear\(\) because it is borrowed at line \d+`
+	_ = append(s[:1], 9) // want `BORROW003: cannot mutate 's' via append\(\) because it is borrowed at line \d+`
+	_ = *sr
+}
+
+type closureBox struct{ f func() }
+
+func callClosureHelper(fn func()) { fn() }
+
+//gocap:iso v
+func consumeIsoInt(v int) { _ = v }
+
+// Test 31: Pre-existing closure in struct field / passed to helper / mutating *p, alias passed to callee, and Iso move -> BORROW003
+func TestClosureAndAliasAndIsoInvalidation() {
+	x := 10
+	p := &x
+	m := func() { *p = 77 }
+	box := closureBox{f: func() { x = 88 }}
+	r := cap.Borrow(&x)
+	callClosureHelper(m) // want `BORROW003: cannot assign to 'x' \(via closure 'm'\) because it is borrowed at line \d+`
+	box.f()              // want `BORROW003: cannot assign to 'x' \(via closure 'box'\) because it is borrowed at line \d+`
+	mutatePtr(p)         // want `BORROW003: cannot borrow or take address of 'x' while it is borrowed at line \d+`
+	consumeIsoInt(x)     // want `BORROW003: cannot move 'x' because it is borrowed at line \d+`
+	_ = *r
+}
+
+var globalIntPtr *int
+
+func storePtrInGlobal(p *int) { globalIntPtr = p }
+
+// Test 32: Borrow escaping through unannotated helper into global or select send of phi borrow -> BORROW001
+func TestHelperGlobalEscapeAndSelectSendPhi(ch chan *int, cond bool, safe *int) {
+	x := 10
+	b := cap.BorrowMut(&x)
+	storePtrInGlobal(b) // want `BORROW001: package variable 'globalIntPtr' cannot store second-class borrow`
+	res := safe
+	if cond {
+		res = b
+	}
+	select {
+	case ch <- res: // want `BORROW001: channel send cannot store second-class borrow`
+	default:
+	}
+}
+
+// Test 33: Upgrading read-only borrow to cap.Mut[T] or passing alias to cap.Ref[T] while mutably borrowed -> BORROW002
+func TestRobUpgradedToMutAndAliasRobConflict() {
+	x := 10
+	r := cap.Borrow(&x)
+	useOneMutGeneric(r) // want `BORROW002: cannot borrow 'x' as mutable because it is also borrowed as read-only`
+	_ = *r
+
+	y := 20
+	py := &y
+	bm := cap.BorrowMut(&y)
+	useOneRobGeneric(py) // want `BORROW002: cannot borrow 'y' as read-only because it is also borrowed as mutable`
+	*bm = 30
+}
+
+// Test 34: Direct mutation through read-only borrow (*r = 99, (*r)++, cr.n = 2, mutatePtr(r)) -> BORROW003
+func TestDirectMutationThroughRob() {
+	x := 10
+	r := cap.Borrow(&x)
+	*r = 99       // want `BORROW003: cannot assign through read-only borrow 'r' \(borrowed at line \d+\)`
+	(*r)++        // want `BORROW003: cannot assign through read-only borrow 'r' \(borrowed at line \d+\)`
+	mutatePtr(r)  // want `BORROW003: cannot assign through read-only borrow 'r' \(borrowed at line \d+\)`
+
+	c := CounterVal{n: 1}
+	cr := cap.Borrow(&c)
+	cr.n = 2 // want `BORROW003: cannot assign through read-only borrow 'cr' \(borrowed at line \d+\)`
+}
+
+func idIntPtr(p *int) *int { return p }
+
+// Test 35: Borrow or local stack address laundered through identity helper -> BORROW001 / BORROW004
+func TestBorrowAndStackEscapeViaIdentityHelper() *int {
+	x := 10
+	b := cap.BorrowMut(&x)
+	globalIntPtr = idIntPtr(b) // want `BORROW001: package variable 'globalIntPtr' cannot store second-class borrow`
+
+	localVar := 42
+	return idIntPtr(&localVar) // want `BORROW004: cannot return reference to local stack variable 'localVar'`
+}
+
+
+
 

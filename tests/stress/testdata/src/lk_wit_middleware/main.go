@@ -14,7 +14,7 @@ import (
 type Stats struct{ served int }
 
 func (s *Stats) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
-	s.served++ // MISS(SAFE008): every request shares the receiver
+	s.served++ // HIT(SAFE008): every request shares the receiver
 	w.WriteHeader(http.StatusNoContent)
 }
 

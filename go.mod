@@ -2,7 +2,12 @@ module github.com/bharathvbcr/gocap
 
 go 1.27
 
-require golang.org/x/tools v0.52.0
+require (
+	github.com/bharathvbcr/gusset v0.0.0
+	golang.org/x/tools v0.52.0
+)
+
+replace github.com/bharathvbcr/gusset => ../gusset
 
 require (
 	golang.org/x/mod v0.42.0 // indirect

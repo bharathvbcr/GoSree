@@ -24,23 +24,23 @@ type Alias = Config
 
 // Attack: a pointer conversion to a defined type with the same underlying struct.
 func convertDefined(c *Config) {
-	(*Mutable)(c).port = 1 // MISS(SAFE005): (*Mutable)(c) is a plain conversion; FieldAddr's X has type *Mutable and the walk stops at ChangeType
+	(*Mutable)(c).port = 1 // HIT(SAFE005): (*Mutable)(c) converts pointer to same underlying imm memory
 }
 
 // Attack: conversion to an unrelated struct type with identical fields.
 func convertTwin(c *Config) {
-	(*Twin)(c).port = 1 // MISS(SAFE005): *Config converts to *Twin (identical underlying types)
+	(*Twin)(c).port = 1 // HIT(SAFE005): *Config converts to *Twin (identical underlying types)
 }
 
 // Attack: whole-value overwrite through the converted pointer.
 func convertOverwrite(c *Config) {
-	*(*Mutable)(c) = Mutable{} // MISS(SAFE005): store through *Mutable overwrites the imm value
+	*(*Mutable)(c) = Mutable{} // HIT(SAFE005): store through *Mutable overwrites the imm value
 }
 
 // Attack: conversion kept in a variable first.
 func convertViaVar(c *Config) {
 	m := (*Mutable)(c)
-	m.name = "x" // MISS(SAFE005): m aliases c
+	m.name = "x" // HIT(SAFE005): m aliases c
 }
 
 // Control: an alias is the same type, so the write is caught.

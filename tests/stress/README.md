@@ -16,11 +16,39 @@ The holes are listed in [FINDINGS.md](FINDINGS.md), with the fingerprint its num
 
 | File | What it holds |
 |---|---|
-| `testdata/src/<area>_<topic>/` | the fixtures: `mv` moves, `sp` spawners and fork-join, `bw` borrows, `im` immutability and globals, `lk` locks and handlers, `dx` unsafe, directives and the hatch, `rb` robustness, `rs` distance to Rust |
+| `testdata/src/<area>_<topic>/` | the fixtures, one directory per topic; the area prefixes are in the next section |
 | `harness_test.go`, `stress_test.go` | the marker checker, the witness runner, the crash probe |
 | `harness_selftest_test.go` | proof the harness rejects wrong markers, clean witnesses and clean crash probes |
 | `scale_test.go` | generated programs of growing size; bounds the growth, records the known blowups |
 | `vetparity_test.go` | standalone `gocap` against `go vet -vettool`, and the CLI contract |
+
+## Fixture families
+
+The prefix is the area. `GOCAP_STRESS_ROOTS` matches on it.
+
+| Prefix | Covers |
+|---|---|
+| `mv_` | moves: alias graph, flow, idioms, `//gocap:iso`, spawn-through-callee |
+| `sp_` | spawners and fork-join: the goroutine-boundary table, publication without a spawn or send |
+| `bw_` | borrows: BORROW001 to BORROW004, CAP003, non-lexical lifetimes |
+| `im_` | immutability and globals: SAFE005, SAFE006, constructors, laundering through conversions |
+| `lk_` | locks and handlers: SAFE008, SAFE009, `holds` contracts |
+| `dx_` | unsafe, directive lexing, `//line`, build tags and the escape hatch |
+| `rb_` | robustness: odd control flow, generics, range-over-func, closures, directives on every declaration |
+| `rs_` | distance to Rust: guarantees Rust enforces that gocap does not |
+| `er_` | error discipline (`safeerr`): `er_close` ERR005, `er_mustuse` ERR001, `er_shadow` ERR003, `er_typednil` ERR004, `er_unwrap` ERR002, `er_xpkg` ERR004 across packages |
+| `adv_` | cross-cutting programs: `adv_break` mixes borrow, move, immutability, lock and error rules in one package; `adv_w_race` is a spawner-fact witness |
+| `seed_` | worked examples for writing a fixture |
+
+`_w_` (and the older `_wit_`, `_witness`, `_race_` spellings) names a fixture that is a runtime
+witness. The harness gives the name no meaning: a fixture is a witness only if a file carries a
+`// WITNESS:` marker (`witnessRE`, `harness_test.go:61`; `TestWitnesses`, `stress_test.go:156`).
+A witness may carry `MISS` markers (the checker accepts a program the runtime convicts) or `HIT`
+markers (the checker convicts it statically and the runtime agrees), as `er_w_typednil`,
+`er_w_unchecked` (both `WITNESS: panic`, ERR004 and ERR002) and `adv_w_race` do.
+
+The `er_` and `adv_` fixtures run under the same analyzer set as the other families; `safeerr`
+is part of it.
 
 The erase tool's suite is `cmd/gocap-erase/stress_erase_test.go`. In the two generated-input files
 and there, a known bug is a test that asserts the bug is present and fails with "appears fixed"
@@ -69,4 +97,26 @@ child process, and its other markers are not checked. Markers are matched on phy
 4. Check the area: `GOCAP_STRESS_ROOTS=<area>_ go test ./tests/stress`. A run with
    `GOCAP_STRESS_ROOTS` set is partial and says so.
 
-The analyzers run exactly as `cmd/gocap` runs them (annot, unsafeban, ownership, borrow).
+The analyzers run in the order of `cmd/gocap/main.go`: annot, unsafeban, ownership, borrow, errcheck
+(`cliAnalyzers`, `harness_test.go:53`).
+
+## Running
+
+```bash
+go test ./tests/stress                          # everything, including witnesses and scale
+go test ./tests/stress -short                   # markers and harness self-tests only
+go test ./tests/stress -run TestStress -v       # markers and the ledger
+go test ./tests/stress -run TestWitnesses -v    # `go run` / `go run -race` each WITNESS file
+GOCAP_STRESS_ROOTS=er_,adv_ go test ./tests/stress -run TestStress   # a partial run, comma-separated prefixes
+```
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `GOCAP_STRESS_ROOTS` | markers, witnesses | only fixture roots with one of these prefixes; the run logs `PARTIAL RUN` |
+| `GOCAP_STRESS_DUMP` | `TestDump` | comma-separated roots whose diagnostics are printed unchecked |
+| `GOCAP_SCALE_EXPLORE` | `TestScaleExplore` | size multiplier; the test skips when unset |
+| `GOCAP_SCALE_ONLY`, `GOCAP_SCALE_MAXN` | `TestScaleExplore` | restrict to shapes whose name contains the value; cap the size |
+
+`-short` skips `TestDeterministic`, `TestWitnesses`, the scale tests and the vet-parity tests, which
+need the `gocap` binary built from `cmd/gocap`. Witnesses need a Go toolchain and the race detector
+(cgo).

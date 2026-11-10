@@ -62,7 +62,7 @@ func run(pass *analysis.Pass) (any, error) {
 				switch fun := ast.Unparen(x.Fun).(type) {
 				case *ast.SelectorExpr:
 					handledIdent[fun.Sel] = true
-					if reflectSymbol(pass.TypesInfo.Uses[fun.Sel]) != "" {
+					if reflectWrite(pass, x) != "" {
 						calledSel[fun] = true
 					}
 				case *ast.Ident:
@@ -98,6 +98,10 @@ func run(pass *analysis.Pass) (any, error) {
 				if !calledSel[n] {
 					if name := reflectSymbol(pass.TypesInfo.Uses[n.Sel]); name != "" {
 						report(n, name+" writes or exposes memory through reflection")
+					} else if recvType := pass.TypesInfo.TypeOf(n.X); recvType != nil && types.IsInterface(recvType) {
+						if isReflectValueInterfaceMethod(n.Sel.Name) && reflectValueImplements(pass.Pkg, recvType) {
+							report(n, "reflect.Value."+n.Sel.Name+" writes or exposes memory through reflection")
+						}
 					}
 				}
 			}
@@ -116,7 +120,7 @@ func reflectWrite(pass *analysis.Pass, call *ast.CallExpr) string {
 			return s
 		}
 		if recvType := pass.TypesInfo.TypeOf(fun.X); recvType != nil && types.IsInterface(recvType) {
-			if isReflectValueInterfaceMethod(fun.Sel.Name) && pkgImportsReflect(pass.Pkg) {
+			if isReflectValueInterfaceMethod(fun.Sel.Name) && reflectValueImplements(pass.Pkg, recvType) {
 				return "reflect.Value." + fun.Sel.Name
 			}
 		}
@@ -126,13 +130,19 @@ func reflectWrite(pass *analysis.Pass, call *ast.CallExpr) string {
 	return ""
 }
 
-func pkgImportsReflect(pkg *types.Package) bool {
-	if pkg == nil {
+func reflectValueImplements(pkg *types.Package, recvType types.Type) bool {
+	if pkg == nil || recvType == nil {
+		return false
+	}
+	iface, ok := recvType.Underlying().(*types.Interface)
+	if !ok {
 		return false
 	}
 	for _, imp := range pkg.Imports() {
 		if imp.Path() == "reflect" {
-			return true
+			if obj := imp.Scope().Lookup("Value"); obj != nil && obj.Type() != nil {
+				return types.Implements(obj.Type(), iface)
+			}
 		}
 	}
 	return false
@@ -140,8 +150,9 @@ func pkgImportsReflect(pkg *types.Package) bool {
 
 func isReflectValueInterfaceMethod(name string) bool {
 	switch name {
-	case "SetInt", "SetUint", "SetFloat", "SetString", "SetBool", "SetBytes", "SetComplex",
-		"SetLen", "SetCap", "SetMapIndex", "SetZero", "UnsafeAddr", "UnsafePointer":
+	case "Set", "SetInt", "SetUint", "SetFloat", "SetString", "SetBool", "SetBytes", "SetComplex",
+		"SetPointer", "SetIterKey", "SetIterValue", "SetLen", "SetCap", "SetMapIndex", "SetZero",
+		"UnsafeAddr", "UnsafePointer", "Pointer", "Addr", "Clear", "Grow", "Send", "TrySend":
 		return true
 	}
 	return false
@@ -182,7 +193,9 @@ func reflectSymbol(obj types.Object) string {
 		name == "Pointer",
 		name == "Addr",
 		name == "Clear",
-		name == "Grow":
+		name == "Grow",
+		name == "Send",
+		name == "TrySend":
 		return "reflect.Value." + name
 	}
 	return ""

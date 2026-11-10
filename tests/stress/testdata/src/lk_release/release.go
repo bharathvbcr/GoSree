@@ -35,13 +35,12 @@ func (s *S) closureUnlocks() {
 	s.n = 1 // MISS(SAFE009): the in-place closure released s.mu; releaseSummaries only records parameter paths, not free variables (RULES.md SAFE009: guarded memory may only be accessed while mu is held)
 }
 
-// Unlock through a method value: the call goes through the bound wrapper with no arguments, so
-// lockOp does not recognise it and the generic call rule kills nothing.
+// Unlock through a method value.
 func (s *S) methodValueUnlock() {
 	s.mu.Lock()
 	unlock := s.mu.Unlock
 	unlock()
-	s.n = 1 // MISS(SAFE009): s.mu was released through the method value s.mu.Unlock (RULES.md SAFE009: guarded memory may only be accessed while mu is held)
+	s.n = 1 // HIT(SAFE009): s.mu was released through the method value s.mu.Unlock
 }
 
 // Unlock through the sync.Cond's Locker, held in a field: the interface receiver is a load of a
@@ -121,14 +120,13 @@ var (
 	total int //safe:guarded_by gmu
 )
 
-// A same-package helper that unlocks a package-level mutex: releaseSummaries only records unlocks
-// of parameter paths, so the caller still believes gmu is held.
+// A same-package helper that unlocks a package-level mutex.
 func releaseGlobal() { gmu.Unlock() }
 
 func globalHelperRelease() {
 	gmu.Lock()
 	releaseGlobal()
-	total = 1 // MISS(SAFE009): releaseGlobal unlocked gmu; releases of package-level mutexes are never summarised (RULES.md SAFE009: guarded memory may only be accessed while mu is held)
+	total = 1 // HIT(SAFE009): releaseGlobal unlocked gmu
 }
 
 // The same through an interface method of this package.

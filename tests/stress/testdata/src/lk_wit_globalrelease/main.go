@@ -17,7 +17,7 @@ func release() { gmu.Unlock() }
 func add() {
 	gmu.Lock()
 	release()
-	total++ // MISS(SAFE009): release() unlocked gmu
+	total++ // HIT(SAFE009): release() unlocked gmu
 }
 
 func main() {

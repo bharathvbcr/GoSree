@@ -19,17 +19,16 @@ func directAssign() {
 func methodReceiver() {
 	var c Counter
 	b := &c.N //gocap:rob
-	c.Set(1)  // MISS(BORROW003): Set takes &c and writes c.N while b reads it; the implicit & has no *ast.UnaryExpr
+	c.Set(1)  // HIT(BORROW003): Set takes &c and writes c.N while b reads it
 	_ = *b
 }
 
-// 3. write through an alias taken before the borrow: rootIdent has no *ast.StarExpr case, so `*p =`
-// names no variable.
+// 3. write through an alias taken before the borrow.
 func writeThroughAlias() {
 	x := 0
 	p := &x
 	b := &x //gocap:rob
-	*p = 1  // MISS(BORROW003): p == &x, so x changes under the read-only borrow b
+	*p = 1  // HIT(BORROW003): p == &x, so x changes under the read-only borrow b
 	_ = *b
 }
 
@@ -49,11 +48,11 @@ func copyByName(src []int) {
 	_ = *b
 }
 
-// 6. copy into a reslice of the borrowed slice: rootIdent has no *ast.SliceExpr case.
+// 6. copy into a reslice of the borrowed slice.
 func copyBySlice(src []int) {
 	s := make([]int, 4)
 	b := &s[0]      //gocap:rob
-	copy(s[:], src) // MISS(BORROW003): s[:] is s, so s[0] is overwritten under the read-only borrow b
+	copy(s[:], src) // HIT(BORROW003): s[:] is s, so s[0] is overwritten under the read-only borrow b
 	_ = *b
 }
 
@@ -61,7 +60,7 @@ func copyBySlice(src []int) {
 func clearBySlice() {
 	s := []int{1, 2, 3}
 	b := &s[0]  //gocap:rob
-	clear(s[:]) // MISS(BORROW003): clear zeroes s[0] while b is live (same blind spot as copyBySlice)
+	clear(s[:]) // HIT(BORROW003): clear zeroes s[0] while b is live
 	_ = *b
 }
 
@@ -70,7 +69,7 @@ func clearBySlice() {
 func appendIntoCapacity() {
 	s := make([]int, 2, 4)
 	b := &s[1]           //gocap:rob
-	_ = append(s[:1], 9) // MISS(BORROW003): writes s[1] in place (cap 4 >= 2), so *b changes to 9 under a read-only borrow
+	_ = append(s[:1], 9) // HIT(BORROW003): writes s[1] in place (cap 4 >= 2), so *b changes to 9 under a read-only borrow
 	_ = *b
 }
 
@@ -84,25 +83,23 @@ func appendRealloc() int {
 	return *p
 }
 
-// 10. range assigns to an existing owner variable: the range clause is not an *ast.AssignStmt.
+// 10. range assigns to an existing owner variable.
 func rangeReassign() {
 	x := 0
 	b := &x           //gocap:rob
-	for x = range 3 { // MISS(BORROW003): each iteration assigns x while b is still read below
+	for x = range 3 { // HIT(BORROW003): each iteration assigns x while b is still read below
 		_ = *b
 	}
 }
 
-// 11. a closure that writes the owner, made BEFORE the borrow (so its body's `x = 9` precedes the
-// borrow line and is not itself reported), then passed to a helper that calls it. The closure-call
-// check only matches a direct `m()` call.
+// 11. a closure that writes the owner, made BEFORE the borrow, then passed to a helper that calls it.
 func runIt(f func()) { f() }
 
 func closureViaHelper() {
 	x := 0
 	m := func() { x = 9 }
 	b := &x  //gocap:rob
-	runIt(m) // MISS(BORROW003): runIt calls m, which assigns x while b is live
+	runIt(m) // HIT(BORROW003): runIt calls m, which assigns x while b is live
 	_ = *b
 }
 
@@ -132,7 +129,7 @@ func closureInField() {
 	x := 0
 	h := hook{f: func() { x = 9 }}
 	b := &x //gocap:rob
-	h.f()   // MISS(BORROW003): h.f assigns x while b is live; closureMutates only records closures bound to a plain identifier
+	h.f()   // HIT(BORROW003): h.f assigns x while b is live
 	_ = *b
 }
 
@@ -151,7 +148,7 @@ func calleeWritesAlias() {
 	x := 0
 	p := &x
 	b := &x   //gocap:rob
-	setVia(p) // MISS(BORROW003): p == &x and setVia writes through it while b is live
+	setVia(p) // HIT(BORROW003): p == &x and setVia writes through it while b is live
 	_ = *b
 }
 

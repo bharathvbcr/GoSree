@@ -30,7 +30,7 @@ func main() {
 	}()
 	p := c.portAddr()
 	for i := 0; i < 1000; i++ {
-		*p = i // MISS(SAFE005): writes the shared imm value's port through the accessor's interior pointer
+		*p = i // HIT(SAFE005): writes the shared imm value's port through the accessor's interior pointer
 	}
 	wg.Wait()
 }

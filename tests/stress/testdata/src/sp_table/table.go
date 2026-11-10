@@ -80,12 +80,12 @@ func aliasJoin() {
 }
 
 // Impersonation: a local package called errgroup with an errgroup-shaped Group. Its FullName is
-// "(*sp_table/errgroup.Group).Go", so it gets no spawner exemption and no Wait join; its own go
-// statement is checked in that package.
+// "(*sp_table/errgroup.Group).Go", so it gets no Wait join; summary propagation sees that Go
+// starts its callback on a goroutine and flags the post-spawn use of j.
 func lookalike() {
 	var g errgroup.Group
 	j := &Job{}
 	g.Go(func() error { j.ID = 2; return nil })
 	_ = g.Wait()
-	j.ID = 1
+	j.ID = 1 // HIT(SAFE003)
 }

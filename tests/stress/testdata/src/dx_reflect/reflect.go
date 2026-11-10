@@ -32,36 +32,36 @@ func embedded(w wrapped) {
 
 // A method value: the write happens at a call whose callee is a plain identifier.
 func methodValue(v reflect.Value) {
-	set := v.SetInt // MISS(SAFE001): method value of reflect.Value.SetInt; only a direct call x.SetInt(...) is matched
+	set := v.SetInt // HIT(SAFE001): method value of reflect.Value.SetInt
 	set(1)
 }
 
-// Interface dispatch: the callee resolves to the local interface's method, not reflect's.
+// Interface dispatch: the callee resolves to the local interface's method, implemented by reflect.Value.
 type intSetter interface{ SetInt(int64) }
 
 func viaInterface(v reflect.Value) {
 	var s intSetter = v
-	s.SetInt(1) // MISS(SAFE001): reflect.Value.SetInt called through a local interface; the callee object is intSetter.SetInt
+	s.SetInt(1) // HIT(SAFE001): reflect.Value.SetInt called through a local interface
 }
 
 // A generic constraint does the same.
 func viaConstraint[T interface{ SetInt(int64) }](t T) {
-	t.SetInt(1) // MISS(SAFE001): reflect.Value.SetInt reached through a type parameter's method set
+	t.SetInt(1) // HIT(SAFE001): reflect.Value.SetInt reached through a type parameter's method set
 }
 
 func callConstraint(v reflect.Value) { viaConstraint(v) }
 
 // Writers that do not start with "Set".
 func otherWriters(dst, src reflect.Value, xs []int) {
-	reflect.Copy(dst, src)      // MISS(SAFE001): reflect.Copy writes dst's elements through reflection, as Value.Set does
-	dst.Clear()                 // MISS(SAFE001): Value.Clear zeroes a map or slice through reflection
-	swap := reflect.Swapper(xs) // MISS(SAFE001): reflect.Swapper returns a function that writes xs's elements through reflection
+	reflect.Copy(dst, src)      // HIT(SAFE001): reflect.Copy writes dst's elements through reflection
+	dst.Clear()                 // HIT(SAFE001): Value.Clear zeroes a map or slice through reflection
+	swap := reflect.Swapper(xs) // HIT(SAFE001): reflect.Swapper returns a function that writes xs's elements through reflection
 	swap(0, 1)
 }
 
 // Value.Pointer is UnsafeAddr's twin: it returns the raw address as a uintptr.
 func rawAddress(v reflect.Value) uintptr {
-	return v.Pointer() // MISS(SAFE001): Value.Pointer exposes the raw address exactly as the listed Value.UnsafeAddr does
+	return v.Pointer() // HIT(SAFE001): Value.Pointer exposes the raw address
 }
 
 // Decoding into a value writes its fields by reflection inside encoding/json. The rule does not

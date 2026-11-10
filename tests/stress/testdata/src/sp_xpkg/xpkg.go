@@ -60,12 +60,12 @@ func spawnIso() {
 	n = 5 // HIT(SAFE003)
 }
 
-// A callback to Spawn, which does not claim it: the go statement in sub is reported (SAFE002
-// there), the caller is silent.
+// A callback to Spawn: FuncFact.Spawns propagates the goroutine boundary to the caller, flagging
+// subsequent use of captured n.
 func spawnPlain() {
 	n := 0
 	sub.Spawn(func() { n++ })
-	n = 5
+	n = 5 // HIT(SAFE003)
 }
 
 // control: Pass returns an alias of its argument (a link), so sending the result moves j.

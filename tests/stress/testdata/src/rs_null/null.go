@@ -62,7 +62,7 @@ func validate(ok bool) *MyErr {
 }
 
 func Check() error {
-	return validate(true) // MISS(NORULE): returns a non-nil error holding a nil *MyErr; the caller's err != nil is true
+	return validate(true) // HIT(ERR004): returns a non-nil error holding a nil *MyErr
 }
 
 func UseCheck() string {

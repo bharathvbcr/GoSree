@@ -30,7 +30,7 @@ func main() {
 	}
 	x := 7
 	v := &victim{p: &x}
-	addr := reflect.ValueOf(&v.buf).Pointer()           // MISS(SAFE001): Value.Pointer exposes the raw address, the twin of the listed Value.UnsafeAddr
+	addr := reflect.ValueOf(&v.buf).Pointer()           // HIT(SAFE001): Value.Pointer exposes the raw address
 	syscall.Syscall(syscall.SYS_READ, r.Fd(), addr, 16) // MISS(NORULE): a raw syscall writes 16 bytes at a uintptr address into an 8-byte field; no rule covers syscall.Syscall
 	println(*v.p)
 }

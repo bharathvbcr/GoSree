@@ -1,0 +1,17 @@
+[package]
+name = "gocap-gusset-engine"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Umbrella staticlib linking gusset with GoSree's Rust error-discipline CFG solver"
+
+# Must produce libgusset.a so it replaces gusset's placeholder archive on the
+# linker search path (-L.../rust/gusset-engine/target/release before gusset's
+# fallback path). Keep rlib so Rust unit tests can link against the crate.
+[lib]
+name = "gusset"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+gusset_core = { package = "gusset", path = "../../../gusset/crates/gusset" }
+gosree-errsolve = { path = "../gosree-errsolve" }

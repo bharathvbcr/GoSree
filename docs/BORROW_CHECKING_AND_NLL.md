@@ -1,6 +1,6 @@
 # GoSree (`gosree` / `gocap`) — Second-Class Borrows & Non-Lexical Lifetimes (NLL)
 
-[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Tooling](TOOLING_AND_ERASURE.md)
+[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Error Discipline](ERROR_DISCIPLINE.md) | [Tooling](TOOLING_AND_ERASURE.md)
 
 ---
 
@@ -47,7 +47,7 @@ flowchart TD
 
 ## 2. Storage Constraints (`BORROW001`)
 
-The storage checker in [`passes/borrow/storage.go`](file:///Users/bharath/Code/devtools/gocap/passes/borrow/storage.go) enforces that second-class borrows never outlive their activation frame.
+The storage checker in [`passes/borrow/storage.go`](../passes/borrow/storage.go) enforces that second-class borrows never outlive their activation frame.
 
 ```mermaid
 flowchart LR
@@ -83,7 +83,16 @@ func Process() {
 }
 ```
 
-`gocap`'s storage checker performs escape analysis on local structs. If a struct containing borrow-like pointers never leaves the current activation frame, it is treated as a safe transient stack tuple.
+`gocap`'s storage checker performs escape analysis on local structs. If a struct containing borrow-like pointers never leaves the current activation frame, it is treated as a safe transient stack tuple (`passes/borrow/storage.go:1705`). The same struct is rejected as soon as it is heap-allocated or leaves the frame, for example `h := new(StackTuple); h.p = b` reports `BORROW001: borrow stored in struct field 'p' escapes stack frame` (`testdata/src/challenger_m4_coverage/coverage.go:454-456`).
+
+### What else counts as storage
+Beyond direct stores, the checker follows a borrow through calls, so these are also `BORROW001` (`testdata/src/marker_soundness/marker_soundness.go`, Tests 32 and 35):
+- passing a borrow to an unannotated helper whose body stores that parameter in a package variable (`calleeStoresParamInGlobal`, `storage.go:1636`);
+- laundering a borrow through a helper that returns its parameter: `globalIntPtr = idIntPtr(b)` still reports `package variable 'globalIntPtr' cannot store second-class borrow` (`calleeReturnsParam`, `storage.go:1660`);
+- sending a borrow, or a value derived from one through a phi, on a channel inside a `select` case, which reports `channel send cannot store second-class borrow`;
+- calling the generic `cap.Borrow*` helpers: instantiated names such as `BorrowMut[int]` are matched by their base name.
+
+A callee parameter that is itself annotated `mub`/`rob` is exempt from the callee-body checks, since the callee is bound by the same rules.
 
 ---
 
@@ -91,7 +100,7 @@ func Process() {
 
 In early versions of Rust, a borrow's lifetime lasted until the end of its enclosing syntactic block (`{ ... }`). This frequently caused false positive errors when two sequential operations touched the same variable.
 
-`gocap` implements **Non-Lexical Lifetimes (NLL)** directly on Go's Static Single Assignment (SSA) form ([`passes/borrow/check.go`](file:///Users/bharath/Code/devtools/gocap/passes/borrow/check.go)).
+`gocap` implements **Non-Lexical Lifetimes (NLL)** directly on Go's Static Single Assignment (SSA) form ([`passes/borrow/check.go`](../passes/borrow/check.go)).
 
 ### Lexical Scope vs. Non-Lexical Lifetime
 
@@ -149,6 +158,17 @@ stateDiagram-v2
 | `&mut T` (`\mub`) | `&T` (`\rob`) | **No** (Cannot alias active mutable borrow) | `BORROW002` |
 | `&mut T` (`\mub`) | `&mut T` (`\mub`) | **No** (Exclusive mutable ownership required) | `BORROW002` |
 
+The owner of a borrow is resolved through aliases, so a conflict is not hidden by an intermediate name. The resolver follows up to 8 hops of pointer copies (`q := p`), sub-slices (`t := s[1:]`) and type assertions (`c := i.(*T)`), and also looks through `*p`, `s[i:j]` and composite literals (`check.go:481-487`, `check.go:515-612`):
+
+```go
+x := 10
+p := &x
+q := p
+b1 := cap.BorrowMut(p)
+b2 := cap.BorrowMut(q) // BORROW002: cannot borrow 'x' as mutable more than once at a time
+```
+(`testdata/src/marker_soundness/marker_soundness.go:295-317`, Test 28.) Parameters are also matched by annotation: passing an existing read-only borrow, or an alias of an owner that has a live read-only borrow, to a `mub` parameter is reported as `cannot borrow 'x' as mutable because it is also borrowed as read-only`, and the reverse for `rob` parameters (Tests 29 and 33, lines 319 and 386).
+
 ---
 
 ## 5. Owner Invalidation (`BORROW003`)
@@ -175,6 +195,27 @@ flowchart TD
 
     C -.->|Invalidation Conflict| B
     style C fill:#ffcccc,stroke:#ff0000,stroke-width:2px
+```
+
+The same rule covers more than plain assignment. Each of these while a borrow of `x` or `s` is live is `BORROW003` (`testdata/src/marker_soundness/marker_soundness.go`, Tests 30 and 31):
+- `(*p)++` where `p` is an earlier alias of `x`, and `for x = range 3`;
+- the built-ins `copy(s[:], src)`, `clear(s[:])`, `delete`, and `append(s[:1], v)` (`append` only when its first argument is a slice expression; `s = append(s, v)` is an ordinary assignment to `s`);
+- calling a closure that mutates the owner, whether it was bound to a variable (`m := func() { *p = 77 }`), stored in a struct field (`box.f()`), or passed on (`callClosureHelper(m)`), reported as `cannot assign to 'x' (via closure 'm') because it is borrowed`;
+- passing the owner to an `//gocap:iso` parameter (`cannot move 'x' because it is borrowed`), or passing an alias of the owner to a function that is not `mub`/`rob`-annotated (`cannot borrow or take address of 'x' while it is borrowed`).
+
+### Writing Through a Read-Only Borrow
+A read-only borrow cannot be used to mutate its target. Assigning through it is also `BORROW003`, with a distinct message (`check.go:1153-1157`, `check.go:1200-1205`, Test 34, `marker_soundness.go:400-413`):
+
+```go
+x := 10
+r := cap.Borrow(&x)
+*r = 99      // BORROW003: cannot assign through read-only borrow 'r' (borrowed at line N)
+(*r)++       // same
+mutatePtr(r) // same, because mutatePtr stores through its parameter (calleeMutatesParam)
+
+c := CounterVal{n: 1}
+cr := cap.Borrow(&c)
+cr.n = 2     // same
 ```
 
 Because `b` is live across the assignment `x = 20`, modifying `x` invalidates the assumptions of `b`. Reordering the code so that the assignment happens after `b`'s last use resolves the diagnostic cleanly:
@@ -207,7 +248,7 @@ sequenceDiagram
     Note over Caller: Caller dereferences invalid pointer! (BORROW004)
 ```
 
-In [`passes/borrow/check.go`](file:///Users/bharath/Code/devtools/gocap/passes/borrow/check.go), `gocap` tracks the allocation origin of all returned SSA values:
+In [`passes/borrow/check.go`](../passes/borrow/check.go), `gocap` tracks the allocation origin of all returned SSA values:
 ```go
 func Dangling() *int {
     x := 42
@@ -215,3 +256,15 @@ func Dangling() *int {
 }
 ```
 If the allocation is rooted in a local stack variable, `BORROW004` is reported immediately. Heap-allocated memory (`new(T)` or `&T{}` in an escaping context) is recognized as safe.
+
+The origin trace sees through `cap.Borrow*`/`cap.Move` and through user helpers that simply return one of their parameters (`calleeReturnedParamIndex`, `check.go:1747`; helpers in package `cap` are excluded). So laundering a local address through an identity function is still caught:
+
+```go
+func idIntPtr(p *int) *int { return p }
+
+func Laundered() *int {
+    localVar := 42
+    return idIntPtr(&localVar) // BORROW004: cannot return reference to local stack variable 'localVar'
+}
+```
+(`testdata/src/marker_soundness/marker_soundness.go:415-424`, Test 35.) A pointer-chasing loop (`p = p.next` on a cycle) does not hang or overflow the trace and still reports the returned `&root` (Test 27, line 283).

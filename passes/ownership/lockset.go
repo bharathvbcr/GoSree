@@ -340,7 +340,29 @@ var lockOps = map[string]lockOpKind{
 
 // lockOp returns the mutex operation a call performs and the mutex it is called on.
 func lockOp(cc *ssa.CallCommon) (lockOpKind, ssa.Value) {
-	if cc.IsInvoke() || len(cc.Args) == 0 {
+	if cc.IsInvoke() {
+		return 0, nil
+	}
+	if len(cc.Args) == 0 {
+		if mc := resolveClosureVal(cc.Value, 0); mc != nil && len(mc.Bindings) == 1 {
+			if fn, ok := mc.Fn.(*ssa.Function); ok && strings.HasPrefix(fn.Synthetic, "bound method wrapper") {
+				for _, b := range fn.Blocks {
+					for _, ins := range b.Instrs {
+						c, ok := ins.(*ssa.Call)
+						if !ok {
+							continue
+						}
+						if callee := c.Call.StaticCallee(); callee != nil {
+							if obj, ok := callee.Object().(*types.Func); ok {
+								if op := lockOps[obj.FullName()]; op != 0 {
+									return op, mc.Bindings[0]
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 		return 0, nil
 	}
 	callee := cc.StaticCallee()
@@ -1044,11 +1066,31 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 			return // unreachable
 		}
 		// Releasing a //safe:holds mutex inside the helper breaks its contract.
-		if c, ok := ins.(*ssa.Call); ok {
-			if k, recv := lockOp(c.Common()); k == opUnlock {
+		if ci, ok := ins.(ssa.CallInstruction); ok {
+			cc := ci.Common()
+			if k, recv := lockOp(cc); k == opUnlock {
 				if p, ok := pathOf(recv); ok && slices.Contains(holdsOwn, p) {
-					st.report(c.Pos(), annot.CategoryMalformed, fmt.Sprintf(
+					st.report(ci.Pos(), annot.CategoryMalformed, fmt.Sprintf(
 						"%s is //safe:holds %s but unlocks it here", fn.Name(), muName(st.holdsOf(fn), holdsOwn, p)))
+				}
+			} else if callee, bindings := directCallee(cc.Value); callee != nil && len(holdsOwn) > 0 {
+				for _, rel := range gs.releases[callee] {
+					var p guardPath
+					var ok bool
+					if rel.param >= 0 && rel.param < len(cc.Args) {
+						p, ok = pathOf(cc.Args[rel.param])
+						p.steps += rel.steps
+					} else if rel.free >= 0 && rel.free < len(bindings) {
+						p, ok = pathOf(bindings[rel.free])
+						p.steps += rel.steps
+					} else if rel.global != nil {
+						p, ok = guardPath{root: rel.global, steps: rel.steps}, true
+					}
+					if ok && slices.Contains(holdsOwn, p) {
+						st.report(ci.Pos(), annot.CategoryMalformed, fmt.Sprintf(
+							"%s is //safe:holds %s but unlocks it here", fn.Name(), muName(st.holdsOf(fn), holdsOwn, p)))
+						break
+					}
 				}
 			}
 		}
@@ -1064,16 +1106,58 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 			}
 		}
 		// //safe:holds helpers need their mutex held at the call.
-		if c, ok := ins.(*ssa.Call); ok && !c.Call.IsInvoke() {
-			if callee := c.Call.StaticCallee(); callee != nil && st.holdsOf(callee) != nil {
+		if ci, ok := ins.(ssa.CallInstruction); ok && !ci.Common().IsInvoke() {
+			cc := ci.Common()
+			if callee := cc.StaticCallee(); callee != nil && st.holdsOf(callee) != nil {
 				var recv ssa.Value
-				if len(c.Call.Args) > 0 {
-					recv = c.Call.Args[0]
+				if len(cc.Args) > 0 {
+					recv = cc.Args[0]
 				}
 				for i, p := range st.holdsPaths(callee, recv) {
-					if p.root == nil || before[ins][p] < lockWrite {
+					isHeld := false
+					switch ins.(type) {
+					case *ssa.Call:
+						isHeld = p.root != nil && before[ins][p] >= lockWrite
+					case *ssa.Go:
+						isHeld = false
+					case *ssa.Defer:
+						if p.root != nil {
+							isHeld = true
+							hasRet := false
+							seenThisDefer := false
+							simSet := lockset{p: lockWrite}
+							for _, b := range fn.Blocks {
+								for _, bi := range b.Instrs {
+									if bi == ins {
+										seenThisDefer = true
+										continue
+									}
+									if seenThisDefer {
+										if d2, ok := bi.(*ssa.Defer); ok {
+											st.callStep(gs, simSet, d2, d2.Common(), false)
+											if simSet[p] < lockWrite {
+												isHeld = false
+											}
+										}
+									}
+									if _, isRet := bi.(*ssa.Return); isRet {
+										if _, reach := before[bi]; reach {
+											hasRet = true
+											if before[bi][p] < lockWrite {
+												isHeld = false
+											}
+										}
+									}
+								}
+							}
+							if !hasRet {
+								isHeld = false
+							}
+						}
+					}
+					if !isHeld {
 						mu := st.holdsOf(callee)[min(i, len(st.holdsOf(callee))-1)]
-						st.report(c.Pos(), GuardViolation, fmt.Sprintf(
+						st.report(ci.Pos(), GuardViolation, fmt.Sprintf(
 							"%s requires %s to be held (//safe:holds %s), but it is not held here",
 							callee.Name(), mu.Name(), mu.Name()))
 					}

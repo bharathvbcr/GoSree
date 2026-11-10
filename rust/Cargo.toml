@@ -1,0 +1,9 @@
+[workspace]
+members = ["gosree-errsolve", "gusset-engine"]
+resolver = "2"
+
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"

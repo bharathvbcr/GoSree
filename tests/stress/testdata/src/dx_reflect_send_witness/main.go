@@ -21,7 +21,7 @@ func main() {
 		j.ID = 2
 	}()
 	j := &Job{}
-	reflect.ValueOf(ch).Send(reflect.ValueOf(j)) // MISS(SAFE001): reflect.Value.Send moves j to another goroutine behind the analysis
+	reflect.ValueOf(ch).Send(reflect.ValueOf(j)) // HIT(SAFE001): reflect.Value.Send exposes/transfers memory through reflection
 	j.ID = 1                                     // MISS(SAFE003): j is used after it was sent on ch; the move went through reflection
 	wg.Wait()
 }

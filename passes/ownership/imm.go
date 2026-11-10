@@ -160,8 +160,42 @@ func (st *state) checkImmStores(fn *ssa.Function) {
 	st.checkImmBorrows(fn)
 }
 
+func (st *state) immInValueType(t types.Type) types.Type {
+	return st.immInValueTypeSeen(t, map[types.Type]bool{})
+}
+
+func (st *state) immInValueTypeSeen(t types.Type, seen map[types.Type]bool) types.Type {
+	if t == nil || seen[t] || len(seen) >= 16 {
+		return nil
+	}
+	seen[t] = true
+	if st.isImmNamed(t) {
+		return t
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Array:
+		return st.immInValueTypeSeen(u.Elem(), seen)
+	case *types.Struct:
+		for i := 0; i < u.NumFields(); i++ {
+			f := u.Field(i)
+			if st.ix.Guarded[f.Origin()] != nil {
+				continue
+			}
+			if it := st.immInValueTypeSeen(f.Type(), seen); it != nil {
+				return it
+			}
+		}
+	}
+	return nil
+}
+
 func (st *state) checkImmWrite(ins ssa.Instruction, addr ssa.Value) {
 	immType, x, firstPos := st.traceImmAddr(addr, map[ssa.Value]bool{})
+	if immType == nil && addr != nil && addr.Type() != nil {
+		if sl, ok := addr.Type().Underlying().(*types.Slice); ok {
+			immType = st.immInValueType(sl.Elem())
+		}
+	}
 	if immType == nil {
 		return
 	}
@@ -205,9 +239,55 @@ func (st *state) traceImmAddr(v ssa.Value, seen map[ssa.Value]bool) (types.Type,
 			}
 			x = a.X
 		case *ssa.ChangeType:
+			if t := pointee(a.X.Type()); t != nil && st.isImmNamed(t) && immType == nil {
+				immType = t
+			}
+			if !firstPos.IsValid() {
+				firstPos = a.Pos()
+			}
 			x = a.X
 		case *ssa.Convert:
 			x = a.X
+		case *ssa.Call:
+			if callee := a.Call.StaticCallee(); callee != nil && len(callee.Blocks) > 0 {
+				for _, b := range callee.Blocks {
+					for _, ins := range b.Instrs {
+						ret, ok := ins.(*ssa.Return)
+						if !ok || len(ret.Results) != 1 {
+							continue
+						}
+						subSeen := make(map[ssa.Value]bool, len(seen))
+						for k, val := range seen {
+							subSeen[k] = val
+						}
+						it, root, _ := st.traceImmAddr(ret.Results[0], subSeen)
+						if p, ok := root.(*ssa.Parameter); ok {
+							for pi, cp := range callee.Params {
+								if cp == p && pi < len(a.Call.Args) {
+									if it != nil {
+										if !firstPos.IsValid() {
+											firstPos = a.Pos()
+										}
+										return it, a.Call.Args[pi], firstPos
+									}
+									if argIt, argRoot, _ := st.traceImmAddr(a.Call.Args[pi], seen); argIt != nil {
+										if !firstPos.IsValid() {
+											firstPos = a.Pos()
+										}
+										return argIt, argRoot, firstPos
+									}
+								}
+							}
+						} else if it != nil {
+							if !firstPos.IsValid() {
+								firstPos = a.Pos()
+							}
+							return it, root, firstPos
+						}
+					}
+				}
+			}
+			return immType, x, firstPos
 		case *ssa.Phi:
 			for _, e := range a.Edges {
 				if it, root, fp := st.traceImmAddr(e, seen); it != nil {
@@ -257,14 +337,22 @@ func (st *state) checkImmFieldCall(fa *ssa.FieldAddr) {
 }
 
 func (st *state) checkImmDerivedCalls(fa *ssa.FieldAddr, immType types.Type, val ssa.Value, seen map[ssa.Value]bool) {
-	if val == nil || seen[val] || val.Referrers() == nil {
+	if val == nil || seen[val] || len(seen) >= 64 || val.Referrers() == nil {
 		return
 	}
 	seen[val] = true
 	for _, ref := range *val.Referrers() {
 		switch r := ref.(type) {
-		case *ssa.FieldAddr, *ssa.IndexAddr, *ssa.Slice, *ssa.ChangeType, *ssa.Convert:
+		case *ssa.FieldAddr, *ssa.IndexAddr, *ssa.Slice, *ssa.ChangeType, *ssa.Convert, *ssa.MakeInterface, *ssa.ChangeInterface, *ssa.Phi, *ssa.UnOp:
 			st.checkImmDerivedCalls(fa, immType, r.(ssa.Value), seen)
+		case *ssa.Store:
+			if r.Val == val {
+				if ia, ok := r.Addr.(*ssa.IndexAddr); ok {
+					st.checkImmDerivedCalls(fa, immType, ia.X, seen)
+				} else if alloc, ok := r.Addr.(*ssa.Alloc); ok {
+					st.checkImmDerivedCalls(fa, immType, alloc, seen)
+				}
+			}
 		case *ssa.Call:
 			cc := r.Common()
 			if _, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
@@ -289,6 +377,13 @@ func (st *state) checkImmDerivedCalls(fa *ssa.FieldAddr, immType types.Type, val
 					}
 					if sum := st.sums[callee]; sum != nil && !sum.pessimistic {
 						if i < len(sum.writeParam) && !sum.writeParam[i] && i < len(sum.leakParam) && !sum.leakParam[i] {
+							nArgs := len(cc.Args)
+							for _, l := range sum.links {
+								if (l.A == i && l.B >= nArgs) || (l.B == i && l.A >= nArgs) {
+									st.checkImmDerivedCalls(fa, immType, r, seen)
+									break
+								}
+							}
 							continue
 						}
 					}
@@ -305,16 +400,18 @@ func (st *state) checkImmDerivedCalls(fa *ssa.FieldAddr, immType types.Type, val
 }
 
 func (st *state) checkImmStore(s *ssa.Store) {
-	// Direct store into a variable of imm type: reassigning a local variable is allowed; storing
-	// through any other pointer to an imm type is a write to shared immutable memory.
-	if t := pointee(s.Addr.Type()); t != nil && st.isImmNamed(t) {
-		if a, ok := s.Addr.(*ssa.Alloc); ok {
-			if a.Comment != "complit" || st.inComplit(a, s.Pos()) {
-				return
+	// Direct store into a variable of imm type (or a struct/array containing an imm value):
+	// reassigning a local variable is allowed; storing through any other pointer is a write to shared immutable memory.
+	if pt := pointee(s.Addr.Type()); pt != nil {
+		if t := st.immInValueType(pt); t != nil {
+			if a, ok := s.Addr.(*ssa.Alloc); ok {
+				if a.Comment != "complit" || st.inComplit(a, s.Pos()) {
+					return
+				}
 			}
+			st.report(s.Pos(), Imm, fmt.Sprintf("store through a *%s overwrites an immutable value", typeName(pt)))
+			return
 		}
-		st.report(s.Pos(), Imm, fmt.Sprintf("store through a *%s overwrites an immutable value", typeName(t)))
-		return
 	}
 	// Field or element store: walk back to the root, noting whether any step goes through imm memory.
 	immType, x, firstPos := st.traceImmAddr(s.Addr, map[ssa.Value]bool{})

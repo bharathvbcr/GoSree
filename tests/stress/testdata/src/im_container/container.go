@@ -26,10 +26,8 @@ func overwriteField(w *Wrapper) {
 }
 
 // Attack: overwriting the whole container rewrites w.cfg, which may already be shared as &w.cfg.
-// (Writing `*w = Wrapper{cfg: Config{...}}` is reported, but only because of the nested-literal
-// false positive in buildWrapper; the container store itself is never examined.)
 func overwriteContainer(w *Wrapper) {
-	*w = Wrapper{note: 2} // MISS(SAFE005): the store is through a *Wrapper and rewrites the inline imm field w.cfg; same mechanism as the array overwrite in im_w_array
+	*w = Wrapper{note: 2} // HIT(SAFE005): the store is through a *Wrapper and rewrites the inline imm field w.cfg
 }
 
 // Control: assigning an element of a slice of imm values is caught.
@@ -49,12 +47,12 @@ func appendInPlace(cs []Config) []Config {
 
 // Attack: clear zeroes the elements in place.
 func clearElems(cs []Config) {
-	clear(cs) // MISS(SAFE005): clear zeroes every Config in cs, any of which may be shared as &cs[i]; copy and append into the same slice are caught
+	clear(cs) // HIT(SAFE005): clear zeroes every Config in cs, any of which may be shared as &cs[i]
 }
 
 // Attack: an array of imm values overwritten as a whole through its pointer (witness: im_w_array).
 func overwriteArray(a *[2]Config) {
-	*a = [2]Config{} // MISS(SAFE005): *a's store rewrites a[0] and a[1]; the same store through a *Wrapper is caught
+	*a = [2]Config{} // HIT(SAFE005): *a's store rewrites a[0] and a[1]
 }
 
 // Control: assigning one array element through the pointer is caught.

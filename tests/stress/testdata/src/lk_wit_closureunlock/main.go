@@ -18,7 +18,7 @@ type S struct {
 func (s *S) bump() {
 	s.mu.Lock()
 	func() { s.mu.Unlock() }()
-	s.n++ // MISS(SAFE009): s.mu was released by the in-place closure
+	s.n++ // HIT(SAFE009): s.mu was released by the in-place closure
 }
 
 func main() {

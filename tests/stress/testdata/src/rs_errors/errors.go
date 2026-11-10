@@ -12,7 +12,7 @@ import (
 
 // 1. error return dropped as a statement.
 func Save(path string, data []byte) {
-	os.WriteFile(path, data, 0o600) // MISS(NORULE): the error is discarded; Rust warns on an unused Result
+	os.WriteFile(path, data, 0o600) // HIT(ERR001): the error is discarded; Rust warns on an unused Result
 }
 
 // 2. error assigned to the blank identifier.
@@ -22,7 +22,7 @@ func Remove(path string) {
 
 // 3. value kept, error blanked.
 func Port(s string) int {
-	n, _ := strconv.Atoi(s) // MISS(NORULE): n is 0 on bad input and nothing says so
+	n, _ := strconv.Atoi(s) // HIT(ERR002): n is 0 on bad input and companion error was discarded
 	return n
 }
 
@@ -32,13 +32,13 @@ func Size(path string) int64 {
 	if err != nil {
 		println("stat failed")
 	}
-	return fi.Size() // MISS(NORULE): fi is nil when err != nil; Rust's Result gives no value on Err
+	return fi.Size() // HIT(ERR002): fi is nil when err != nil; Rust's Result gives no value on Err
 }
 
 // 5. shadowed err: the inner := declares a new err, the outer one is returned as nil.
 func Load(path string) (n int, err error) {
 	if path != "" {
-		data, err := os.ReadFile(path) // MISS(NORULE): this err shadows the result; its failure is lost
+		data, err := os.ReadFile(path) // HIT(ERR003): this err shadows the result; its failure is lost
 		if err == nil {
 			n = len(data)
 		}
@@ -52,7 +52,7 @@ func Write(path string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close() // MISS(NORULE): a failed flush on Close is lost; Rust's File drop also drops it, so partly a draw
+	defer f.Close() // HIT(ERR005): a failed flush on Close is lost on a writable file
 	_, err = f.Write(data)
 	return err
 }

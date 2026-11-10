@@ -650,11 +650,11 @@ func TestVetCLIContract(t *testing.T) {
 	vetExpectCode(t, got, "gocap type error -json", 1)
 
 	// -fix: gocap offers no suggested fixes, and the x/tools driver in -fix mode prints no diagnostics
-	// and exits 0 (go/analysis/internal/checker/checker.go:194-219). `gocap -fix ./...` therefore passes
-	// a package with findings.
-	r := got["gocap -fix"]
-	vetKnownBug(t, "RB-FIX", fmt.Sprintf("gocap -fix exits %d and prints nothing for a package with a SAFE003 finding", r.code),
-		r.code == 0 && count(r) == 0 && count(got["gocap findings"]) > 0)
+	// and exits 0 (go/analysis/internal/checker/checker.go:194-219). cmd/gocap therefore refuses the
+	// flag (RB-FIX, fixed): exit 2 and a message, instead of a pass for a package with findings.
+	if r := got["gocap -fix"]; r.code != 2 || !strings.Contains(r.stderr, "-fix is not supported") {
+		t.Errorf("RB-FIX: gocap -fix exits %d with stderr %q; want 2 and a refusal", r.code, r.stderr)
+	}
 
 	// -c prints context and keeps the findings exit code.
 	vetExpectCode(t, got, "gocap -c=1", 3)
@@ -666,12 +666,14 @@ func TestVetCLIContract(t *testing.T) {
 	if count(got["vet GOOS=windows"]) != count(got["gocap GOOS=windows"]) {
 		t.Errorf("drivers disagree under GOOS=windows: vet %d, gocap %d", count(got["vet GOOS=windows"]), count(got["gocap GOOS=windows"]))
 	}
-	// -tags: go vet honours it; gocap accepts it and ignores it ("no effect (deprecated)",
-	// go/analysis/internal/analysisflags/flags.go:86), so the file it guards is never analysed and the
-	// run exits 0. GOFLAGS=-tags=... works for both.
-	vetKnownBug(t, "RB-TAGS", fmt.Sprintf("gocap -tags=vettag: exit %d, %d findings; go vet -tags=vettag: exit %d, %d findings; gocap GOFLAGS=-tags=vettag: %d findings",
-		got["gocap -tags vettag"].code, count(got["gocap -tags vettag"]), got["vet -tags vettag"].code, count(got["vet -tags vettag"]), count(got["gocap GOFLAGS=-tags"])),
-		count(got["gocap -tags vettag"]) == 0 && count(got["vet -tags vettag"]) > 0)
+	// -tags: go vet honours it; the driver of gocap accepts it and ignores it ("no effect
+	// (deprecated)", go/analysis/internal/analysisflags/flags.go:86). cmd/gocap hands it to the go
+	// command through GOFLAGS (RB-TAGS, fixed), so both drivers analyse the file it guards.
+	// GOFLAGS=-tags=... works for both.
+	if a, v := count(got["gocap -tags vettag"]), count(got["vet -tags vettag"]); a != v || a == 0 || got["gocap -tags vettag"].code == 0 {
+		t.Errorf("RB-TAGS: gocap -tags=vettag: exit %d, %d findings; go vet -tags=vettag: exit %d, %d findings",
+			got["gocap -tags vettag"].code, a, got["vet -tags vettag"].code, v)
+	}
 	if count(got["gocap GOFLAGS=-tags"]) != count(got["vet -tags vettag"]) {
 		t.Errorf("GOFLAGS=-tags: gocap %d findings, go vet -tags %d", count(got["gocap GOFLAGS=-tags"]), count(got["vet -tags vettag"]))
 	}

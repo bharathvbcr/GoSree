@@ -29,6 +29,8 @@ package stress_test
 import (
 	"fmt"
 	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -42,13 +44,14 @@ import (
 
 	"github.com/bharathvbcr/gocap/internal/annot"
 	"github.com/bharathvbcr/gocap/passes/borrow"
+	"github.com/bharathvbcr/gocap/passes/errcheck"
 	"github.com/bharathvbcr/gocap/passes/ownership"
 	"github.com/bharathvbcr/gocap/passes/unsafeban"
 )
 
 // cliAnalyzers is the analyzer set of cmd/gocap/main.go, in its order.
 func cliAnalyzers() []*analysis.Analyzer {
-	return []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer, borrow.Analyzer}
+	return []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer, borrow.Analyzer, errcheck.Analyzer}
 }
 
 var (
@@ -296,8 +299,32 @@ func readMarkers(t *testing.T, p *packages.Package) *fixture {
 		}
 		m[k][code] = true
 	}
+	// Markers are read from the loaded files and from the Go files a build constraint excludes: the
+	// checker reads those at the syntax level and reports on them (SAFE001), so they carry markers.
+	type unit struct {
+		fset *token.FileSet
+		f    *ast.File
+	}
+	var units []unit
 	for _, f := range p.Syntax {
-		name := p.Fset.PositionFor(f.Pos(), false).Filename
+		units = append(units, unit{p.Fset, f})
+	}
+	ignoredFset := token.NewFileSet()
+	for _, name := range p.IgnoredFiles {
+		if !strings.HasSuffix(name, ".go") {
+			continue
+		}
+		// A syntax error leaves a partial tree, which still holds the comments before the error.
+		f, err := parser.ParseFile(ignoredFset, name, nil, parser.ParseComments)
+		if f == nil {
+			t.Errorf("reading excluded fixture file %s: %v", name, err)
+			continue
+		}
+		units = append(units, unit{ignoredFset, f})
+	}
+	for _, u := range units {
+		f, fset := u.f, u.fset
+		name := fset.PositionFor(f.Pos(), false).Filename
 		witnesses := len(fx.witness)
 		for _, cg := range f.Comments {
 			for _, c := range cg.List {
@@ -308,7 +335,7 @@ func readMarkers(t *testing.T, p *packages.Package) *fixture {
 				case witnessRE.MatchString(text):
 					fx.witness = append(fx.witness, name)
 				}
-				k := lineKey{name, p.Fset.PositionFor(c.Pos(), false).Line}
+				k := lineKey{name, fset.PositionFor(c.Pos(), false).Line}
 				for _, m := range markerRE.FindAllStringSubmatch(text, -1) {
 					switch m[1] {
 					case "HIT":

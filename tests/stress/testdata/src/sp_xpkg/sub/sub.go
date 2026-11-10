@@ -40,10 +40,10 @@ func (r *Reg) Touch() {
 	}
 }
 
-// Spawn starts its callback on another goroutine without claiming it: the go statement is checked
-// here.
+// Spawn starts its callback on another goroutine; FuncFact.Spawns propagates that goroutine
+// boundary to callers.
 func Spawn(f func()) {
-	go f() // HIT(SAFE002)
+	go f()
 }
 
 // SpawnIso claims its callback.

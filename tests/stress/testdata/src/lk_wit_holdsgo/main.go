@@ -24,7 +24,7 @@ func (s *S) bumpLocked() { s.n++ }
 func main() {
 	s := &S{}
 	s.mu.Lock()
-	go s.bumpLocked() // MISS(SAFE009): the new goroutine does not hold s.mu
+	go s.bumpLocked() // HIT(SAFE009): the new goroutine does not hold s.mu
 	s.mu.Unlock()
 	time.Sleep(200 * time.Millisecond)
 	// Nothing orders the helper's write before this one: the helper never touched s.mu.

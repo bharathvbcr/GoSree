@@ -31,7 +31,7 @@ func main() {
 	}()
 	m := (*Mutable)(c)
 	for i := 0; i < 1000; i++ {
-		m.port = i // MISS(SAFE005): writes the shared imm *Config through a *Mutable conversion
+		m.port = i // HIT(SAFE005): writes the shared imm *Config through a *Mutable conversion
 	}
 	wg.Wait()
 }

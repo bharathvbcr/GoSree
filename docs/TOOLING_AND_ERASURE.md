@@ -1,6 +1,6 @@
 # GoSree (`gosree` / `gocap`) Tooling, Erasure & Verification Guide
 
-[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Tooling](TOOLING_AND_ERASURE.md)
+[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Error Discipline](ERROR_DISCIPLINE.md) | [Tooling](TOOLING_AND_ERASURE.md)
 
 ---
 
@@ -10,11 +10,14 @@
 
 ## 1. CLI Analysis Tool (`cmd/gosree` / `cmd/gocap`)
 
-[`cmd/gosree`](file:///Users/bharath/Code/devtools/gocap/cmd/gosree/main.go) (and [`cmd/gocap`](file:///Users/bharath/Code/devtools/gocap/cmd/gocap/main.go)) is a composite analyzer built on `golang.org/x/tools/go/analysis/multichecker`. It runs the following passes in parallel:
-- [`internal/annot`](file:///Users/bharath/Code/devtools/gocap/internal/annot/annot.go): Directive parsing & index construction
-- [`passes/unsafeban`](file:///Users/bharath/Code/devtools/gocap/passes/unsafeban/unsafeban.go): `SAFE001` unsafe operations ban
-- [`passes/borrow`](file:///Users/bharath/Code/devtools/gocap/passes/borrow/borrow.go): `BORROW001`-`BORROW004` second-class borrow & NLL checks
-- [`passes/ownership`](file:///Users/bharath/Code/devtools/gocap/passes/ownership/ownership.go): `SAFE002`-`SAFE009`, `CAP003` capability and concurrency checks
+[`cmd/gosree`](../cmd/gosree/main.go) and [`cmd/gocap`](../cmd/gocap/main.go) are composite analyzers built on `golang.org/x/tools/go/analysis/multichecker`. Both register the same five analyzers (`cmd/gosree/main.go:18`, `cmd/gocap/main.go:39`):
+- [`internal/annot`](../internal/annot/annot.go): directive parsing & index construction (`safeannot`)
+- [`passes/unsafeban`](../passes/unsafeban/unsafeban.go): `SAFE001` unsafe operations ban (`safeunsafe`)
+- [`passes/ownership`](../passes/ownership/ownership.go): `SAFE002`-`SAFE009`, `CAP003` capability and concurrency checks (`safeownership`)
+- [`passes/borrow`](../passes/borrow/borrow.go): `BORROW001`-`BORROW004` second-class borrow & NLL checks (`borrow`)
+- [`passes/errcheck`](../passes/errcheck/errcheck.go): `ERR001`-`ERR005` error-discipline checks (`safeerr`), solved by the Rust engine described in 1.5
+
+**Only `cmd/gocap` has the command-line preflight and the exit-code contract of 1.3.1-1.3.2.** `cmd/gosree` is a bare `multichecker.Main` call (`cmd/gosree/main.go:17-19`), so it accepts `-fix`, `-diff` and `-tags` as the stock driver does and exits 0 under `-json` even with findings. Use `gocap` as the gate.
 
 ```mermaid
 flowchart TD
@@ -45,9 +48,32 @@ You can also run `gocap` directly:
 ./build/gocap ./...
 ```
 
+### 1.3.1 Exit Codes (`cmd/gocap` only)
+Defined in `cmd/gocap/preflight.go:13-16`:
+
+| Code | Meaning |
+|---|---|
+| 0 | every package loaded, type-checked and analysed, nothing reported |
+| 1 | a package failed to load or type-check, or an analyzer failed: no verdict. This outranks 3; findings from packages that did load are still printed |
+| 2 | a flag `gocap` refuses or cannot parse (usage) |
+| 3 | every package analysed and at least one finding reported |
+
+Under `go vet -vettool`, the status is `go vet`'s own: non-zero for findings and for failures alike (`cmd/gocap/main.go:6-9`), so the 1/3 distinction exists only in standalone mode.
+
+### 1.3.2 Flag Preflight (`cmd/gocap` only)
+`gocap` reads its command line before the driver does (`cmd/gocap/preflight.go`, tests in `preflight_test.go`):
+- **`-fix` and `-diff` are refused with exit 2**: `gocap` offers no suggested fixes, and the stock driver would exit 0 printing nothing, so a gate would pass code with findings (`preflight.go:80`).
+- **`-tags a,b`** must be comma-separated (a space-separated list is refused). It is forwarded to the `go` command through `GOFLAGS` so package loading honours it; the stock driver accepts the flag and ignores it (`preflight.go:85-87`, `main.go:58-59`).
+- **`-test=false`** prints a stderr warning that test files are not analysed (`preflight.go:109`).
+- **`-NAME=false`, or `-NAME` for one pass** (which then runs only the named passes), prints a stderr warning listing the passes switched off, and that exit 0 no longer means those rules were checked (`preflight.go:133`).
+- **`-json`**: the stock driver exits 0 even with findings. `gocap` re-runs itself as a child, passes the JSON through, and re-derives the status: a non-empty findings list gives 3, an `{"error": ...}` entry gives 1 (failure outranks findings), unreadable output gives 1 (`main.go:88-145`).
+- `-V`, `-flags` and `-help` pass straight through to the driver.
+
 ### 1.4 CI/CD Integration (GitHub Actions Example)
+Gate on the standalone binary to get the exit-code contract. `go vet -vettool` also works but reports only pass/fail. For the native solver build the Rust library first (1.5); otherwise the pure-Go oracle runs.
+
 ```yaml
-name: gocap Static Analysis
+name: gosree Static Analysis
 on: [push, pull_request]
 
 jobs:
@@ -58,21 +84,50 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27'
+      # ../gusset must be checked out next to this repo (go.mod replace directive).
+      # Without the Rust archive a cgo build fails at link time (undefined gosree_gusset_init);
+      # set CGO_ENABLED=0 instead to use the pure-Go oracle and skip this step.
+      - name: Build Rust engine
+        run: cd rust && cargo build --release
       - name: Build gocap
         run: go build -o build/gocap ./cmd/gocap
-      - name: Run gocap Verification
-        run: go vet -vettool=$(pwd)/build/gocap ./...
+      - name: Gate
+        run: |
+          ./build/gocap ./...
+          # 0 clean, 1 no verdict (load/type/analyzer failure), 2 bad flags, 3 findings
 ```
+
+Rules for a trustworthy gate, all derived from the behaviour above:
+- Treat every non-zero status as a failed job; 1 means the code was not fully analysed, not that it is clean.
+- Do not pass `-fix`/`-diff` (refused), and avoid `-test=false` and `-NAME=false`: each only prints a warning, and the job still exits 0 for a narrower check than you intended.
+- With `-json`, read the exit status of `gocap`, not of the pipeline's last stage, or the findings status is lost.
+- Build tags for the standalone binary go through `gocap -tags a,b` (comma-separated), not a space-separated list.
+
+### 1.5 Build Prerequisites (Rust Engine and the Pure-Go Fallback)
+The `safeerr` pass solves its dataflow in an in-process Rust engine hosted through [gusset](https://github.com/bharathvbcr/gusset). To link it you need:
+- a **sibling `../gusset` checkout**: `go.mod` has `replace github.com/bharathvbcr/gusset => ../gusset`, and `rust/gusset-engine` has a Cargo path dependency on `../../../gusset/crates/gusset`;
+- the Rust library built first: `cd rust && cargo build --release`. This produces `rust/target/release/libgusset.a` (the `gusset-engine` staticlib is named `gusset`), which the cgo directive finds with `-L${SRCDIR}/../../rust/target/release` (`internal/gusseterr/engine_unix.go:8`). Gusset's own `-lgusset` link line (`gusset/internal/ffi/ffi.go:28`) then resolves to this archive. `rust/target/` is gitignored;
+- cgo enabled, on a unix platform.
+
+```bash
+(cd rust && cargo build --release)
+go build -o build/gocap ./cmd/gocap
+```
+
+On `!unix || !cgo` the build selects `internal/gusseterr/engine_other.go` instead (`//go:build !unix || !cgo`): `NativeActive()` is false and `SolveFrame` runs the pure-Go reference oracle, documented in that file as bit-exact. No Rust toolchain or `../gusset` link step is needed for that path. The error-discipline summary reports which one ran (`UsedRustGusset`), and `internal/gusseterr/parity_test.go` compares the two when the native engine is active.
+
+Checked: `CGO_ENABLED=0 go build ./cmd/gosree` exits 0 in a checkout with `../gusset` present. Building without that sibling checkout was not tested.
 
 ---
 
 ## 2. AST Erasure Tool (`cmd/gocap-erase`)
 
-[`cmd/gocap-erase`](file:///Users/bharath/Code/devtools/gocap/cmd/gocap-erase/main.go) transforms Go source files that use `cap.*` marker types into standard Go code with **zero dependencies**:
-- Rewrites `cap.Mut[T]` and `cap.Ref[T]` to `*T`.
-- Rewrites `cap.Iso[T]` and `cap.Imm[T]` to `*T`.
-- Rewrites `cap.BorrowMut(x)`, `cap.Borrow(x)`, and `cap.Move(x)` to raw `x`.
-- Automatically strips unused imports of `github.com/bharathvbcr/gocap/cap`.
+[`cmd/gocap-erase`](../cmd/gocap-erase/main.go) transforms Go source files that use `cap.*` marker types into standard Go code with **zero dependencies**:
+- Rewrites the marker types `cap.Mut`, `cap.Mub`, `cap.Ref`, `cap.Rob`, `cap.Iso` and `cap.Imm` of `T` to `*T` (`cmd/gocap-erase/erase.go:24`).
+- Rewrites the identity helpers `cap.BorrowMut`, `cap.Borrow`, `cap.BorrowRef`, `cap.BorrowMub`, `cap.BorrowRob` and `cap.Move` to the raw argument (`erase.go:27`).
+- Strips every directive comment, in any accepted prefix: `//gosree:`, `//sree:`, `//gocap:`, `//safe:` and their `/*...*/` forms (`main.go:489-494`).
+- Removes the `cap` import, under either the `gocap` or the `gosree` module path (`erase.go:15-18`).
+- Refuses, with an explanation, a file where erasing would change program meaning, rather than guessing (`erase.go:110`).
 - Formats rewritten output with standard `go/format`.
 
 ```mermaid
@@ -97,6 +152,10 @@ Flags:
   -d         display diffs instead of rewriting files
 ```
 
+Exit status: 0 everything requested was done (a file needing no erasure counts); 1 a file could not be erased or written, a path was unusable, or options conflict; 2 invalid flags. With `-w` the run is all-or-nothing: nothing is written unless every file erased (`cmd/gocap-erase/main.go:10-21`). Walks skip hidden directories, `vendor`, `testdata` and symbolic links.
+
+**Error-discipline constructs are not handled by erasure, and do not need to be.** `safeerr` (`ERR001`-`ERR005`) checks ordinary Go error handling and has no marker types or helper calls of its own. `gocap-erase` contains no errcheck-specific logic (verified: no `ERR00*` or errcheck references in `cmd/gocap-erase`), so an unhandled error, a lost `err`, or a typed-nil error survives erasure unchanged. Erasure only removes the capability markers and directives; run the analyzers before erasing.
+
 ### 2.2 Usage Examples
 ```bash
 # Preview diffs before applying
@@ -113,7 +172,7 @@ cat input.go | gocap-erase -
 
 ## 3. Corpus Evaluation & Benchmarking (`cmd/gocap-corpus`)
 
-[`cmd/gocap-corpus`](file:///Users/bharath/Code/devtools/gocap/cmd/gocap-corpus/main.go) measures `gocap` across large real-world Go codebases and the official Go runtime race detector test suite.
+[`cmd/gocap-corpus`](../cmd/gocap-corpus/main.go) measures `gocap` across large real-world Go codebases and the official Go runtime race detector test suite.
 
 ```mermaid
 flowchart TD
@@ -141,18 +200,18 @@ go run ./cmd/gocap-corpus -module /path/to/service -tests -out build
 
 ## 4. Dual-Track 4-Tier E2E Acceptance Test Suite
 
-`gocap` includes a dual-track 4-tier verification framework located in [`tests/e2e/`](file:///Users/bharath/Code/devtools/gocap/tests/e2e/) and driven by [`tests/run_acceptance_tests.sh`](file:///Users/bharath/Code/devtools/gocap/tests/run_acceptance_tests.sh).
+`gocap` includes a dual-track 4-tier verification framework located in [`tests/e2e/`](../tests/e2e/) and driven by [`tests/run_acceptance_tests.sh`](../tests/run_acceptance_tests.sh).
 
 ```mermaid
 flowchart TD
     Runner["tests/run_acceptance_tests.sh"]
     
-    Runner --> Tier1["Tier 1: Core Feature Coverage (46 tests)\nIsolated verification of AC1-AC7"]
-    Runner --> Tier2["Tier 2: Boundary & Corner Cases (25 tests)\nAdversarial scopes, nested closures, loop CFGs"]
-    Runner --> Tier3["Tier 3: Combinations & Interactions (11 tests)\nCross-capability interplay (iso + imm + mub)"]
-    Runner --> Tier4["Tier 4: Real-World Workloads (14 tests)\nWorker pools, streaming pipelines, HTTP servers"]
+    Runner --> Tier1["Tier 1: Core Feature Coverage\nIsolated verification of AC1-AC7"]
+    Runner --> Tier2["Tier 2: Boundary & Corner Cases\nAdversarial scopes, nested closures, loop CFGs"]
+    Runner --> Tier3["Tier 3: Combinations & Interactions\nCross-capability interplay (iso + imm + mub)"]
+    Runner --> Tier4["Tier 4: Real-World Workloads\nWorker pools, streaming pipelines, HTTP servers"]
     
-    Tier1 --> Pass["All 96 Tests PASS (100% Green)"]
+    Tier1 --> Pass["Every tier must pass"]
     Tier2 --> Pass
     Tier3 --> Pass
     Tier4 --> Pass
@@ -160,7 +219,7 @@ flowchart TD
 
 ### 4.1 Acceptance Test Execution
 ```bash
-# Run all 96 acceptance tests across all 4 tiers
+# Run all acceptance tests across all 4 tiers
 bash tests/run_acceptance_tests.sh
 
 # Run a specific tier

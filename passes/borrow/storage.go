@@ -291,6 +291,17 @@ func (sc *storageChecker) isBorrowExpr(expr ast.Expr, isBorrowVar map[*types.Var
 		if sc.ix.BorrowAt(e.Pos()) != annot.BorrowNone {
 			return true
 		}
+		if funId, ok := unparen(e.Fun).(*ast.Ident); ok {
+			if fnObj, ok := sc.pass.TypesInfo.Uses[funId].(*types.Func); ok && sc.ssa != nil && sc.ssa.Pkg != nil && sc.ssa.Pkg.Prog != nil {
+				if callee := sc.ssa.Pkg.Prog.FuncValue(fnObj); callee != nil && len(callee.Blocks) > 0 {
+					for i, arg := range e.Args {
+						if calleeReturnsParam(callee, i) && sc.isBorrowExpr(arg, isBorrowVar) {
+							return true
+						}
+					}
+				}
+			}
+		}
 	case *ast.FuncLit:
 		capturesBorrow := false
 		if e.Body != nil {
@@ -1309,9 +1320,20 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 				pos = resolveInstructionPos(ins, fn)
 			}
 			if callee := ins.Common().StaticCallee(); callee != nil {
-				switch callee.Name() {
+				cName := callee.Name()
+				if idx := strings.IndexByte(cName, '['); idx >= 0 {
+					cName = cName[:idx]
+				}
+				switch cName {
 				case "BorrowMut", "BorrowMub", "Borrow", "BorrowRef", "BorrowRob":
-					if callee.Pkg != nil && callee.Pkg.Pkg != nil && (callee.Pkg.Pkg.Name() == "cap" || strings.HasSuffix(callee.Pkg.Pkg.Path(), "/cap")) {
+					var pkg *types.Package
+					if callee.Pkg != nil {
+						pkg = callee.Pkg.Pkg
+					} else if callee.Object() != nil {
+						pkg = callee.Object().Pkg()
+					}
+					if (pkg != nil && (pkg.Name() == "cap" || strings.HasSuffix(pkg.Path(), "/cap"))) ||
+						strings.Contains(callee.String(), "/cap.Borrow") || strings.HasPrefix(callee.String(), "cap.Borrow") {
 						isBorrowVal[ins] = true
 						for _, arg := range ins.Common().Args {
 							isBorrowVal[arg] = true
@@ -1353,6 +1375,56 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 			if hasBorrowArg && globalTargetName != "" {
 				sc.report(pos, StorageViolation, fmt.Sprintf(
 					"package variable '%s' cannot store second-class borrow", globalTargetName))
+			} else if callee := ins.Common().StaticCallee(); callee != nil && callee != fn {
+				bodyFn := callee
+				if o := bodyFn.Origin(); o != nil && len(o.Blocks) > 0 {
+					bodyFn = o
+				}
+				if bodyFn != fn && len(bodyFn.Blocks) > 0 {
+					for i, arg := range ins.Common().Args {
+						if i >= len(bodyFn.Params) {
+							break
+						}
+						if i < len(callee.Params) {
+							if pVar, ok := callee.Params[i].Object().(*types.Var); ok && (sc.ix.IsMub(pVar) || sc.ix.IsRob(pVar)) {
+								continue
+							}
+						}
+						if pVar, ok := bodyFn.Params[i].Object().(*types.Var); ok && (sc.ix.IsMub(pVar) || sc.ix.IsRob(pVar)) {
+							continue
+						}
+						valIsBorrow := isBorrowVal[arg]
+						fld := structHoldsBorrow[arg]
+						if fld == "" {
+							for sVal, fName := range structHoldsBorrow {
+								if isDerivedFrom(arg, sVal) {
+									fld = fName
+									break
+								}
+							}
+						}
+						if !valIsBorrow && fld == "" {
+							continue
+						}
+						if gName := calleeStoresParamInGlobal(bodyFn, i); gName != "" {
+							if fld != "" {
+								sc.report(pos, StorageViolation, fmt.Sprintf(
+									"borrow stored in struct field '%s' escapes stack frame", fld))
+							} else {
+								sc.report(pos, StorageViolation, fmt.Sprintf(
+									"package variable '%s' cannot store second-class borrow", gName))
+							}
+						}
+						if calleeReturnsParam(bodyFn, i) && canHoldBorrow(ins.Type()) {
+							if valIsBorrow {
+								isBorrowVal[ins] = true
+							}
+							if fld != "" {
+								structHoldsBorrow[ins] = fld
+							}
+						}
+					}
+				}
 			}
 
 		case *ssa.UnOp:
@@ -1504,16 +1576,42 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 				}
 			}
 
+		case *ssa.Select:
+			pos := ins.Pos()
+			if !pos.IsValid() {
+				pos = resolveInstructionPos(ins, fn)
+			}
+			for _, st := range ins.States {
+				if st.Dir != types.SendOnly || st.Send == nil {
+					continue
+				}
+				sPos := st.Pos
+				if !sPos.IsValid() {
+					sPos = pos
+				}
+				if isBorrowVal[st.Send] {
+					sc.report(sPos, StorageViolation,
+						"channel send cannot store second-class borrow")
+				}
+				if fld, ok := structHoldsBorrow[st.Send]; ok {
+					sc.report(sPos, StorageViolation, fmt.Sprintf(
+						"borrow stored in struct field '%s' escapes stack frame", fld))
+				}
+				for sVal, fld := range structHoldsBorrow {
+					if isDerivedFrom(st.Send, sVal) {
+						sc.report(sPos, StorageViolation, fmt.Sprintf(
+							"borrow stored in struct field '%s' escapes stack frame", fld))
+						break
+					}
+				}
+			}
+
 		case *ssa.Go:
 			pos := ins.Pos()
 			if !pos.IsValid() {
 				pos = resolveInstructionPos(ins, fn)
 			}
 			cc := ins.Common()
-			if fld, ok := structHoldsBorrow[cc.Value]; ok {
-				sc.report(pos, StorageViolation, fmt.Sprintf(
-					"borrow stored in struct field '%s' escapes stack frame", fld))
-			}
 			for _, arg := range cc.Args {
 				if isBorrowVal[arg] {
 					sc.report(pos, StorageViolation,
@@ -1533,6 +1631,56 @@ func (sc *storageChecker) isPackageGlobal(v *types.Var) bool {
 		return false
 	}
 	return v.Pkg() == sc.pass.Pkg && v.Parent() == sc.pass.Pkg.Scope()
+}
+
+func calleeStoresParamInGlobal(callee *ssa.Function, paramIdx int) string {
+	if callee == nil || paramIdx < 0 || paramIdx >= len(callee.Params) {
+		return ""
+	}
+	p := callee.Params[paramIdx]
+	for _, b := range callee.Blocks {
+		for _, ins := range b.Instrs {
+			st, ok := ins.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			if !canHoldBorrow(st.Val.Type()) {
+				continue
+			}
+			if st.Val == p || isDerivedFrom(st.Val, p) {
+				if g, ok := globalRoot(st.Addr); ok && g != nil {
+					return g.Name()
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func calleeReturnsParam(callee *ssa.Function, paramIdx int) bool {
+	if callee == nil || paramIdx < 0 || paramIdx >= len(callee.Params) || len(callee.Blocks) == 0 {
+		return false
+	}
+	p := callee.Params[paramIdx]
+	for _, b := range callee.Blocks {
+		for _, ins := range b.Instrs {
+			ret, ok := ins.(*ssa.Return)
+			if !ok {
+				continue
+			}
+			for _, r := range ret.Results {
+				if !canHoldBorrow(r.Type()) {
+					if _, isTP := r.Type().(*types.TypeParam); !isTP {
+						continue
+					}
+				}
+				if r == p || isDerivedFrom(r, p) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func structFieldName(fa *ssa.FieldAddr) string {

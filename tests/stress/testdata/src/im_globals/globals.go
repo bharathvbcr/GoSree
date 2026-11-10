@@ -23,8 +23,8 @@ var viaMethod stats // HIT(SAFE006) viaMethod.bump() writes viaMethod.n outside 
 
 func methodAttack() { viaMethod.bump() }
 
-// Attack: the global is an interface holding a pointer; globalRoot does not follow TypeAssert.
-var viaIface any = &stats{} // MISS(SAFE006): viaIface.(*stats).n = 1 writes through the global outside init
+// Attack: the global is an interface holding a pointer.
+var viaIface any = &stats{} // HIT(SAFE006): viaIface.(*stats).n = 1 writes through the global outside init
 
 func ifaceAttack() { viaIface.(*stats).n = 1 }
 
@@ -34,17 +34,17 @@ var viaPtr = &stats{} // HIT(SAFE006)
 func ptrAttack() { viaPtr.n = 1 }
 
 // Attack: a goroutine started by init keeps running after init (witness: im_w_initgo).
-var fromInitGoroutine int // MISS(SAFE006): written by a goroutine started in init; isInit exempts every closure nested in init
+var fromInitGoroutine int // HIT(SAFE006): written by a goroutine started in init
 
-// Attack: init stores a closure that main calls later; the closure counts as init.
-var fromInitClosure int // MISS(SAFE006): written by handler(), a closure created in init but run any time later
+// Attack: init stores a closure that main calls later.
+var fromInitClosure int // HIT(SAFE006): written by handler(), a closure created in init but run any time later
 
 var handler func()
 
 func callHandler() { handler() }
 
-// Attack: an init-only helper starts a goroutine, whose function is then init-only too.
-var fromInitHelperGoroutine int // MISS(SAFE006): loop is reached only from startLoop via `go`, so it counts as init-only although it runs after init
+// Attack: an init-only helper starts a goroutine.
+var fromInitHelperGoroutine int // HIT(SAFE006): loop is reached via `go` so it runs after init
 
 func init() {
 	table["a"] = 1

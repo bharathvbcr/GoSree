@@ -40,22 +40,19 @@ func wholeVsField() {
 	w.B = 2
 }
 
-// 4. two different fresh allocations: neither borrow has an identifiable owner, so both fall back
-// to the default owner name "x" and are compared by that name.
+// 4. two different fresh allocations: distinct composite literals have distinct synthetic owners.
 func freshAllocations() {
 	a := &Pair{} //gocap:mut
-	b := &Pair{} //gocap:mut // FP(BORROW002): two distinct fresh allocations; resolveOwner returns the default name "x" for a composite literal and checkConflictingBorrows matches owners by that name
+	b := &Pair{} //gocap:mut
 	a.A = 1
 	b.A = 2
 	a.B = 3
 }
 
-// 5. two borrows through two different pointer parameters, written as `&(*p).A` / `&(*q).A`:
-// resolveOwner has no case for *ast.StarExpr, so both owners become "x". (The same code written
-// `&p.A` / `&q.A` resolves to p and q and is accepted; the parenthesised deref is legal gofmt Go.)
+// 5. two borrows through two different pointer parameters, written as `&(*p).A` / `&(*q).A`.
 func derefDifferentPointers(p, q *Pair) {
 	a := &(*p).A //gocap:mut
-	b := &(*q).A //gocap:mut // FP(BORROW002): p and q are different parameters; resolveOwner has no *ast.StarExpr case, so both owners become the default name "x" and match
+	b := &(*q).A //gocap:mut
 	*a = 1
 	*b = 2
 	*a = 3
@@ -70,12 +67,11 @@ func derefControl(p, q *Pair) {
 	*a = 3
 }
 
-// 5c. the default name collides with a real variable called x: a fresh allocation conflicts with a
-// borrow of an unrelated local named x.
+// 5c. a fresh allocation does not collide with an unrelated local named x.
 func defaultNameCollides() {
 	x := 0
 	a := &x      //gocap:mut
-	b := &Pair{} //gocap:mut // FP(BORROW002): b is a fresh *Pair, unrelated to x; the unresolved owner's placeholder name "x" equals the real owner's name
+	b := &Pair{} //gocap:mut
 	b.A = 1
 	*a = 2
 }
@@ -90,13 +86,12 @@ func defaultNameRenamed() {
 }
 
 // 6. an alias made before the borrow: p and q are two names for x, reached through a pointer copy.
-// resolveOwner follows `p := &x` but not `q := p`, so the owners differ.
 func aliasBeforeBorrow() {
 	x := 0
 	p := &x
 	q := p
 	b1 := p //gocap:mut
-	b2 := q //gocap:mut // MISS(BORROW002): q == p == &x, so b1 and b2 are two live mutable borrows of x; docs/BORROW_CHECKING_AND_NLL.md §4 matrix row &mut/&mut
+	b2 := q //gocap:mut // HIT(BORROW002): q == p == &x, so b1 and b2 are two live mutable borrows of x
 	*b2 = 1
 	*b1 = 2
 }
@@ -122,7 +117,7 @@ func addTo(a, b *int) {
 
 func callerAliases() {
 	x := 0
-	addTo(&x, &x) // MISS(BORROW002): two \mub arguments are the same allocation, two simultaneous mutable borrows of x (docs/BORROW_CHECKING_AND_NLL.md §4, Mutable^1); Rust rejects f(&mut x, &mut x) (E0499)
+	addTo(&x, &x) // HIT(BORROW002): two \mub arguments are the same allocation, two simultaneous mutable borrows of x
 }
 
 // 9. a field reached through two paths: o.In.A via the struct and via a pointer to o.In.
@@ -130,7 +125,7 @@ func nestedPath() {
 	var o Outer
 	in := &o.In
 	b1 := &in.A   //gocap:mut
-	b2 := &o.In.A //gocap:mut // MISS(BORROW002): in == &o.In, so b1 and b2 both point at o.In.A
+	b2 := &o.In.A //gocap:mut // HIT(BORROW002): in == &o.In, so b1 and b2 both point at o.In.A
 	*b2 = 1
 	*b1 = 2
 }
@@ -158,7 +153,7 @@ func arrayDistinctElems() {
 func subSliceShares(s []int) {
 	t := s[1:]
 	b1 := &s[1] //gocap:mut
-	b2 := &t[0] //gocap:mut // MISS(BORROW002): t[0] and s[1] are the same element of one backing array
+	b2 := &t[0] //gocap:mut // HIT(BORROW002): t[0] and s[1] are the same element of one backing array
 	*b2 = 1
 	*b1 = 2
 }
@@ -179,7 +174,7 @@ func behindInterface(i any) {
 	p := i.(*Pair)
 	q := i.(*Pair)
 	b1 := &p.A //gocap:mut
-	b2 := &q.A //gocap:mut // MISS(BORROW002): p and q are the same *Pair, unboxed twice from i
+	b2 := &q.A //gocap:mut // HIT(BORROW002): p and q are the same *Pair, unboxed twice from i
 	*b2 = 1
 	*b1 = 2
 }

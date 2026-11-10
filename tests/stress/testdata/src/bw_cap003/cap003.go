@@ -52,7 +52,7 @@ func methodValueOfTuple(b *int) {
 //gocap:mub b
 func closureOfClosure(b *int) {
 	inner := func() { *b = 1 }
-	go func() { inner() }() // HIT(SAFE002) MISS(CAP003): inner captures b, and the goroutine calls inner
+	go func() { inner() }() // HIT(CAP003): inner captures b, and the goroutine calls inner
 }
 
 // 6. a helper that spawns: the borrow is passed into an ordinary call, and the callee starts the

@@ -266,12 +266,14 @@ func (st *state) checkBorrowEscape(g *graph, t transfer) bool {
 		}
 	}
 
-	// 4. Moving a borrow via cap.Move or passing a borrow to an owned (iso) parameter
-	if t.what == "moved by cap.Move" || strings.HasPrefix(t.what, "passed to owned parameter ") {
-		if vr, name, kindStr := st.identifyBorrow(g, t); vr != nil {
-			msg := fmt.Sprintf("stack-scoped borrow '%s' (%s) cannot cross goroutine boundary: cannot be %s", name, kindStr, t.what)
-			st.report(t.pos, BorrowEscape, msg)
-			return true
+	// 4. Moving a local borrow via cap.Move or passing a local borrow to an owned (iso) parameter
+	if _, isParam := t.v.(*ssa.Parameter); !isParam {
+		if t.what == "moved by cap.Move" || strings.HasPrefix(t.what, "passed to owned parameter ") {
+			if vr, name, kindStr := st.identifyBorrow(g, t); vr != nil {
+				msg := fmt.Sprintf("stack-scoped borrow '%s' (%s) cannot cross goroutine boundary: cannot be %s", name, kindStr, t.what)
+				st.report(t.pos, BorrowEscape, msg)
+				return true
+			}
 		}
 	}
 
@@ -310,13 +312,30 @@ func (st *state) borrowVarFromIdent(id *ast.Ident) *types.Var {
 }
 
 func (st *state) borrowFromExpr(expr ast.Expr) (*types.Var, string, string) {
-	if expr == nil {
+	return st.borrowFromExprInSyntax(expr, nil, 0)
+}
+
+func (st *state) borrowFromExprInSyntax(expr ast.Expr, syntax ast.Node, depth int) (*types.Var, string, string) {
+	if expr == nil || depth > 4 {
 		return nil, "", ""
 	}
 	if id := rootIdent(expr); id != nil {
 		if vr := st.borrowVarFromIdent(id); vr != nil {
 			if kStr, isB := st.borrowKind(vr); isB {
 				return vr, vr.Name(), kStr
+			}
+		}
+		if syntax != nil {
+			var vr *types.Var
+			if v, ok := st.pass.TypesInfo.Uses[id].(*types.Var); ok {
+				vr = v
+			} else if v, ok := st.pass.TypesInfo.Defs[id].(*types.Var); ok {
+				vr = v
+			}
+			if vr != nil {
+				if bVr, bName, kStr := st.resolveBorrowVarInSyntax(vr, syntax, depth+1); bVr != nil {
+					return bVr, bName, kStr
+				}
 			}
 		}
 	}
@@ -340,19 +359,100 @@ func (st *state) borrowFromExpr(expr ast.Expr) (*types.Var, string, string) {
 				}
 			}
 		}
+		if funId, ok := unparen(call.Fun).(*ast.Ident); ok {
+			if fnObj, ok := st.pass.TypesInfo.Uses[funId].(*types.Func); ok && st.ssa != nil && st.ssa.Pkg != nil && st.ssa.Pkg.Prog != nil {
+				if callee := st.ssa.Pkg.Prog.FuncValue(fnObj); callee != nil && len(callee.Blocks) > 0 {
+					for _, b := range callee.Blocks {
+						for _, ins := range b.Instrs {
+							if ret, ok := ins.(*ssa.Return); ok && len(ret.Results) == 1 {
+								if pi := paramRootIndex(ret.Results[0], callee); pi >= 0 && pi < len(call.Args) {
+									if bVr, bName, kStr := st.borrowFromExprInSyntax(call.Args[pi], syntax, depth+1); bVr != nil {
+										return bVr, bName, kStr
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 	return nil, "", ""
 }
 
+func (st *state) resolveBorrowVarInSyntax(vr *types.Var, syntax ast.Node, depth int) (*types.Var, string, string) {
+	if vr == nil || depth > 4 {
+		return nil, "", ""
+	}
+	if kStr, isB := st.borrowKind(vr); isB {
+		return vr, vr.Name(), kStr
+	}
+	if syntax == nil {
+		return nil, "", ""
+	}
+	var foundVr *types.Var
+	var foundName, foundKind string
+	ast.Inspect(syntax, func(n ast.Node) bool {
+		if n == nil || foundVr != nil {
+			return false
+		}
+		switch stmt := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range stmt.Lhs {
+				if i >= len(stmt.Rhs) {
+					break
+				}
+				if lid, ok := unparen(lhs).(*ast.Ident); ok {
+					var lv *types.Var
+					if v, ok := st.pass.TypesInfo.Defs[lid].(*types.Var); ok {
+						lv = v
+					} else if v, ok := st.pass.TypesInfo.Uses[lid].(*types.Var); ok {
+						lv = v
+					}
+					if lv == vr {
+						if bVr, bName, kStr := st.borrowFromExprInSyntax(stmt.Rhs[i], syntax, depth+1); bVr != nil {
+							foundVr, foundName, foundKind = bVr, bName, kStr
+							return false
+						}
+					}
+				}
+			}
+		case *ast.ValueSpec:
+			for i, nameId := range stmt.Names {
+				if i >= len(stmt.Values) {
+					break
+				}
+				if lv, ok := st.pass.TypesInfo.Defs[nameId].(*types.Var); ok && lv == vr {
+					if bVr, bName, kStr := st.borrowFromExprInSyntax(stmt.Values[i], syntax, depth+1); bVr != nil {
+						foundVr, foundName, foundKind = bVr, bName, kStr
+						return false
+					}
+				}
+			}
+		}
+		return true
+	})
+	return foundVr, foundName, foundKind
+}
+
 func (st *state) extractBorrowFromSend(snd *ast.SendStmt) (*types.Var, string, string) {
+	return st.extractBorrowFromSendInSyntax(snd, nil)
+}
+
+func (st *state) extractBorrowFromSendInSyntax(snd *ast.SendStmt, syntax ast.Node) (*types.Var, string, string) {
 	if snd == nil {
 		return nil, "", ""
 	}
-	return st.borrowFromExpr(snd.Value)
+	return st.borrowFromExprInSyntax(snd.Value, syntax, 0)
 }
 
 func (st *state) borrowFromVal(v ssa.Value) (*types.Var, string, string) {
-	for v != nil {
+	return st.borrowFromValSeen(v, map[ssa.Value]bool{})
+}
+
+func (st *state) borrowFromValSeen(v ssa.Value, seen map[ssa.Value]bool) (*types.Var, string, string) {
+	for v != nil && !seen[v] && len(seen) < 64 {
+		seen[v] = true
 		switch x := v.(type) {
 		case *ssa.Parameter:
 			if vr, ok := x.Object().(*types.Var); ok {
@@ -361,7 +461,83 @@ func (st *state) borrowFromVal(v ssa.Value) (*types.Var, string, string) {
 				}
 			}
 			return nil, "", ""
+		case *ssa.Phi:
+			for _, e := range x.Edges {
+				if vr, name, kStr := st.borrowFromValSeen(e, seen); vr != nil {
+					return vr, name, kStr
+				}
+			}
+			return nil, "", ""
+		case *ssa.Alloc:
+			for mv := range st.ix.MubVars {
+				if mv.Pos().IsValid() && mv.Pos() == x.Pos() {
+					return mv, mv.Name(), `\mub`
+				}
+			}
+			for rv := range st.ix.RobVars {
+				if rv.Pos().IsValid() && rv.Pos() == x.Pos() {
+					return rv, rv.Name(), `\rob`
+				}
+			}
+			if refs := x.Referrers(); refs != nil {
+				for _, ref := range *refs {
+					if store, ok := ref.(*ssa.Store); ok && store.Addr == x {
+						if vr, name, kStr := st.borrowFromValSeen(store.Val, seen); vr != nil {
+							return vr, name, kStr
+						}
+					}
+				}
+			}
+			return nil, "", ""
+		case *ssa.Call:
+			if callee := x.Call.StaticCallee(); callee != nil {
+				if isCapBorrowHelper(callee) && len(x.Call.Args) > 0 {
+					kStr := `\rob`
+					if strings.Contains(callee.Name(), "Mut") || strings.Contains(callee.Name(), "Mub") {
+						kStr = `\mub`
+					}
+					if alloc, ok := x.Call.Args[0].(*ssa.Alloc); ok {
+						for mv := range st.ix.MubVars {
+							if mv.Pos().IsValid() && mv.Pos() == x.Pos() {
+								return mv, mv.Name(), kStr
+							}
+						}
+						for rv := range st.ix.RobVars {
+							if rv.Pos().IsValid() && rv.Pos() == x.Pos() {
+								return rv, rv.Name(), kStr
+							}
+						}
+						if alloc.Comment != "" {
+							dummyVar := types.NewVar(x.Pos(), st.pass.Pkg, alloc.Comment, x.Type())
+							return dummyVar, alloc.Comment, kStr
+						}
+					}
+				} else if len(callee.Blocks) > 0 {
+					for _, b := range callee.Blocks {
+						for _, ins := range b.Instrs {
+							if ret, ok := ins.(*ssa.Return); ok && len(ret.Results) == 1 {
+								if pi := paramRootIndex(ret.Results[0], callee); pi >= 0 && pi < len(x.Call.Args) {
+									if vr, name, kStr := st.borrowFromValSeen(x.Call.Args[pi], seen); vr != nil {
+										return vr, name, kStr
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			return nil, "", ""
 		case *ssa.ChangeType:
+			v = x.X
+		case *ssa.Convert:
+			v = x.X
+		case *ssa.MakeInterface:
+			v = x.X
+		case *ssa.FieldAddr:
+			v = x.X
+		case *ssa.IndexAddr:
+			v = x.X
+		case *ssa.Slice:
 			v = x.X
 		case *ssa.UnOp:
 			if x.Op == token.MUL {
@@ -425,7 +601,7 @@ func (st *state) identifyBorrow(g *graph, t transfer) (*types.Var, string, strin
 		})
 
 		if matchedSend != nil {
-			if vr, name, kStr := st.extractBorrowFromSend(matchedSend); vr != nil {
+			if vr, name, kStr := st.extractBorrowFromSendInSyntax(matchedSend, syntax); vr != nil {
 				return vr, name, kStr
 			}
 		}
@@ -450,7 +626,7 @@ func (st *state) identifyBorrow(g *graph, t transfer) (*types.Var, string, strin
 			return true
 		})
 		if targetSend != nil {
-			if vr, name, kStr := st.extractBorrowFromSend(targetSend); vr != nil {
+			if vr, name, kStr := st.extractBorrowFromSendInSyntax(targetSend, syntax); vr != nil {
 				return vr, name, kStr
 			}
 		}
@@ -493,20 +669,20 @@ func (st *state) identifyBorrow(g *graph, t transfer) (*types.Var, string, strin
 					}
 				}
 				if targetArg != nil {
-					if vr, name, kStr := st.borrowFromExpr(targetArg); vr != nil {
+					if vr, name, kStr := st.borrowFromExprInSyntax(targetArg, syntax, 0); vr != nil {
 						return vr, name, kStr
 					}
 				}
 				return st.borrowFromVal(t.v)
 			} else if t.what == "receiver of a method started as a goroutine" {
 				if sel, ok := unparen(targetGo.Call.Fun).(*ast.SelectorExpr); ok {
-					if vr, name, kStr := st.borrowFromExpr(sel.X); vr != nil {
+					if vr, name, kStr := st.borrowFromExprInSyntax(sel.X, syntax, 0); vr != nil {
 						return vr, name, kStr
 					}
 				}
 				return st.borrowFromVal(t.v)
 			} else if t.what == "started as a goroutine" {
-				if vr, name, kStr := st.borrowFromExpr(targetGo.Call.Fun); vr != nil {
+				if vr, name, kStr := st.borrowFromExprInSyntax(targetGo.Call.Fun, syntax, 0); vr != nil {
 					return vr, name, kStr
 				}
 				return st.borrowFromVal(t.v)
@@ -546,7 +722,7 @@ func (st *state) identifyBorrow(g *graph, t transfer) (*types.Var, string, strin
 				targetArg = targetCall.Args[t.index]
 			}
 			if targetArg != nil {
-				if vr, name, kStr := st.borrowFromExpr(targetArg); vr != nil {
+				if vr, name, kStr := st.borrowFromExprInSyntax(targetArg, syntax, 0); vr != nil {
 					return vr, name, kStr
 				}
 			}
@@ -563,7 +739,11 @@ type capturedBorrow struct {
 }
 
 func (st *state) findBorrowsInLit(fl *ast.FuncLit) []capturedBorrow {
-	if fl == nil || fl.Body == nil {
+	return st.findBorrowsInLitInSyntax(fl, nil, 0)
+}
+
+func (st *state) findBorrowsInLitInSyntax(fl *ast.FuncLit, outerSyntax ast.Node, depth int) []capturedBorrow {
+	if fl == nil || fl.Body == nil || depth > 4 {
 		return nil
 	}
 	var res []capturedBorrow
@@ -584,6 +764,41 @@ func (st *state) findBorrowsInLit(fl *ast.FuncLit) []capturedBorrow {
 					seen[vr] = true
 					res = append(res, capturedBorrow{vr: vr, name: vr.Name(), kindStr: kStr})
 				}
+			} else if outerSyntax != nil {
+				// Check if vr is bound to a FuncLit in outerSyntax (nested closure capture)
+				ast.Inspect(outerSyntax, func(sub ast.Node) bool {
+					switch stmt := sub.(type) {
+					case *ast.AssignStmt:
+						for i, lhs := range stmt.Lhs {
+							if i < len(stmt.Rhs) {
+								if lid := rootIdent(lhs); lid != nil && lid.Name == vr.Name() {
+									if innerFl, ok := unparen(stmt.Rhs[i]).(*ast.FuncLit); ok && innerFl != fl {
+										for _, b := range st.findBorrowsInLitInSyntax(innerFl, outerSyntax, depth+1) {
+											if !seen[b.vr] {
+												seen[b.vr] = true
+												res = append(res, b)
+											}
+										}
+									}
+								}
+							}
+						}
+					case *ast.ValueSpec:
+						for i, name := range stmt.Names {
+							if name.Name == vr.Name() && i < len(stmt.Values) {
+								if innerFl, ok := unparen(stmt.Values[i]).(*ast.FuncLit); ok && innerFl != fl {
+									for _, b := range st.findBorrowsInLitInSyntax(innerFl, outerSyntax, depth+1) {
+										if !seen[b.vr] {
+											seen[b.vr] = true
+											res = append(res, b)
+										}
+									}
+								}
+							}
+						}
+					}
+					return true
+				})
 			}
 		}
 		return true
@@ -613,7 +828,7 @@ func (st *state) identifyCapturedBorrowsSpawn(g *graph, sp spawnSite) []captured
 	if mc := resolveClosureVal(sp.fn, 0); mc != nil {
 		if fn, ok := mc.Fn.(*ssa.Function); ok && fn != nil {
 			if fl, ok := fn.Syntax().(*ast.FuncLit); ok {
-				if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
+				if borrows := st.findBorrowsInLitInSyntax(fl, syntax, 0); len(borrows) > 0 {
 					return borrows
 				}
 			}
@@ -640,7 +855,7 @@ func (st *state) identifyCapturedBorrowsSpawn(g *graph, sp spawnSite) []captured
 			}
 			// Case 2a: Direct FuncLit (go func() { ... }())
 			if fl, ok := unparen(node.Call.Fun).(*ast.FuncLit); ok {
-				if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
+				if borrows := st.findBorrowsInLitInSyntax(fl, syntax, 0); len(borrows) > 0 {
 					addBorrows(borrows)
 					return false
 				}
@@ -654,7 +869,7 @@ func (st *state) identifyCapturedBorrowsSpawn(g *graph, sp spawnSite) []captured
 							if lid := rootIdent(lhs); lid != nil && lid.Name == id.Name {
 								if i < len(stmt.Rhs) {
 									if fl, ok := unparen(stmt.Rhs[i]).(*ast.FuncLit); ok {
-										if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
+										if borrows := st.findBorrowsInLitInSyntax(fl, syntax, 0); len(borrows) > 0 {
 											addBorrows(borrows)
 											return false
 										}
@@ -666,7 +881,7 @@ func (st *state) identifyCapturedBorrowsSpawn(g *graph, sp spawnSite) []captured
 						for i, name := range stmt.Names {
 							if name.Name == id.Name && i < len(stmt.Values) {
 								if fl, ok := unparen(stmt.Values[i]).(*ast.FuncLit); ok {
-									if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
+									if borrows := st.findBorrowsInLitInSyntax(fl, syntax, 0); len(borrows) > 0 {
 										addBorrows(borrows)
 										return false
 									}
@@ -687,7 +902,7 @@ func (st *state) identifyCapturedBorrowsSpawn(g *graph, sp spawnSite) []captured
 			}
 			for _, arg := range node.Args {
 				if fl, ok := unparen(arg).(*ast.FuncLit); ok {
-					if borrows := st.findBorrowsInLit(fl); len(borrows) > 0 {
+					if borrows := st.findBorrowsInLitInSyntax(fl, syntax, 0); len(borrows) > 0 {
 						addBorrows(borrows)
 					}
 				}

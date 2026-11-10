@@ -20,7 +20,7 @@ func validate(name string) *ValidationError {
 }
 
 func register(name string) error {
-	return validate(name) // MISS(NORULE): a nil *ValidationError becomes a non-nil error
+	return validate(name) // HIT(ERR004): a nil *ValidationError becomes a non-nil error
 }
 
 func main() {

@@ -652,7 +652,7 @@ func (g *graph) link(cc *ssa.CallCommon, sum *summary, result ssa.Value, skip in
 	at := func(pos, depth int) *node {
 		var v ssa.Value
 		switch {
-		case pos == skip || pos >= n:
+		case pos == skip || pos >= n || (pos < len(cc.Args) && sum.spawns(pos)):
 			return nil
 		case pos < len(cc.Args):
 			v = cc.Args[pos]

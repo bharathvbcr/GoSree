@@ -126,7 +126,7 @@ func expvarFunc() {
 func subtestParallel(t *testing.T) {
 	n := 0
 	for _, name := range []string{"a", "b"} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(name, func(t *testing.T) { // HIT(SAFE003): second iteration captures n after first t.Run spawned
 			t.Parallel()
 			n++ // MISS(SAFE008): the two parallel subtests run concurrently and both write n
 		})

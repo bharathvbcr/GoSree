@@ -7,7 +7,7 @@ package main
 
 import "sync"
 
-var hits int // MISS(SAFE006): written by a goroutine started in init, concurrently with main's reads
+var hits int // HIT(SAFE006): written by a goroutine started in init, concurrently with main's reads
 
 var wg sync.WaitGroup
 

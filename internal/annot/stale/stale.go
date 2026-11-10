@@ -12,6 +12,7 @@ import (
 
 	"github.com/bharathvbcr/gocap/internal/annot"
 	"github.com/bharathvbcr/gocap/passes/borrow"
+	"github.com/bharathvbcr/gocap/passes/errcheck"
 	"github.com/bharathvbcr/gocap/passes/ownership"
 	"github.com/bharathvbcr/gocap/passes/unsafeban"
 )
@@ -22,7 +23,7 @@ import (
 var Analyzer = &analysis.Analyzer{
 	Name:     "safestale",
 	Doc:      "report //gocap:unsafe escape hatches that mute no finding of any rule (" + annot.CategoryMalformed + ")",
-	Requires: []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer, borrow.Analyzer},
+	Requires: []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer, borrow.Analyzer, errcheck.Analyzer},
 	Run: func(pass *analysis.Pass) (any, error) {
 		ix := pass.ResultOf[annot.Analyzer].(*annot.Index)
 		ix.ReportStale(pass)

@@ -71,7 +71,7 @@ func mutAndRob() {
 	x := 1
 	//gocap:rob
 	b := &x //gocap:mut // HIT(SAFE007) b would be both a \mub and a \rob borrow; the same check as for a parameter rejects it
-	*b = 2
+	*b = 2  // HIT(BORROW003)
 }
 
 // Controls: misplaced directives that are reported.
