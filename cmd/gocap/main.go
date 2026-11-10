@@ -8,10 +8,11 @@ import (
 	"golang.org/x/tools/go/analysis/multichecker"
 
 	"github.com/bharathvbcr/gocap/internal/annot"
+	"github.com/bharathvbcr/gocap/passes/borrow"
 	"github.com/bharathvbcr/gocap/passes/ownership"
 	"github.com/bharathvbcr/gocap/passes/unsafeban"
 )
 
 func main() {
-	multichecker.Main(annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer)
+	multichecker.Main(annot.Analyzer, unsafeban.Analyzer, ownership.Analyzer, borrow.Analyzer)
 }

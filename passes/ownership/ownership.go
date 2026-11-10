@@ -11,6 +11,8 @@
 //	SAFE005  a //safe:imm type is malformed or written after construction
 //	SAFE006  a package variable is written outside initialisation and not //safe:guarded_by
 //	SAFE008  a handler writes memory it shares with its other invocations (handlerwrite.go)
+//	SAFE009  an access to //safe:guarded_by memory without holding its mutex (lockset.go)
+//	CAP003   a stack-scoped borrow (\mub or \rob) crosses a goroutine boundary
 //
 // A value crosses to another goroutine when it is an argument of a go statement, the closure a go
 // statement starts, a callback handed to a function that runs it on another goroutine (spawn.go), a
@@ -43,6 +45,8 @@ const (
 	HandlerWrite = "SAFE008"
 	// GuardViolation is an access to //safe:guarded_by memory without its mutex (lockset.go).
 	GuardViolation = "SAFE009"
+	// BorrowEscape is a stack-scoped borrow crossing a goroutine boundary.
+	BorrowEscape = "CAP003"
 	// UseAfterSynced is reported for SAFE003 uses that every path reaches only after a
 	// synchronisation point that is not a join for the move (forkjoin.go): a receive from another
 	// channel, a select, a mutex or cond, or a join shape the rule does not accept. The separate
@@ -57,7 +61,7 @@ const TransferRelated = "the transfer that causes this finding"
 // Analyzer is the ownership checker.
 var Analyzer = &analysis.Analyzer{
 	Name: "safeownership",
-	Doc:  "check moves of memory between goroutines, package-variable mutation, //safe:imm types and handler writes (SAFE002-SAFE006, SAFE008)",
+	Doc:  "check moves of memory between goroutines, package-variable mutation, //safe:imm types, handler writes, and borrow escapes (SAFE002-SAFE006, SAFE008, SAFE009, CAP003)",
 	Run:  run,
 	// unsafeban is required for its order only: it mutes SAFE001 findings with //safe:unsafe too, so
 	// it must have run before this pass counts the scopes that muted nothing (Stats.UnsafeStale).
@@ -138,8 +142,9 @@ func (st *state) graphOf(fn *ssa.Function) *graph {
 }
 
 type reportKey struct {
-	pos token.Pos
-	cat string
+	pos   token.Pos
+	cat   string
+	extra string
 }
 
 func run(pass *analysis.Pass) (any, error) {
@@ -201,6 +206,9 @@ func (st *state) newClassifier() *kinds.Classifier {
 }
 
 func (st *state) exportFacts(fns []*ssa.Function) {
+	if len(st.pass.Analyzer.FactTypes) == 0 {
+		return
+	}
 	for _, fn := range fns {
 		obj, ok := fn.Object().(*types.Func)
 		// Only exported functions can be called statically from another package; calls that reach an
@@ -243,7 +251,7 @@ func (st *state) report(pos token.Pos, cat, msg string) {
 // reportRelated reports a finding with related positions (the writes behind a declaration-site
 // SAFE006, say). Suppression and de-duplication go by the finding's own position.
 func (st *state) reportRelated(pos token.Pos, cat, msg string, related []analysis.RelatedInformation) {
-	k := reportKey{pos, cat}
+	k := reportKey{pos, cat, msg}
 	st.findings++
 	// A finding a transfer causes away from the transfer (a use after it, a handler's write) points
 	// back at it, so a reader, and a hatch, can find the transfer.
@@ -256,8 +264,9 @@ func (st *state) reportRelated(pos token.Pos, cat, msg string, related []analysi
 		if st.muted {
 			st.mutedFindings++
 		}
-		if !st.suppressed[k] {
-			st.suppressed[k] = true
+		sk := reportKey{pos, cat, ""}
+		if !st.suppressed[sk] {
+			st.suppressed[sk] = true
 			st.stats.Suppressed++
 		}
 		return

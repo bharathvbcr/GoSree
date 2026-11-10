@@ -56,10 +56,13 @@ func (n *node) find() *node {
 }
 
 type transfer struct {
-	instr ssa.Instruction
-	v     ssa.Value
-	pos   token.Pos
-	what  string
+	instr     ssa.Instruction
+	caseBlock *ssa.BasicBlock
+	v         ssa.Value
+	pos       token.Pos
+	what      string
+	opPos     token.Pos
+	index     int
 }
 
 type graph struct {
@@ -308,11 +311,12 @@ func (g *graph) instr(ins ssa.Instruction) {
 			}
 		}
 	case *ssa.Send:
-		g.transfer(ins, ins.X, "sent on a channel")
+		g.transferWithOp(ins, ins.X, ins.Pos(), 0, "sent on a channel")
 	case *ssa.Select:
-		for _, s := range ins.States {
+		for i, s := range ins.States {
 			if s.Dir == types.SendOnly && s.Send != nil {
-				g.transfer(ins, s.Send, "sent on a channel in select")
+				cb := selectCaseBlock(ins, i)
+				g.transferWithCase(ins, cb, s.Send, s.Pos, i, "sent on a channel in select")
 			}
 		}
 		g.val(ins)
@@ -344,8 +348,96 @@ func (g *graph) deriveOrForeign(v, x ssa.Value, desc string) {
 }
 
 func (g *graph) transfer(ins ssa.Instruction, v ssa.Value, what string) {
-	g.transfers = append(g.transfers, transfer{instr: ins, v: v, pos: ins.Pos(), what: what})
+	g.transferFull(ins, nil, v, token.NoPos, -1, what)
+}
+
+func (g *graph) transferWithOp(ins ssa.Instruction, v ssa.Value, opPos token.Pos, index int, what string) {
+	g.transferFull(ins, nil, v, opPos, index, what)
+}
+
+func (g *graph) transferWithCase(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Value, opPos token.Pos, index int, what string) {
+	g.transferFull(ins, cb, v, opPos, index, what)
+}
+
+func (g *graph) transferFull(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Value, opPos token.Pos, index int, what string) {
+	g.transfers = append(g.transfers, transfer{
+		instr:     ins,
+		caseBlock: cb,
+		v:         v,
+		pos:       ins.Pos(),
+		what:      what,
+		opPos:     opPos,
+		index:     index,
+	})
 	g.add(g.val(v), ev(evTransfer, ins, what))
+}
+
+func selectCaseBlock(sel *ssa.Select, stateIdx int) *ssa.BasicBlock {
+	var extract *ssa.Extract
+	for _, r := range *sel.Referrers() {
+		if ext, ok := r.(*ssa.Extract); ok && ext.Index == 0 {
+			extract = ext
+			break
+		}
+	}
+	if extract == nil {
+		return nil
+	}
+	for _, r := range *extract.Referrers() {
+		bin, ok := r.(*ssa.BinOp)
+		if !ok || bin.Op != token.EQL {
+			continue
+		}
+		c, ok := bin.Y.(*ssa.Const)
+		if !ok || c.IsNil() || c.Int64() != int64(stateIdx) {
+			c, ok = bin.X.(*ssa.Const)
+			if !ok || c.IsNil() || c.Int64() != int64(stateIdx) {
+				continue
+			}
+		}
+		for _, ir := range *bin.Referrers() {
+			if ifIns, ok := ir.(*ssa.If); ok {
+				b := ifIns.Block()
+				if len(b.Succs) > 0 {
+					return b.Succs[0]
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func resolveClosureVal(v ssa.Value, depth int) *ssa.MakeClosure {
+	if depth > 10 || v == nil {
+		return nil
+	}
+	switch val := v.(type) {
+	case *ssa.MakeClosure:
+		return val
+	case *ssa.ChangeType:
+		return resolveClosureVal(val.X, depth+1)
+	case *ssa.UnOp:
+		if val.Op == token.MUL {
+			if alloc, ok := val.X.(*ssa.Alloc); ok {
+				var lastClosure *ssa.MakeClosure
+				for _, ref := range *alloc.Referrers() {
+					if store, ok := ref.(*ssa.Store); ok && store.Addr == alloc {
+						if mc := resolveClosureVal(store.Val, depth+1); mc != nil {
+							lastClosure = mc
+						}
+					}
+				}
+				return lastClosure
+			}
+		}
+	case *ssa.Phi:
+		for _, edge := range val.Edges {
+			if mc := resolveClosureVal(edge, depth+1); mc != nil {
+				return mc
+			}
+		}
+	}
+	return nil
 }
 
 func (g *graph) goStmt(ins *ssa.Go) {
@@ -353,16 +445,20 @@ func (g *graph) goStmt(ins *ssa.Go) {
 	switch v := cc.Value.(type) {
 	case *ssa.Function, *ssa.Builtin:
 	case *ssa.MakeClosure:
-		g.transfer(ins, v, "captured by a goroutine")
+		g.transferWithOp(ins, v, token.NoPos, -1, "captured by a goroutine")
 	default:
-		what := "started as a goroutine"
-		if cc.IsInvoke() {
-			what = "receiver of a method started as a goroutine"
+		if mc := resolveClosureVal(v, 0); mc != nil {
+			g.transferWithOp(ins, mc, token.NoPos, -1, "captured by a goroutine")
+		} else {
+			what := "started as a goroutine"
+			if cc.IsInvoke() {
+				what = "receiver of a method started as a goroutine"
+			}
+			g.transferWithOp(ins, v, token.NoPos, -1, what)
 		}
-		g.transfer(ins, v, what)
 	}
-	for _, a := range cc.Args {
-		g.transfer(ins, a, "passed to a goroutine")
+	for i, a := range cc.Args {
+		g.transferWithOp(ins, a, token.NoPos, i, "passed to a goroutine")
 		g.written(ins, a, "passed to a goroutine, which may write it")
 	}
 	g.writtenCaptures(ins, cc.Value, "captured by a goroutine, which may write it")
@@ -418,7 +514,7 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		}
 		switch {
 		case sum.isIso(i):
-			g.transfer(ins, a, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
+			g.transferWithOp(ins, a, token.NoPos, i, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
 		case sum.leaks(i):
 			g.add(an, ev(evEscape, ins, "passed to "+name+", which may retain or share it"+note))
 		}
