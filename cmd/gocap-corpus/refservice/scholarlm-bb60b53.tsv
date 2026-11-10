@@ -474,3 +474,61 @@ internal/wisdev/session_store_update_0d3323a4_test.go	func TestUpdateIfMemoryRun
 internal/wisdev/session_stream_adversarial_test.go	func TestAdversarialTransientSharedReadFailureIsNotAGap(t *testing.T) {	\t\t\tgo func() {		before	//safe:unsafe IMM_BLOCKED:gateway: shares long-lived dependencies (gateway) that cannot be //safe:imm	SAFE002	IMM_BLOCKED:gateway	captured by a goroutine	TestAdversarialTransientSharedReadFailureIsNotAGap
 internal/wisdev/trace_steering_bus_test.go	func TestRegisterWithAFullPendingQueueNeverBlocks(t *testing.T) {	\tgo func() {		before	//safe:unsafe FP:JOIN_SHAPE: joined before the use by a shape the fork-join rule does not accept	SAFE003-forkjoin	FP:JOIN_SHAPE	other	TestRegisterWithAFullPendingQueueNeverBlocks
 internal/wisdev/workflow_agent_extra_test.go	func TestWorkflowAgent_Run(t *testing.T) {	\t\tgo func() {		before	//safe:unsafe IMM_BLOCKED:escape: the value is also kept elsewhere by design (shared dependency)	SAFE002,SAFE003-forkjoin,SAFE004	IMM_BLOCKED:escape	captured by a goroutine	TestWorkflowAgent_Run
+# B9 (item 4): guarded_by on the package variables item 3 sorted as mutex-protected (build/ref/final/safe006.txt),
+# and holds on the *Locked helpers that write them under their caller's lock.
+internal/storage/schema_presence.go	\tschemaPresence   SchemaPresence			trail	//safe:guarded_by schemaPresenceMu	SAFE006	GUARDED	mutex	item 3 triage: writers take schemaPresenceMu
+internal/safego/safego.go	\tpanicObserve     func(PanicEvent)			trail	//safe:guarded_by observerMu	SAFE006	GUARDED	mutex	item 3 triage: writers take observerMu
+internal/telemetry/startup_diagnostics.go	\tstartupDiagnostics        []startupDiagnostic			trail	//safe:guarded_by startupDiagnosticsMu	SAFE006	GUARDED	mutex	item 3 triage: writers take startupDiagnosticsMu
+internal/telemetry/startup_diagnostics.go	func queueStartupDiagnosticLocked(			before	//safe:holds startupDiagnosticsMu	SAFE009	GUARDED	mutex	writes startupDiagnostics; its callers hold startupDiagnosticsMu
+internal/telemetry/startup_diagnostics.go	\tstartupDiagnosticsDropped int			trail	//safe:guarded_by startupDiagnosticsMu	SAFE006	GUARDED	mutex	item 3 triage: writers take startupDiagnosticsMu
+internal/telemetry/startup_diagnostics.go	\tstartupDiagnosticsFlushed bool			trail	//safe:guarded_by startupDiagnosticsMu	SAFE006	GUARDED	mutex	item 3 triage: writers take startupDiagnosticsMu
+internal/telemetry/llm_error_observer.go	\tllmErrorObserver   func(LLMErrorEvent)			trail	//safe:guarded_by llmErrorObserverMu	SAFE006	GUARDED	mutex	item 3 triage: writers take llmErrorObserverMu
+internal/telemetry/log_sink.go	\tlogSinkWriter io.Writer			trail	//safe:guarded_by logSinkMu	SAFE006	GUARDED	mutex	item 3 triage: writers take logSinkMu
+internal/telemetry/metrics.go	\tfailureMetricRecorder   func(name string, attrs map[string]string, attributes map[string]any)			trail	//safe:guarded_by failureMetricRecorderMu	SAFE006	GUARDED	mutex	item 3 triage: writers take failureMetricRecorderMu
+internal/envknob/envknob.go	\twarned   = map[string]struct{}{}			trail	//safe:guarded_by warnedMu	SAFE006	GUARDED	mutex	item 3 triage: writers take warnedMu
+internal/resilience/secrets.go	\tsecretCache = make(map[string]cachedSecret)			trail	//safe:guarded_by cacheMu	SAFE006	GUARDED	mutex	item 3 triage: writers take cacheMu
+internal/resilience/secrets.go	\tsmClient    secretClient			trail	//safe:guarded_by smMu	SAFE006	GUARDED	mutex	item 3 triage: writers take smMu
+internal/resilience/secrets.go	\tsecretManagerUnavailableUntil time.Time			trail	//safe:guarded_by secretManagerUnavailableMu	SAFE006	GUARDED	mutex	item 3 triage: writers take secretManagerUnavailableMu
+internal/resilience/secrets.go	\tsecretManagerUnavailableErr   error			trail	//safe:guarded_by secretManagerUnavailableMu	SAFE006	GUARDED	mutex	item 3 triage: writers take secretManagerUnavailableMu
+internal/svcauth/oidc.go	\tshared   *source			trail	//safe:guarded_by sharedMu	SAFE006	GUARDED	mutex	item 3 triage: writers take sharedMu
+internal/usage/alerts.go	\talertConfigLoaded bool			trail	//safe:guarded_by alertConfigMu	SAFE006	GUARDED	mutex	item 3 triage: writers take alertConfigMu
+internal/usage/alerts.go	\talertConfig       AlertConfig			trail	//safe:guarded_by alertConfigMu	SAFE006	GUARDED	mutex	item 3 triage: writers take alertConfigMu
+internal/usage/default_provider_activity.go	\tdefaultProviderStore   ProviderActivityStore			trail	//safe:guarded_by defaultProviderStoreMu	SAFE006	GUARDED	mutex	item 3 triage: writers take defaultProviderStoreMu
+internal/usage/pricing.go	\tpricingLoaded bool			trail	//safe:guarded_by pricingMu	SAFE006	GUARDED	mutex	item 3 triage: writers take pricingMu
+internal/usage/pricing.go	\tpricingTable  map[string]PricingSchedule			trail	//safe:guarded_by pricingMu	SAFE006	GUARDED	mutex	item 3 triage: writers take pricingMu
+internal/llm/vertex.go	\tvertexProviderCooldownLogAt  = map[string]time.Time{}			trail	//safe:guarded_by vertexProviderCooldownLogMu	SAFE006	GUARDED	mutex	item 3 triage: writers take vertexProviderCooldownLogMu
+internal/llm/vertex.go	var vertexTestCooldownOpens = map[string]*vertexTestCooldowns{}			trail	//safe:guarded_by vertexProviderRateLimitMu	SAFE006	GUARDED	mutex	item 3 triage: writers take vertexProviderRateLimitMu
+internal/llm/vertex_flex.go	\tflexConfigCached *flexPayGoConfig			trail	//safe:guarded_by flexConfigMu	SAFE006	GUARDED	mutex	item 3 triage: writers take flexConfigMu
+internal/llm/vertex_flex.go	\tflexConfigLoaded bool			trail	//safe:guarded_by flexConfigMu	SAFE006	GUARDED	mutex	item 3 triage: writers take flexConfigMu
+internal/llm/models.go	\tcachedModels     ScholarModels			trail	//safe:guarded_by modelConfigMu	SAFE006	GUARDED	mutex	item 3 triage: writers take modelConfigMu
+internal/llm/models.go	\tmodelsLoaded     bool			trail	//safe:guarded_by modelConfigMu	SAFE006	GUARDED	mutex	item 3 triage: writers take modelConfigMu
+internal/llm/models.go	\tcachedEmbeddings ScholarEmbeddingModels			trail	//safe:guarded_by modelConfigMu	SAFE006	GUARDED	mutex	item 3 triage: writers take modelConfigMu
+internal/llm/models.go	\tembeddingsLoaded bool			trail	//safe:guarded_by modelConfigMu	SAFE006	GUARDED	mutex	item 3 triage: writers take modelConfigMu
+internal/llm/client.go	\trecoverableStructuredLastStart    time.Time			trail	//safe:guarded_by recoverableStructuredPaceMu	SAFE006	GUARDED	mutex	item 3 triage: writers take recoverableStructuredPaceMu
+internal/search/retraction_cache.go	\tsharedRetractionStore SharedRetractionCache			trail	//safe:guarded_by sharedRetractionMu	SAFE006	GUARDED	mutex	item 3 triage: writers take sharedRetractionMu
+internal/search/paperclip_fulltext.go	\tpaperclipSharedClientLoaded bool			trail	//safe:guarded_by paperclipLookupMu	SAFE006	GUARDED	mutex	item 3 triage: writers take paperclipLookupMu
+internal/search/paperclip_fulltext.go	\tpaperclipSharedClient       *paperclipClient			trail	//safe:guarded_by paperclipLookupMu	SAFE006	GUARDED	mutex	item 3 triage: writers take paperclipLookupMu
+internal/pycompute/client.go	\tsharedClients = map[string]*Client{}			trail	//safe:guarded_by sharedMu	SAFE006	GUARDED	mutex	item 3 triage: writers take sharedMu
+internal/evidence/citations/shared_engine.go	\tsharedGroundingEngineOnce sync.Once			trail	//safe:guarded_by sharedGroundingEngineMu	SAFE006	GUARDED	mutex	item 3 triage: writers take sharedGroundingEngineMu
+internal/evidence/citations/shared_engine.go	\tsharedGroundingEngine     *DefaultGroundingEngine			trail	//safe:guarded_by sharedGroundingEngineMu	SAFE006	GUARDED	mutex	item 3 triage: writers take sharedGroundingEngineMu
+internal/evidence/citations/shared_engine.go	\tforcedGroundingEngineOnce sync.Once			trail	//safe:guarded_by forcedGroundingEngineMu	SAFE006	GUARDED	mutex	item 3 triage: writers take forcedGroundingEngineMu
+internal/evidence/citations/shared_engine.go	\tforcedGroundingEngine     *DefaultGroundingEngine			trail	//safe:guarded_by forcedGroundingEngineMu	SAFE006	GUARDED	mutex	item 3 triage: writers take forcedGroundingEngineMu
+internal/evidence/citations/entailment_sidecar.go	\tsharedSidecarScorerOnce sync.Once			trail	//safe:guarded_by sharedSidecarScorerMu	SAFE006	GUARDED	mutex	item 3 triage: writers take sharedSidecarScorerMu
+internal/evidence/citations/entailment_sidecar.go	\tsharedSidecarScorer     *SidecarEntailmentScorer			trail	//safe:guarded_by sharedSidecarScorerMu	SAFE006	GUARDED	mutex	item 3 triage: writers take sharedSidecarScorerMu
+internal/wisdev/dossier_linkage_store.go	\tdossierLinkageCache   = map[string]dossierLinkageCacheEntry{}			trail	//safe:guarded_by dossierLinkageCacheMu	SAFE006	GUARDED	mutex	item 3 triage: writers take dossierLinkageCacheMu
+internal/api/images.go	\timageGenerationRequestTimeout   = 45 * time.Second			trail	//safe:guarded_by imageGenerationRequestTimeoutMu	SAFE006	GUARDED	mutex	item 3 triage: writers take imageGenerationRequestTimeoutMu
+# B9, by hand: four declarations whose text repeats as a reset inside a function (anchored after their
+# mutex's line), and seven struct-typed variables guarded by their own mutex field.
+internal/llm/vertex.go	\tvertexProviderRateLimitMu    sync.Mutex	\tvertexProviderRateLimitUntil = map[string]vertexProviderCooldown{}		trail	//safe:guarded_by vertexProviderRateLimitMu	SAFE006	GUARDED	mutex	item 3 triage: writers take vertexProviderRateLimitMu
+internal/wisdev/cooldown_logging.go	\twisdevCooldownFallbackLogMu sync.Mutex	\twisdevCooldownFallbackLogAt = map[string]time.Time{}		trail	//safe:guarded_by wisdevCooldownFallbackLogMu	SAFE006	GUARDED	mutex	item 3 triage: writers take wisdevCooldownFallbackLogMu
+internal/wisdev/fulltext_reuse.go	\thydrationMissMu    sync.Mutex	\thydrationMissCache = map[string]hydrationMiss{}		trail	//safe:guarded_by hydrationMissMu	SAFE006	GUARDED	mutex	item 3 triage: writers take hydrationMissMu
+internal/wisdev/manuscript_model_access.go	\tmodelAccessMu    sync.Mutex	\tmodelAccessCache = map[modelAccessCacheKey]modelAccessCacheEntry{}		trail	//safe:guarded_by modelAccessMu	SAFE006	GUARDED	mutex	item 3 triage: writers take modelAccessMu
+internal/telemetry/research_run.go	var researchRunTelemetry = struct {	\tsink    ResearchRunTelemetrySink		trail	//safe:guarded_by mu	SAFE006	GUARDED	mutex	ConfigureResearchRunTelemetrySink and Shutdown take researchRunTelemetry.mu
+internal/telemetry/research_run.go	var researchRunTelemetry = struct {	\ttimeout time.Duration		trail	//safe:guarded_by mu	SAFE006	GUARDED	mutex	ConfigureResearchRunTelemetrySink and Shutdown take researchRunTelemetry.mu
+internal/telemetry/span_redaction.go	var spanKeyClasses = struct {	\tbyKey map[string]spanKeyClass		trail	//safe:guarded_by RWMutex	SAFE006	GUARDED	mutex	classifySpanKey takes the embedded RWMutex
+internal/search/pmc_efetch_fulltext.go	var pmcEfetchGate struct {	\tnext time.Time		trail	//safe:guarded_by mu	SAFE006	GUARDED	mutex	waitPMCEfetchSlot takes pmcEfetchGate.mu
+internal/search/hindsight_writer.go	var activeHindsightWriters = struct {	\tm  map[*hindsightWriter]struct{}		trail	//safe:guarded_by mu	SAFE006	GUARDED	mutex	register, unregister and DrainHindsightWrites take activeHindsightWriters.mu
+internal/search/hindsight_writer.go	var activeHindsightWriters = struct {	\tclosed bool		trail	//safe:guarded_by mu	SAFE006	GUARDED	mutex	set under mu before the drain snapshot (its own comment says so)
+internal/wisdev/tree_loop.go	var mctsBatchVerifierCooldown = struct {	\tuntil time.Time		trail	//safe:guarded_by Mutex	SAFE006	GUARDED	mutex	openMCTSBatchVerifierCooldown takes the embedded Mutex
+internal/api/wisdev_route_helpers.go	var routeConcurrencyGuards = struct {	\tlimiters map[string]chan struct{}		trail	//safe:guarded_by mu	SAFE006	GUARDED	mutex	withConcurrencyGuard takes routeConcurrencyGuards.mu
+internal/wisdev/fulltext_reuse.go	func evictExpiredHydrationMissesLocked(			before	//safe:holds hydrationMissMu	SAFE009	GUARDED	mutex	writes hydrationMissCache; its callers hold hydrationMissMu

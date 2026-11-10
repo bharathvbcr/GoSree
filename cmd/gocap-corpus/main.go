@@ -91,10 +91,11 @@ func main() {
 	subdir := flag.String("subdir", "", "with -git: the module's directory inside the repository")
 	annotate := flag.String("annotate", "", "with -module or -git: add the //safe directives of this annotation table (refservice/*.tsv) to the code first; needs -git, so the code annotated is a copy")
 	list := flag.Bool("list", false, "with -module or -git: also write every finding to <out>/module-findings.json")
+	censusFlag := flag.Bool("census", false, "with -annotate: resolve the table's production IMM_BLOCKED hatches to types and classify what stops each from being imm (writes <out>/census.json)")
 	flag.Parse()
 	log.SetFlags(0)
 	if *gitRepo != "" || *module != "" {
-		opts := moduleOpts{dir: *module, tests: *tests, patterns: flag.Args(), out: *out, list: *list}
+		opts := moduleOpts{dir: *module, tests: *tests, patterns: flag.Args(), out: *out, list: *list, census: *censusFlag}
 		if *gitRepo != "" {
 			if *module != "" || *rev == "" || *subdir == "" {
 				log.Fatal("-git needs -rev and -subdir, and replaces -module")
@@ -110,6 +111,9 @@ func main() {
 				log.Fatal(err)
 			}
 			opts.table = &tab
+		}
+		if opts.census && opts.table == nil {
+			log.Fatal("-census needs -annotate: it reads the table's IMM_BLOCKED rows")
 		}
 		runModule(opts)
 		return
