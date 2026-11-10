@@ -165,7 +165,7 @@ fresh memory. It stays owned while nothing outside its own object graph points i
 
 Shareable without ownership: pointer-free values, strings, channels, verified imm types and pointers
 to them, and a curated override table (`sync` and `sync/atomic` types, `*testing.T`,
-`context.Context`, `error`, `time.Time`, `*regexp.Regexp`, `*log.Logger`, `*slog.Logger`,
+`context.Context`, `context.CancelFunc`, `error`, `time.Time`, `*regexp.Regexp`, `*log.Logger`, `*slog.Logger`,
 `net.Listener`, ...). Each override is an **assumption, not a proof**; see `internal/kinds/kinds.go`.
 The `error` entry is the weakest one: it rests on the convention that errors are not mutated after
 creation.
@@ -181,7 +181,7 @@ analysis fails. `TestCallTablesResolve` runs the same check on the current toolc
 package but `golang.org/x/sync/errgroup`, which this module does not depend on; its entries are
 checked only when gocap analyses a program that imports it.
 `TestOverrideBudget` fails once type overrides, function overrides and spawners together exceed 100
-entries; today they hold 41 (28 + 4 + 9). Lock operations and `sync/atomic` define what a lock or a
+entries; today they hold 42 (29 + 4 + 9). Lock operations and `sync/atomic` define what a lock or a
 synchronised write is, rather than vouching for a callee, so they are not counted.
 
 ## How it works
@@ -432,6 +432,24 @@ every package, so a driver never parses diagnostic text.
 The hatch ratio, suppressed transfers over transfers, is the measurand of the abandon criterion
 under [Next](#next). Callbacks count as transfers, so a `net/http` service's handlers are in the
 denominator. Goroutines started by a library function missing from the spawner table are not.
+Beside the ratio the report counts:
+- flagged transfers (any finding, muted or not) and clean ones;
+- `//safe:unsafe` directives that muted nothing (`unsafe_stale`);
+- the checked claims: `guarded_by`, `holds`, valid imm types and iso parameters.
+
+A reference service is measured on an archived commit, not on a checkout:
+
+```bash
+go run ./cmd/gocap-corpus -git ~/src/repo -rev <sha> -subdir backend/svc \
+    -annotate cmd/gocap-corpus/refservice/<table>.tsv -list -out build/ref/<run> [-tests]
+```
+
+`-git` extracts the subdirectory at that commit with `git archive`, reading only the repository's
+object store, and records the full SHA. `-annotate` adds the `//safe` directives of a ledger table
+(one row per directive, with the finding it answers and its verdict) to the archived copy. A row
+that does not anchor, a directive that does not parse, or a count of parsed directives that differs
+from the table stops the run. `-list` writes every finding to `module-findings.json`, each with the
+transfer that caused it: SAFE003 and SAFE008 findings carry the transfer as a related position.
 
 To compare two builds of gocap with `go vet -vettool`, build two binaries at different paths. `go
 vet` caches results per tool binary, so one binary run twice with a different environment variable
@@ -494,7 +512,7 @@ Done:
 - callback functions as goroutine boundaries;
 - SAFE001 for dot imports of `unsafe` and functions without a Go body;
 - SAFE008 for handlers that write shared memory;
-- items 1 and 2 below.
+- items 1, 2 and 3 below.
 
 1. **Done:** a guarded-by rule. It came before item 2, since recording writes in summaries turns calls like
    `h.cache.Set(...)` into SAFE008 findings that need it. The guarded SAFE008 findings on the
@@ -589,14 +607,62 @@ Done:
    - one test.
 
    Every non-test write is under a mutex: checked line by line in the 2026-11-09 design review, plus
-   `client_telemetry.go:119`, which that review's prototype missed. The ratio is read against this
-   denominator, now that items 1 and 2 are done, by triaging until every remaining finding is a real
-   race or a policy call. SAFE008 findings are triaged with `//safe:guarded_by` or `//safe:imm`
-   first, and `//safe:unsafe` only for real policy calls: a `//safe:unsafe` on a handler
-   registration mutes every SAFE008 of that handler and counts as a suppressed transfer. Record the
-   `guarded_by` and `holds` count (`Stats.Guarded`, `Stats.Holds`) beside the ratio.
+   `client_telemetry.go:119`, which that review's prototype missed.
+
+   **Done: the triage.** The triage log is
+   [`refservice/scholarlm-bb60b53.md`](cmd/gocap-corpus/refservice/scholarlm-bb60b53.md). It has
+   each batch's prediction, made before its run, and its result. The ledger,
+   [`scholarlm-bb60b53.tsv`](cmd/gocap-corpus/refservice/scholarlm-bb60b53.tsv), has one row per
+   directive with its verdict. Both strata are measured on a `git archive` of `bb60b53`: the
+   `-tests` baseline reproduced the row above exactly. The production stratum (no `-tests`) is the
+   headline, since the abandon criterion is about a service, not its tests.
+
+   | Stratum | Transfers | Flagged | Hatched | Hatch ratio | Races found |
+   |---|---|---|---|---|---|
+   | production | 476 | 345 | 345 (all) | **72.5%** | 0 |
+   | `-tests` | 1,798 | 1,014 | 450: the production 345, plus 105 transfers at a seeded sample of 100 of the 575 test-only positions | 25.0% measured (sample only); 56.4% if every flagged transfer takes a hatch, as every sampled one did | 0 in the sample |
+
+   The design review predicted 50-70% and 30-50%: both **missed** high (the `-tests` figure by its
+   extrapolation).
+
+   "Races found" is what the reading found, not a proof of absence. 12 production transfers and 17
+   sampled test transfers were read by hand; the other hatches were classified by rules over each
+   transfer's findings, and the SAFE008 callees were sampled (7).
+
+   Beside the ratio:
+   - checked claims: 14 `guarded_by`, 9 `holds`, 1 imm, 8 iso;
+   - 0 stale `//safe:unsafe`;
+   - overrides 42 of 100. This item added `context.CancelFunc`, whose documentation says it may be
+     called by several goroutines at once.
+
+   What changed the count, in order:
+   - **Spawn wrappers.** `//safe:iso` on the service's spawn wrappers (`safego.SafeGo*`,
+     `detachedTasks.spawn*`) turned 137 production escapes into transfers. The design review had
+     found that its 113 `SafeGo*` calls were missing from the denominator.
+   - **`guarded_by` on the mutex-protected singletons.** SAFE008 went from 98 to 75. The rest are
+     writes the writes bit over-counts: interface and func-field calls (19), and writes to fresh or
+     local memory unified with the receiver (56). None of the 7 callees sampled writes shared memory
+     outside a lock.
+   - **Imm census.** Of the dependency types handlers and goroutines share, only `IdempotencyStore`
+     can be imm.
+   - **Hatches.** One hatch per flagged transfer. 324 of the 333 are `IMM_BLOCKED`: the transfer
+     shares a long-lived dependency (the router's `ServerConfig`, the `wisdevServer`, the
+     `AgentGateway`, a handler struct) whose type has interface, func-typed or exported fields.
+
+   Of the 73 production SAFE006, a reading of the source sorts 51 as mutex-protected, 13 as test
+   seams, 7 as `sync.Once` and 2 as generated. They are not annotated.
+
+   The abandon criterion applies at 100 table entries, and this item ends at 42. So the measurement
+   does not decide abandonment, but the diagnosis says more entries would not help: no flagged
+   transfer is blocked by a third-party type. The ratio is set by dependency containers that are
+   mutable in type and frozen in practice. gocap needs a checked claim for them: an imm rule that
+   accepts interface and func-typed fields set only during construction.
 4. Ownership of the channel's send end; joins through `select`; a differential test of the summaries
-   against `-gcflags=-m`.
+   against `-gcflags=-m`. From item 3:
+   - an imm rule for dependency containers frozen after construction;
+   - `SafeGoWG`'s join (43 SAFE003-forkjoin findings);
+   - the writes bit's two over-counts (75 SAFE008);
+   - SAFE006 for `sync.Once`-published variables.
 
 The project should be abandoned if a `net/http` reference service has a hatch ratio above 20% (see
 [Measuring the escape hatch](#measuring-the-escape-hatch-on-a-module)) once the type and function
@@ -626,3 +692,7 @@ covers unlocked writes, writes under `RLock`, reads after `Unlock`, the wrong mu
 another package's function, values leaking by return, by store and through a single result slot,
 closures not called in place, and a `holds` helper that unlocks; `errgroup` there is a stub under
 `testdata/src/golang.org/x/sync`, so `x/sync` stays out of the module's direct dependencies.
+`supp` also checks that a scope used only by SAFE001 is not stale, and that a use after a move points
+back at its transfer. `cmd/gocap-corpus` tests the anchor table (each placement and each refusal), the
+ledger parser, the archive of a nested subdirectory at an older commit, and that the module total
+sums every `Stats` field.

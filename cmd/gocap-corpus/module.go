@@ -5,25 +5,49 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
 
+	"github.com/bharathvbcr/gocap/internal/annot"
 	"github.com/bharathvbcr/gocap/passes/ownership"
 )
 
 // ModuleReport is the machine-readable result of -module, written to <out>/module-report.json.
 type ModuleReport struct {
-	GoVersion string         `json:"go_version"`
-	Dir       string         `json:"dir"`
-	Patterns  []string       `json:"patterns"`
-	Tests     bool           `json:"tests"`
-	Total     PackageStats   `json:"total"`
-	Packages  []PackageStats `json:"packages"`
+	GoVersion string `json:"go_version"`
+	// GocapCommit is `git describe --always --dirty` of the gocap checkout the tool was run from.
+	GocapCommit string   `json:"gocap_commit"`
+	Dir         string   `json:"dir"`
+	Patterns    []string `json:"patterns"`
+	Tests       bool     `json:"tests"`
+	// Repo, Rev and Subdir name the archived commit, for -git; Rev is the full SHA.
+	Repo   string `json:"repo,omitempty"`
+	Rev    string `json:"rev,omitempty"`
+	Subdir string `json:"subdir,omitempty"`
+	// Annotations counts the rows of the -annotate table added to the copy.
+	Annotations int            `json:"annotations"`
+	Total       PackageStats   `json:"total"`
+	Packages    []PackageStats `json:"packages"`
 }
+
+// moduleOpts is what -module and -git measure.
+type moduleOpts struct {
+	dir      string
+	git      *gitSource
+	table    *annotationTable
+	tests    bool
+	patterns []string
+	out      string
+	list     bool
+}
+
+type gitSource struct{ repo, rev, subdir string }
 
 // PackageStats is what gocap saw in one package (or, for the total, in all of them).
 type PackageStats struct {
@@ -33,6 +57,8 @@ type PackageStats struct {
 	Hatch float64 `json:"hatch_ratio"`
 	// Findings counts the diagnostics still reported, by category.
 	Findings map[string]int `json:"findings"`
+	// Clean counts transfers with no finding at all: Transfers - FlaggedTransfers.
+	Clean int `json:"clean_transfers"`
 }
 
 // HatchRatio is SuppressedTransfers / Transfers: how often memory crossing goroutines needed the
@@ -46,7 +72,30 @@ func ratio(a, b int) float64 {
 	return float64(a) / float64(b)
 }
 
-func runModule(dir string, tests bool, patterns []string, out string) {
+func runModule(o moduleOpts) {
+	rep := ModuleReport{GoVersion: runtime.Version(), GocapCommit: gocapCommit(), Tests: o.tests}
+	if o.git != nil {
+		short := o.git.rev
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		o.dir = filepath.Join(o.out, filepath.Base(filepath.Clean(o.git.subdir))+"@"+short)
+		sha, err := archiveRev(o.git.repo, o.git.rev, o.git.subdir, o.dir)
+		if err != nil {
+			log.Fatal(err)
+		}
+		rep.Repo, rep.Rev, rep.Subdir = o.git.repo, sha, o.git.subdir
+	}
+	if o.table != nil {
+		if o.table.rev == "" || !strings.HasPrefix(rep.Rev, o.table.rev) {
+			log.Fatalf("-annotate: the table was written for #rev %q, not %s", o.table.rev, rep.Rev)
+		}
+		if err := applyAnnotations(o.dir, o.table.rows); err != nil {
+			log.Fatalf("-annotate: %v", err)
+		}
+		rep.Annotations = len(o.table.rows)
+	}
+	dir, tests, patterns, out := o.dir, o.tests, o.patterns, o.out
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		log.Fatal(err)
@@ -75,7 +124,8 @@ func runModule(dir string, tests bool, patterns []string, out string) {
 	}
 
 	byID := map[string]*PackageStats{}
-	for _, act := range analyze(pkgs) {
+	acts := analyze(pkgs)
+	for _, act := range acts {
 		ps := byID[act.Package.ID]
 		if ps == nil {
 			ps = &PackageStats{Package: act.Package.ID, Findings: map[string]int{}}
@@ -93,25 +143,91 @@ func runModule(dir string, tests bool, patterns []string, out string) {
 		}
 	}
 
-	rep := ModuleReport{GoVersion: runtime.Version(), Dir: abs, Patterns: patterns, Tests: tests}
+	rep.Dir, rep.Patterns = abs, patterns
 	rep.Total = PackageStats{Package: "total", Findings: map[string]int{}}
 	for _, ps := range byID {
 		ps.Hatch = ps.HatchRatio()
+		ps.Clean = ps.Transfers - ps.FlaggedTransfers
 		rep.Packages = append(rep.Packages, *ps)
-		rep.Total.Transfers += ps.Transfers
-		rep.Total.SuppressedTransfers += ps.SuppressedTransfers
-		rep.Total.Suppressed += ps.Suppressed
-		rep.Total.UnsafeScope += ps.UnsafeScope
-		rep.Total.Guarded += ps.Guarded
-		rep.Total.Holds += ps.Holds
+		rep.Total.add(ps.Stats)
 		for c, n := range ps.Findings {
 			rep.Total.Findings[c] += n
 		}
 	}
 	rep.Total.Hatch = rep.Total.HatchRatio()
+	rep.Total.Clean = rep.Total.Transfers - rep.Total.FlaggedTransfers
 	sort.Slice(rep.Packages, func(i, j int) bool { return rep.Packages[i].Package < rep.Packages[j].Package })
+	if o.table != nil {
+		if err := checkApplied(o.table.rows, rep.Total, tests); err != nil {
+			for _, f := range listFindings(acts, abs) {
+				if f.Category == annot.CategoryMalformed {
+					log.Printf("%s: %s", f.Pos, f.Message)
+				}
+			}
+			log.Fatalf("-annotate: %v", err)
+		}
+	}
 	path := writeJSON(out, "module-report.json", rep)
+	if o.list {
+		writeJSON(out, "module-findings.json", listFindings(acts, abs))
+	}
 	printModuleSummary(rep, path)
+}
+
+// add sums s into the total. It names every Stats field, so a field added to Stats without a line
+// here fails TestTotalAddsEveryField instead of totalling 0.
+func (ps *PackageStats) add(s ownership.Stats) {
+	t := &ps.Stats
+	t.Transfers += s.Transfers
+	t.FlaggedTransfers += s.FlaggedTransfers
+	t.SuppressedTransfers += s.SuppressedTransfers
+	t.Suppressed += s.Suppressed
+	t.UnsafeScope += s.UnsafeScope
+	t.UnsafeStale += s.UnsafeStale
+	t.Guarded += s.Guarded
+	t.Holds += s.Holds
+	t.Imm += s.Imm
+	t.Iso += s.Iso
+}
+
+// checkApplied fails unless every table row took effect: no directive is malformed (SAFE007), and the
+// counts gocap parsed match the table's. A row that anchored but did not parse would otherwise leave
+// the run measuring less than the table claims. Without tests, rows in _test.go files are written but
+// not loaded, so they are not expected.
+func checkApplied(rows []annotation, t PackageStats, tests bool) error {
+	if !tests {
+		rows = slices.DeleteFunc(slices.Clone(rows), func(a annotation) bool { return strings.HasSuffix(a.file, "_test.go") })
+	}
+	want := directiveCounts(rows)
+	got := map[string]int{"unsafe": t.UnsafeScope, "guarded_by": t.Guarded, "holds": t.Holds, "iso": t.Iso, "imm": t.Imm}
+	var bad []string
+	for verb := range want {
+		if _, ok := got[verb]; !ok {
+			bad = append(bad, "unknown directive //safe:"+verb)
+		}
+	}
+	for verb, n := range got {
+		if n != want[verb] {
+			bad = append(bad, fmt.Sprintf("%s: table has %d, gocap parsed %d", verb, want[verb], n))
+		}
+	}
+	if n := t.Findings[annot.CategoryMalformed]; n > 0 {
+		bad = append(bad, fmt.Sprintf("%d malformed directives (%s)", n, annot.CategoryMalformed))
+	}
+	if len(bad) > 0 {
+		sort.Strings(bad)
+		return fmt.Errorf("the table did not apply as written: %s", strings.Join(bad, "; "))
+	}
+	return nil
+}
+
+// gocapCommit describes the gocap checkout in the working directory, or "unknown" outside one.
+func gocapCommit() string {
+	out, err := exec.Command("git", "describe", "--always", "--dirty").Output()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // distinctPackages drops the copies go/packages makes when tests are loaded, so no file is counted
@@ -166,10 +282,14 @@ func printModuleSummary(rep ModuleReport, path string) {
 	t := rep.Total
 	fmt.Fprintf(&b, "  total: %d transfers, %d needed //safe:unsafe = %.1f%% (abandon threshold 20%%)\n",
 		t.Transfers, t.SuppressedTransfers, 100*t.HatchRatio())
-	fmt.Fprintf(&b, "         %d findings muted, %d //safe:unsafe directives; remaining findings: %s\n",
-		t.Suppressed, t.UnsafeScope, findings(t.Findings))
-	fmt.Fprintf(&b, "         checked claims (not counted as escape hatches): %d guarded_by, %d holds\n",
-		t.Guarded, t.Holds)
+	fmt.Fprintf(&b, "         %d flagged (muted or not), %d clean\n", t.FlaggedTransfers, t.Clean)
+	fmt.Fprintf(&b, "         %d findings muted, %d //safe:unsafe directives (%d muted nothing); remaining findings: %s\n",
+		t.Suppressed, t.UnsafeScope, t.UnsafeStale, findings(t.Findings))
+	fmt.Fprintf(&b, "         checked claims (not counted as escape hatches): %d guarded_by, %d holds, %d imm, %d iso\n",
+		t.Guarded, t.Holds, t.Imm, t.Iso)
+	if rep.Rev != "" {
+		fmt.Fprintf(&b, "  archived %s at %s (%s); %d annotations; gocap %s\n", rep.Subdir, rep.Rev, rep.Repo, rep.Annotations, rep.GocapCommit)
+	}
 	b.WriteString("  transfers are go statements, callbacks run on another goroutine (time.AfterFunc, WaitGroup.Go,\n" +
 		"  errgroup, net/http handlers), channel sends and //safe:iso arguments\n")
 	fmt.Fprintf(&b, "  report: %s\n", path)

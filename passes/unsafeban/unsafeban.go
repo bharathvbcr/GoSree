@@ -34,7 +34,7 @@ var unsafeMembers = map[string]bool{
 func run(pass *analysis.Pass) (any, error) {
 	ix := pass.ResultOf[annot.Analyzer].(*annot.Index)
 	report := func(n ast.Node, msg string) {
-		if ix.Suppressed(n.Pos()) {
+		if ix.Mute(n.Pos()) {
 			return
 		}
 		pass.Report(analysis.Diagnostic{Pos: n.Pos(), End: n.End(), Category: Category, Message: Category + ": " + msg})

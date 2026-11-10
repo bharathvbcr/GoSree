@@ -21,6 +21,7 @@ import (
 	"go/types"
 	"reflect"
 	"strings"
+	"sync"
 
 	"golang.org/x/tools/go/analysis"
 )
@@ -36,6 +37,10 @@ type span struct{ start, end token.Pos }
 // Index holds the directives of one package.
 type Index struct {
 	unsafe []span
+	// used marks the //safe:unsafe scopes that muted at least one finding. Every pass that requires
+	// this analyzer shares the Index and may run concurrently, so mu guards it.
+	mu   sync.Mutex
+	used map[int]bool
 	// IsoVars holds the parameters named by //safe:iso.
 	IsoVars map[*types.Var]bool
 	// ImmTypes holds the types annotated //safe:imm. They are candidates: the ownership pass decides
@@ -57,14 +62,43 @@ func (ix *Index) HoldsDirectives() int {
 	return n
 }
 
-// Suppressed reports whether pos lies inside a //safe:unsafe scope.
-func (ix *Index) Suppressed(pos token.Pos) bool {
-	for _, s := range ix.unsafe {
-		if pos >= s.start && pos < s.end {
-			return true
+// Suppressed reports whether pos lies inside a //safe:unsafe scope. It only asks; a pass that mutes
+// a finding because of the scope calls Mute, so the scope is not counted as stale.
+func (ix *Index) Suppressed(pos token.Pos) bool { return ix.scope(pos) >= 0 }
+
+// scope returns the innermost //safe:unsafe scope containing pos, or -1.
+func (ix *Index) scope(pos token.Pos) int {
+	best := -1
+	for i, s := range ix.unsafe {
+		if pos >= s.start && pos < s.end && (best < 0 || s.end-s.start < ix.unsafe[best].end-ix.unsafe[best].start) {
+			best = i
 		}
 	}
-	return false
+	return best
+}
+
+// Mute reports whether pos lies inside a //safe:unsafe scope and, if it does, records that the
+// innermost such scope muted a finding.
+func (ix *Index) Mute(pos token.Pos) bool {
+	i := ix.scope(pos)
+	if i < 0 {
+		return false
+	}
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	if ix.used == nil {
+		ix.used = map[int]bool{}
+	}
+	ix.used[i] = true
+	return true
+}
+
+// StaleScopes counts the //safe:unsafe scopes that have muted nothing so far. Read it after every pass
+// over the package has run: a scope one pass leaves unused may mute another pass's finding.
+func (ix *Index) StaleScopes() int {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	return len(ix.unsafe) - len(ix.used)
 }
 
 // UnsafeScopes reports how many //safe:unsafe scopes the package declares.

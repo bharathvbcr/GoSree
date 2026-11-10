@@ -1,6 +1,9 @@
 package supp
 
-import "net/http"
+import (
+	"net/http"
+	"unsafe"
+)
 
 type Job struct{ ID int }
 
@@ -55,6 +58,12 @@ func useSiteSuppression() {
 	go use(j)
 	//safe:unsafe the goroutine only reads ID, which this write does not race with in the test
 	j.ID = 3
+}
+
+// A scope that mutes only a SAFE001 finding (another pass's rule) is used, not stale.
+func rawPointer(p *Job) uintptr {
+	//safe:unsafe the test only checks that SAFE001 uses the scope
+	return uintptr(unsafe.Pointer(p))
 }
 
 // A transfer inside an unsafe scope that has nothing to report is not counted as suppressed.

@@ -9,7 +9,14 @@ import (
 )
 
 func TestMoves(t *testing.T) {
-	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "moves")
+	results := analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "moves")
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	// One //safe:iso parameter: j of the owned-parameter test.
+	if got := results[0].Result.(*ownership.Stats).Iso; got != 1 {
+		t.Errorf("Stats.Iso = %d, want 1", got)
+	}
 }
 
 func TestGlobals(t *testing.T) {
@@ -17,7 +24,14 @@ func TestGlobals(t *testing.T) {
 }
 
 func TestImm(t *testing.T) {
-	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "imm")
+	results := analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "imm")
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	// Config holds; Bad and Open are annotated but fail the imm rules.
+	if got := results[0].Result.(*ownership.Stats).Imm; got != 1 {
+		t.Errorf("Stats.Imm = %d, want 1", got)
+	}
 }
 
 // TestCallbacks checks that functions which run a callback on another goroutine (time.AfterFunc,
@@ -58,6 +72,9 @@ func TestSuppression(t *testing.T) {
 		// writeLineHatch 1, suppressedGo 1, suppressedSend 1, otherTransfer 2, useSite 1,
 		// cleanTransfer 1.
 		Transfers: 8,
+		// Every transfer with a finding, muted or not: all but cleanTransfer. useSite's only
+		// finding is muted at the use, so it is flagged but not a suppressed transfer.
+		FlaggedTransfers: 7,
 		// suppressedHandler, suppressedGo, suppressedSend and the first transfer of otherTransfer.
 		// cleanTransfer is in a scope but had nothing to suppress; writeLineHatch's directive is on
 		// a write, not on the transfer.
@@ -66,10 +83,51 @@ func TestSuppression(t *testing.T) {
 		// SAFE003; suppressedSend: deferred SAFE003 + SAFE003; otherTransfer: SAFE002; useSite:
 		// SAFE003.
 		Suppressed:  8,
-		UnsafeScope: 7,
+		UnsafeScope: 8,
+		// Six scopes muted a finding of this pass, through the transfer they cover or at their own
+		// line, and rawPointer's muted a SAFE001; cleanTransfer's muted nothing.
+		UnsafeStale: 1,
 	}
 	if got != want {
 		t.Errorf("Stats = %+v, want %+v", got, want)
+	}
+}
+
+// TestTransferRelated checks that a finding away from its transfer (a use after the move) points back
+// at the transfer, and that one at the transfer does not point at itself.
+func TestTransferRelated(t *testing.T) {
+	results := analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "supp")
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	r := results[0]
+	fset := r.Action.Package.Fset
+	var checked int
+	for _, d := range r.Action.Diagnostics {
+		var rel []int
+		for _, ri := range d.Related {
+			if ri.Message == ownership.TransferRelated {
+				rel = append(rel, fset.Position(ri.Pos).Line)
+			}
+		}
+		line := fset.Position(d.Pos).Line
+		switch d.Category {
+		case ownership.UseAfter:
+			// q.ID = 2 at line 52 follows go use(q) at line 51.
+			if line == 52 {
+				checked++
+				if len(rel) != 1 || rel[0] != 51 {
+					t.Errorf("SAFE003 at line 52 points at transfer lines %v, want [51]", rel)
+				}
+			}
+		default:
+			if len(rel) > 0 && rel[0] == line {
+				t.Errorf("%s at line %d points at its own line", d.Category, line)
+			}
+		}
+	}
+	if checked != 1 {
+		t.Errorf("found %d SAFE003 at line 52, want 1", checked)
 	}
 }
 

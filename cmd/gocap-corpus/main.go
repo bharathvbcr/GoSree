@@ -15,6 +15,12 @@
 // total, with the findings that remain. The report goes to <out>/module-report.json.
 //
 //	go run ./cmd/gocap-corpus -module ~/src/service [-tests] [packages]
+//
+// A reference service is measured on an archived commit instead, optionally with a table of //safe
+// directives added to the archived copy, and -list writes every finding for diffing runs:
+//
+//	go run ./cmd/gocap-corpus -git ~/src/repo -rev <sha> -subdir backend/svc \
+//	    -annotate cmd/gocap-corpus/refservice/svc.tsv -list -out build/ref [-tests]
 package main
 
 import (
@@ -79,11 +85,33 @@ type Flag struct {
 func main() {
 	out := flag.String("out", "build", "directory for the corpus copy and the report")
 	module := flag.String("module", "", "analyse the module in this directory instead of the race corpus; remaining arguments are package patterns (default ./...)")
-	tests := flag.Bool("tests", false, "with -module: include each package's test files")
+	tests := flag.Bool("tests", false, "with -module or -git: include each package's test files")
+	gitRepo := flag.String("git", "", "analyse a module archived from this git repository at -rev (its -subdir), extracted under <out>; the repository is only read")
+	rev := flag.String("rev", "", "with -git: the commit to archive")
+	subdir := flag.String("subdir", "", "with -git: the module's directory inside the repository")
+	annotate := flag.String("annotate", "", "with -module or -git: add the //safe directives of this annotation table (refservice/*.tsv) to the code first; needs -git, so the code annotated is a copy")
+	list := flag.Bool("list", false, "with -module or -git: also write every finding to <out>/module-findings.json")
 	flag.Parse()
 	log.SetFlags(0)
-	if *module != "" {
-		runModule(*module, *tests, flag.Args(), *out)
+	if *gitRepo != "" || *module != "" {
+		opts := moduleOpts{dir: *module, tests: *tests, patterns: flag.Args(), out: *out, list: *list}
+		if *gitRepo != "" {
+			if *module != "" || *rev == "" || *subdir == "" {
+				log.Fatal("-git needs -rev and -subdir, and replaces -module")
+			}
+			opts.git = &gitSource{repo: *gitRepo, rev: *rev, subdir: *subdir}
+		}
+		if *annotate != "" {
+			if opts.git == nil {
+				log.Fatal("-annotate needs -git: annotations are written into an archived copy, never into a checkout")
+			}
+			tab, err := loadAnnotationTable(*annotate)
+			if err != nil {
+				log.Fatal(err)
+			}
+			opts.table = &tab
+		}
+		runModule(opts)
 		return
 	}
 	if flag.NArg() > 0 {
@@ -117,7 +145,7 @@ func main() {
 	if _, _, err := copyCorpus(src, adst); err != nil {
 		log.Fatalf("copy corpus: %v", err)
 	}
-	if err := applyAnnotations(adst); err != nil {
+	if err := applyAnnotations(adst, corpusAnnotations); err != nil {
 		log.Fatalf("annotate corpus: %v", err)
 	}
 	arep := measureCorpus(adst)
@@ -322,11 +350,14 @@ func score(p *packages.Package, diags []analysis.Diagnostic) Report {
 	}
 	// A finding counts for the function it is in and for every function holding one of its related
 	// positions: a declaration-site SAFE006 implicates the functions whose writes make the variable
-	// mutable.
+	// mutable. The transfer a SAFE003 or SAFE008 points back at is not one: the finding is where the
+	// misuse is.
 	for _, d := range diags {
 		positions := []token.Pos{d.Pos}
 		for _, r := range d.Related {
-			positions = append(positions, r.Pos)
+			if r.Message != ownership.TransferRelated {
+				positions = append(positions, r.Pos)
+			}
 		}
 		for _, pos := range positions {
 			for _, fi := range order {

@@ -32,6 +32,18 @@ func contextAfterFunc(ctx context.Context) {
 	j.ID = 2 // want `SAFE003: variable j is used after it was captured by a goroutine started by context\.AfterFunc`
 }
 
+// A context.CancelFunc may be called by several goroutines at once (documented), so a watchdog that
+// cancels and the deferred cancel share it.
+func cancelWatchdog(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	t := time.AfterFunc(time.Second, cancel)
+	defer t.Stop()
+	t2 := time.AfterFunc(time.Second, func() { cancel() })
+	defer t2.Stop()
+	<-ctx.Done()
+}
+
 // Stopping the timer does not hand j back: Stop returning false means the callback already started.
 func afterFuncStopped() {
 	j := &Job{}

@@ -29,6 +29,7 @@ import (
 
 	"github.com/bharathvbcr/gocap/internal/annot"
 	"github.com/bharathvbcr/gocap/internal/kinds"
+	"github.com/bharathvbcr/gocap/passes/unsafeban"
 )
 
 // Rule categories.
@@ -49,12 +50,18 @@ const (
 	UseAfterSynced = "SAFE003-forkjoin"
 )
 
+// TransferRelated is the message of the related position a finding carries when the transfer that
+// caused it is elsewhere: a SAFE003 use, a SAFE008 write, a deferred use.
+const TransferRelated = "the transfer that causes this finding"
+
 // Analyzer is the ownership checker.
 var Analyzer = &analysis.Analyzer{
-	Name:      "safeownership",
-	Doc:       "check moves of memory between goroutines, package-variable mutation, //safe:imm types and handler writes (SAFE002-SAFE006, SAFE008)",
-	Run:       run,
-	Requires:  []*analysis.Analyzer{annot.Analyzer, buildssa.Analyzer},
+	Name: "safeownership",
+	Doc:  "check moves of memory between goroutines, package-variable mutation, //safe:imm types and handler writes (SAFE002-SAFE006, SAFE008)",
+	Run:  run,
+	// unsafeban is required for its order only: it mutes SAFE001 findings with //safe:unsafe too, so
+	// it must have run before this pass counts the scopes that muted nothing (Stats.UnsafeStale).
+	Requires:  []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, buildssa.Analyzer},
 	FactTypes: []analysis.Fact{new(FuncFact), new(ImmFact)},
 	// Stats is returned so harnesses can count escape hatches without parsing output.
 	ResultType: reflect.TypeFor[*Stats](),
@@ -65,17 +72,29 @@ var Analyzer = &analysis.Analyzer{
 type Stats struct {
 	// Transfers counts places a value crosses to another goroutine or to an owned parameter.
 	Transfers int `json:"transfers"`
+	// FlaggedTransfers counts transfers whose check produced at least one finding, muted or not, so
+	// SuppressedTransfers <= FlaggedTransfers and Transfers - FlaggedTransfers are clean. A transfer
+	// whose only findings were muted at their own line (a use after the move) is flagged but not
+	// suppressed: the hatch is not on the transfer.
+	FlaggedTransfers int `json:"flagged_transfers"`
 	// SuppressedTransfers counts transfers inside a //safe:unsafe scope that had a finding to mute.
 	SuppressedTransfers int `json:"suppressed_transfers"`
 	// Suppressed counts distinct findings (position and rule) muted by //safe:unsafe, from any rule.
 	Suppressed int `json:"suppressed_findings"`
-	// UnsafeScope counts the //safe:unsafe directives in the package.
+	// UnsafeScope counts the //safe:unsafe directives in the package, and UnsafeStale those that muted
+	// no finding of any rule. A finding is charged to the innermost scope around its own position, or,
+	// when the transfer that caused it is in a scope, to the transfer's scope.
 	UnsafeScope int `json:"unsafe_directives"`
+	UnsafeStale int `json:"unsafe_stale"`
 	// Guarded counts fields and package variables annotated //safe:guarded_by, and Holds the
 	// //safe:holds directives. Like imm and iso they are checked claims, not escape hatches: neither
 	// counts toward the hatch ratio or the override budget.
 	Guarded int `json:"guarded_directives"`
 	Holds   int `json:"holds_directives"`
+	// Imm counts the //safe:imm types of the package that satisfy the imm rules, and Iso the parameters
+	// named by //safe:iso. Both are checked claims too.
+	Imm int `json:"imm_types"`
+	Iso int `json:"iso_params"`
 }
 
 type state struct {
@@ -93,6 +112,11 @@ type state struct {
 	// produces is muted, wherever it is. mutedFindings counts findings muted that way.
 	muted         bool
 	mutedFindings int
+	// findings counts every finding the pass produced, muted or not, before de-duplication; a
+	// transfer whose check raised it is flagged.
+	findings int
+	// transferAt is the position of the transfer being checked, if any.
+	transferAt token.Pos
 	// graphs caches the alias graph of each function once summaries are final; the fork-join rule
 	// reads a goroutine body's graph while checking its parent.
 	graphs    map[*ssa.Function]*graph
@@ -138,7 +162,13 @@ func run(pass *analysis.Pass) (any, error) {
 	st.stats.UnsafeScope = st.ix.UnsafeScopes()
 	st.stats.Guarded = len(st.ix.Guarded)
 	st.stats.Holds = st.ix.HoldsDirectives()
+	st.stats.Iso = len(st.ix.IsoVars)
 	st.validateImm()
+	for _, ok := range st.imm {
+		if ok {
+			st.stats.Imm++
+		}
+	}
 	st.cls = st.newClassifier()
 
 	fns := st.ssa.SrcFuncs
@@ -156,6 +186,7 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 	st.checkGlobals(fns)
 	st.checkGuarded(fns)
+	st.stats.UnsafeStale = st.ix.StaleScopes()
 	return st.stats, nil
 }
 
@@ -213,7 +244,15 @@ func (st *state) report(pos token.Pos, cat, msg string) {
 // SAFE006, say). Suppression and de-duplication go by the finding's own position.
 func (st *state) reportRelated(pos token.Pos, cat, msg string, related []analysis.RelatedInformation) {
 	k := reportKey{pos, cat}
-	if st.muted || st.ix.Suppressed(pos) {
+	st.findings++
+	// A finding a transfer causes away from the transfer (a use after it, a handler's write) points
+	// back at it, so a reader, and a hatch, can find the transfer.
+	if st.transferAt.IsValid() && pos != st.transferAt && related == nil {
+		related = []analysis.RelatedInformation{{Pos: st.transferAt, Message: TransferRelated}}
+	}
+	// A finding muted by the transfer's scope is recorded against that scope (checkTransfers);
+	// otherwise the scope around the finding's own position mutes it.
+	if st.muted || st.ix.Mute(pos) {
 		if st.muted {
 			st.mutedFindings++
 		}

@@ -39,6 +39,7 @@ var overrides = []Override{
 	{"testing.F", true, "reporting methods are documented safe from other goroutines"},
 	{"testing.TB", false, "interface over *testing.T/*testing.B/*testing.F"},
 	{"context.Context", false, "documented safe for simultaneous use by multiple goroutines"},
+	{"context.CancelFunc", false, "documented: a CancelFunc may be called by multiple goroutines simultaneously"},
 	{"error", false, "assumed: error values are not mutated after creation (convention, not checked)"},
 	{"time.Time", false, "value type; its *Location is never mutated after creation"},
 	{"time.Location", true, "never mutated after creation"},

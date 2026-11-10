@@ -17,12 +17,16 @@ func (st *state) checkTransfers(g *graph) {
 		// A //safe:unsafe on the transfer covers everything the transfer causes, including uses
 		// after it that lie outside the scope.
 		muted := st.ix.Suppressed(t.pos)
-		before := st.mutedFindings
-		st.muted = muted
+		before, raised := st.mutedFindings, st.findings
+		st.muted, st.transferAt = muted, t.pos
 		st.checkTransfer(g, t)
-		st.muted = false
+		st.muted, st.transferAt = false, token.NoPos
+		if st.findings > raised {
+			st.stats.FlaggedTransfers++
+		}
 		if muted && st.mutedFindings > before {
 			st.stats.SuppressedTransfers++
+			st.ix.Mute(t.pos)
 		}
 	}
 }
