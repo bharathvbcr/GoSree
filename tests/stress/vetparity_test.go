@@ -58,7 +58,7 @@ func vetBuildGocap(t *testing.T) string {
 		t.Skip("needs the gocap binary built from cmd/gocap: skipped in -short mode")
 	}
 	bin := filepath.Join(t.TempDir(), "gocap")
-	r := vetRun(t, vetRepoRoot(t), []string{"GOFLAGS=", "GOWORK=off"}, "go", "build", "-o", bin, "./cmd/gocap")
+	r := vetRun(t, vetRepoRoot(t), []string{"GOFLAGS=", "GOWORK=off"}, "go", "build", "-o", bin, "./cmd/gosree")
 	if r.code != 0 {
 		t.Fatalf("building cmd/gocap: exit %d\n%s%s", r.code, r.stdout, r.stderr)
 	}

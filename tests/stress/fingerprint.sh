@@ -5,5 +5,5 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${root}"
-find passes internal cap cmd/gocap cmd/gocap-erase -name '*.go' ! -name '*_test.go' ! -path '*/testdata/*' -print0 |
+find passes internal cap cmd/gosree cmd/gocap-erase -name '*.go' ! -name '*_test.go' ! -path '*/testdata/*' -print0 |
   LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256 | cut -c1-16
