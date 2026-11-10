@@ -27,6 +27,17 @@ func twoGoroutines() {
 	go func() { x++ }() // want `SAFE003: variable x is used after it was captured by a goroutine`
 }
 
+// A use reached by several moves of the same memory is one finding: findings are reported once per
+// position and rule, naming the first move that reaches the use. p aliases j, and neither goroutine
+// statement uses p, so both moves reach its use.
+func useAfterTwoMoves() {
+	j := &Job{}
+	p := &j.ID
+	go func() { j.ID = 1 }()
+	go func() { j.Data = nil }() // want `SAFE003: variable j is used after it was captured by a goroutine`
+	*p = 2                       // want `SAFE003: variable j is used after it was captured by a goroutine \(line 36\)`
+}
+
 // The parent never touches x again: the goroutine owns it.
 func capturedMoved() {
 	x := 0

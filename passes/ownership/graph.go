@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 )
@@ -225,6 +226,7 @@ func (g *graph) instr(ins ssa.Instruction) {
 				g.union(g.pointee(c), bn)
 			}
 		}
+		g.closureRetains(ins)
 	case *ssa.Phi:
 		for _, e := range ins.Edges {
 			g.join(ins, e)
@@ -438,6 +440,95 @@ func resolveClosureVal(v ssa.Value, depth int) *ssa.MakeClosure {
 		}
 	}
 	return nil
+}
+
+// closureRetains records what a closure's body retains of its captures (its summary's freeLeaks) as
+// escapes at the closure's creation, unless every use of the closure is one whose call site already
+// accounts for the body: a static call or defer of the closure itself (call applies freeLeaks there),
+// or a transfer to another goroutine, where the closure owns its captures and may move them on. A
+// closure passed to any other function may be called from there, through a function value whose
+// summary cannot say what the closure keeps, so the retention is charged where the closure is made.
+//
+// A bound method value's body is the method: its receiver is retained if the method leaks it, and
+// always for an interface method, whose implementation gocap cannot see.
+func (g *graph) closureRetains(mc *ssa.MakeClosure) {
+	if g.closureUsedOnlyAtCallSites(mc, mc, 0) {
+		return
+	}
+	fn, _ := mc.Fn.(*ssa.Function)
+	leaks := func(j int) bool { return true }
+	if fn != nil {
+		if strings.HasPrefix(fn.Synthetic, "bound method wrapper") {
+			if m, ok := fn.Object().(*types.Func); ok && !types.IsInterface(m.Signature().Recv().Type()) {
+				if target := fn.Prog.FuncValue(m); target != nil {
+					s := g.st.summary(target)
+					leaks = func(int) bool { return s.leaks(0) }
+				}
+			}
+		} else {
+			s := g.st.summary(fn)
+			leaks = s.freeLeaks
+		}
+	}
+	for j, b := range mc.Bindings {
+		if bn := g.val(b); bn != nil && leaks(j) {
+			g.add(bn, ev(evEscape, mc, "captured by a closure that may retain or share it"))
+		}
+	}
+}
+
+// closureUsedOnlyAtCallSites reports whether every use of v (a closure, or a conversion of one) is a
+// static call or defer of mc itself, a go statement, or an argument a spawner runs on another
+// goroutine or an owned parameter takes.
+func (g *graph) closureUsedOnlyAtCallSites(mc *ssa.MakeClosure, v ssa.Value, depth int) bool {
+	refs := v.Referrers()
+	if refs == nil || depth > 4 {
+		return false
+	}
+	for _, r := range *refs {
+		switch r := r.(type) {
+		case *ssa.ChangeType:
+			if !g.closureUsedOnlyAtCallSites(mc, r, depth+1) {
+				return false
+			}
+		case *ssa.MakeInterface:
+			if !g.closureUsedOnlyAtCallSites(mc, r, depth+1) {
+				return false
+			}
+		case *ssa.Go:
+			// The function a go statement starts, or an argument passed to it: a transfer either way.
+		case ssa.CallInstruction:
+			cc := r.Common()
+			if cc.Value == v && v == mc {
+				continue
+			}
+			if sp, ok := spawnOf(r); ok && sp.fn == v {
+				continue
+			}
+			if !g.isIsoArg(cc, v) {
+				return false
+			}
+		case *ssa.DebugRef:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isIsoArg reports whether v is passed to a //safe:iso parameter of the static callee, which owns it.
+func (g *graph) isIsoArg(cc *ssa.CallCommon, v ssa.Value) bool {
+	fn := cc.StaticCallee()
+	if fn == nil {
+		return false
+	}
+	sum := g.st.summary(fn)
+	for i, a := range cc.Args {
+		if a == v && sum.isIso(i) {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *graph) goStmt(ins *ssa.Go) {
