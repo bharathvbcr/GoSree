@@ -60,7 +60,7 @@ func CheckStorage(pass *analysis.Pass, ix *annot.Index, ssaProg *buildssa.SSA) {
 }
 
 func (sc *storageChecker) report(pos token.Pos, cat, msg string) {
-	if !pos.IsValid() || sc.ix.Suppressed(pos) {
+	if !pos.IsValid() || sc.ix.Mute(pos) {
 		return
 	}
 	p := sc.pass.Fset.Position(pos)

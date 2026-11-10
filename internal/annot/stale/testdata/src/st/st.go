@@ -18,6 +18,24 @@ func send(ch chan *Job) {
 	j.ID = 1
 }
 
+// Mutes a borrow conflict (BORROW002): not stale.
+func alias() {
+	x := 1
+	//gosree:unsafe deliberate alias for performance
+	b1 := &x /*gosree:mut*/
+	b2 := &x /*gosree:mut*/
+	*b1 = 2
+	*b2 = 3
+}
+
+// Mutes a borrow storage finding (BORROW001): not stale.
+//
+//gosree:unsafe reviewed: the field never outlives the call that sets it
+type Holder struct {
+	//gosree:mut
+	p *int
+}
+
 // Mutes nothing.
 func plain() int {
 	//gosree:unsafe nothing here needs it // want `SAFE007: stale escape hatch`

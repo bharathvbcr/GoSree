@@ -181,7 +181,7 @@ func CheckBorrows(pass *analysis.Pass, ix *annot.Index, ssaProg *buildssa.SSA) {
 }
 
 func (bc *borrowChecker) report(pos token.Pos, cat, msg string) {
-	if bc.ix.Suppressed(pos) {
+	if bc.ix.Mute(pos) {
 		return
 	}
 	k := reportKey{pos, cat}
@@ -903,11 +903,6 @@ func (bc *borrowChecker) checkConflictingBorrows() {
 		for j := 0; j < i; j++ {
 			b1 := bc.borrows[j]
 
-			// Escape hatch check on either borrow site
-			if bc.ix.Suppressed(b1.Pos) || bc.ix.Suppressed(b2.Pos) {
-				continue
-			}
-
 			// Check if both borrows target the same owner
 			sameOwner := false
 			if b1.OwnerVar != nil && b2.OwnerVar != nil {
@@ -930,19 +925,26 @@ func (bc *borrowChecker) checkConflictingBorrows() {
 			}
 
 			// Conflict rules:
-			if b1.Kind == annot.BorrowMut && b2.Kind == annot.BorrowMut {
-				bc.report(b2.Pos, ConflictingBorrow, fmt.Sprintf(
-					"cannot borrow '%s' as mutable more than once at a time: already borrowed as mutable at line %d",
-					b2.OwnerName, b1.Line))
-			} else if b1.Kind == annot.BorrowRob && b2.Kind == annot.BorrowMut {
-				bc.report(b2.Pos, ConflictingBorrow, fmt.Sprintf(
-					"cannot borrow '%s' as mutable because it is also borrowed as read-only at line %d",
-					b2.OwnerName, b1.Line))
-			} else if b1.Kind == annot.BorrowMut && b2.Kind == annot.BorrowRob {
-				bc.report(b2.Pos, ConflictingBorrow, fmt.Sprintf(
-					"cannot borrow '%s' as read-only because it is also borrowed as mutable at line %d",
-					b2.OwnerName, b1.Line))
+			var msg string
+			switch {
+			case b1.Kind == annot.BorrowMut && b2.Kind == annot.BorrowMut:
+				msg = fmt.Sprintf("cannot borrow '%s' as mutable more than once at a time: already borrowed as mutable at line %d",
+					b2.OwnerName, b1.Line)
+			case b1.Kind == annot.BorrowRob && b2.Kind == annot.BorrowMut:
+				msg = fmt.Sprintf("cannot borrow '%s' as mutable because it is also borrowed as read-only at line %d",
+					b2.OwnerName, b1.Line)
+			case b1.Kind == annot.BorrowMut && b2.Kind == annot.BorrowRob:
+				msg = fmt.Sprintf("cannot borrow '%s' as read-only because it is also borrowed as mutable at line %d",
+					b2.OwnerName, b1.Line)
+			default:
+				continue
 			}
+			// An escape hatch on either borrow site mutes the conflict. Both are asked through Mute, so
+			// each hatch that covers a site is recorded as used and is not reported as stale.
+			if m1, m2 := bc.ix.Mute(b1.Pos), bc.ix.Mute(b2.Pos); m1 || m2 {
+				continue
+			}
+			bc.report(b2.Pos, ConflictingBorrow, msg)
 		}
 	}
 }
@@ -1101,7 +1103,7 @@ func (bc *borrowChecker) checkOwnerMutation() {
 	// Track address-of expressions (&x) that are passed to read-only (rob) parameters
 	robArgExprs := make(map[*ast.UnaryExpr]bool)
 	ast.Inspect(syntax, func(n ast.Node) bool {
-		call, ok := n.(	*ast.CallExpr)
+		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}

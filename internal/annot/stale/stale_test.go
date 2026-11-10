@@ -9,9 +9,8 @@ import (
 	"github.com/bharathvbcr/gosree/internal/annot/stale"
 )
 
-// TestStale checks that a hatch is stale only when no pass muted a finding through it. A hatch that
-// mutes only a borrow finding is not covered here: the borrow pass asks annot.Index.Suppressed and
-// never calls Mute, so such a hatch reads as stale until the borrow pass records its mutes.
+// TestStale checks that a hatch is stale only when no pass muted a finding through it: hatches that
+// mute an unsafeban, ownership, borrow-conflict or borrow-storage finding are not stale.
 func TestStale(t *testing.T) {
 	results := analysistest.Run(t, analysistest.TestData(), stale.Analyzer, "st")
 	if len(results) != 1 {
