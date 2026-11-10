@@ -1,11 +1,11 @@
 package errcheck_test
 
 import (
-	"runtime"
 	"testing"
 
 	"golang.org/x/tools/go/analysis/analysistest"
 
+	"github.com/bharathvbcr/gosree/internal/gusseterr"
 	"github.com/bharathvbcr/gosree/passes/errcheck"
 )
 
@@ -21,10 +21,10 @@ func TestSafeErrBasic(t *testing.T) {
 	if sum.FunctionsAnalyzed == 0 {
 		t.Fatal("expected FunctionsAnalyzed > 0")
 	}
-	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
-		if !sum.UsedRustGusset {
-			t.Fatal("expected UsedRustGusset == true on unix/cgo build")
-		}
+	// NativeActive is fixed by build constraints: true exactly when the Rust engine is linked
+	// (unix && cgo). The summary must say which engine solved the package.
+	if want := gusseterr.NativeActive(); sum.UsedRustGusset != want {
+		t.Fatalf("UsedRustGusset = %v, want %v (native engine linked: %v)", sum.UsedRustGusset, want, want)
 	}
 }
 
