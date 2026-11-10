@@ -92,11 +92,11 @@ func lockedWrite() {
 	})
 }
 
-// With //safe:guarded_by, SAFE009 owns the field: a locked write is accepted, an unlocked one is
+// With //gosree:guarded_by, SAFE009 owns the field: a locked write is accepted, an unlocked one is
 // SAFE009, not SAFE008.
 type Counter struct {
 	mu   sync.Mutex
-	hits map[string]int //safe:guarded_by mu
+	hits map[string]int //gosree:guarded_by mu
 }
 
 func guardedWrite() {

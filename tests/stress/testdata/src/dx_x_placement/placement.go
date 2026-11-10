@@ -18,8 +18,8 @@ type Frozen struct{ n int }
 
 var gmu sync.Mutex
 
-//safe:holds gmu
-//safe:holds gmu // HIT(SAFE007)
+//gosree:holds gmu
+//gosree:holds gmu // HIT(SAFE007)
 func locked() {}
 
 //gosree:iso j
@@ -46,7 +46,7 @@ func partialCaller() {
 // A guard on a field with several names guards every name.
 type Pair struct {
 	mu   sync.Mutex
-	x, y int //safe:guarded_by mu
+	x, y int //gosree:guarded_by mu
 }
 
 func (p *Pair) bump() {

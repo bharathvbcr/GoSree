@@ -28,7 +28,7 @@ func TestDirectives(t *testing.T) {
 	}
 }
 
-// TestGuardedDirectives checks //safe:guarded_by and //safe:holds: what they attach to, what the mutex
+// TestGuardedDirectives checks //gosree:guarded_by and //gosree:holds: what they attach to, what the mutex
 // may be, and the malformed cases.
 func TestGuardedDirectives(t *testing.T) {
 	results := analysistest.Run(t, analysistest.TestData(), annot.Analyzer, "g")

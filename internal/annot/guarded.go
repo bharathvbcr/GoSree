@@ -8,7 +8,7 @@ import (
 	"golang.org/x/tools/go/analysis"
 )
 
-// applyGuardedBy records `//safe:guarded_by mu` on a struct field, a package variable or a local
+// applyGuardedBy records `//gosree:guarded_by mu` on a struct field, a package variable or a local
 // variable (a var declaration or a := that declares only new names). mu names a field of the same
 // struct (an embedded sync.Mutex is "Mutex"); for a package variable, another package variable; for a
 // local, a variable in scope at its declaration (a local of this or an enclosing function, or a
@@ -18,7 +18,7 @@ import (
 func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string, structOf map[*ast.Field]*ast.StructType, malformed func(string, ...any)) {
 	parts := splitNames(args)
 	if len(parts) == 0 || !isIdent(parts[0]) {
-		malformed("//safe:guarded_by needs one mutex name")
+		malformed("//gosree:guarded_by needs one mutex name")
 		return
 	}
 	muName := parts[0]
@@ -27,7 +27,7 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 		filter = make(map[string]bool, len(parts)-1)
 		for _, p := range parts[1:] {
 			if !isIdent(p) {
-				malformed("//safe:guarded_by needs one mutex name")
+				malformed("//gosree:guarded_by needs one mutex name")
 				return
 			}
 			filter[p] = true
@@ -39,7 +39,7 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 	case *ast.Field:
 		st := structOf[t]
 		if st == nil {
-			malformed("//safe:guarded_by must be on a struct field or a package variable")
+			malformed("//gosree:guarded_by must be on a struct field or a package variable")
 			return
 		}
 		for _, id := range t.Names {
@@ -51,18 +51,18 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 			}
 		}
 		if len(guarded) == 0 {
-			malformed("//safe:guarded_by cannot guard an embedded field")
+			malformed("//gosree:guarded_by cannot guard an embedded field")
 			return
 		}
 		mu = structField(pass, st, muName)
 		if mu == nil {
-			malformed("//safe:guarded_by names %q, which is not a field of this struct", muName)
+			malformed("//gosree:guarded_by names %q, which is not a field of this struct", muName)
 			return
 		}
 	default:
 		names, ok := declaredNames(target)
 		if !ok {
-			malformed("//safe:guarded_by must be on a struct field or a variable declaration")
+			malformed("//gosree:guarded_by must be on a struct field or a variable declaration")
 			return
 		}
 		for _, id := range names {
@@ -72,7 +72,7 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 			v, ok := pass.TypesInfo.Defs[id].(*types.Var)
 			if !ok {
 				if _, blank := pass.TypesInfo.Defs[id]; !blank && id.Name != "_" {
-					malformed("//safe:guarded_by on a := that redeclares %s; declare guarded variables on their own line", id.Name)
+					malformed("//gosree:guarded_by on a := that redeclares %s; declare guarded variables on their own line", id.Name)
 					return
 				}
 				continue
@@ -85,7 +85,7 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 		if scope := guarded[0].Parent(); scope == pass.Pkg.Scope() {
 			obj, ok := scope.Lookup(muName).(*types.Var)
 			if !ok {
-				malformed("//safe:guarded_by names %q, which is not a package variable", muName)
+				malformed("//gosree:guarded_by names %q, which is not a package variable", muName)
 				return
 			}
 			mu = obj
@@ -95,27 +95,27 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 			_, obj := scope.LookupParent(muName, guarded[0].Pos())
 			v, ok := obj.(*types.Var)
 			if !ok || v.IsField() {
-				malformed("//safe:guarded_by names %q, which is not a variable in scope here", muName)
+				malformed("//gosree:guarded_by names %q, which is not a variable in scope here", muName)
 				return
 			}
 			mu = v
 		}
 	}
 	if why := notValueMutex(mu.Type()); why != "" {
-		malformed("//safe:guarded_by names %s, which %s", muName, why)
+		malformed("//gosree:guarded_by names %s, which %s", muName, why)
 		return
 	}
 	// Every guarded name is checked before any is recorded: a directive that is reported has no effect.
 	for _, v := range guarded {
 		switch {
 		case v == mu:
-			malformed("//safe:guarded_by: %s cannot guard itself", v.Name())
+			malformed("//gosree:guarded_by: %s cannot guard itself", v.Name())
 			return
 		case v.Exported() && (v.IsField() || v.Parent() == pass.Pkg.Scope()):
-			malformed("//safe:guarded_by on exported %s: accesses are checked in this package only, so guard an unexported field or variable", v.Name())
+			malformed("//gosree:guarded_by on exported %s: accesses are checked in this package only, so guard an unexported field or variable", v.Name())
 			return
 		case ix.Guarded[v] != nil:
-			malformed("//safe:guarded_by on %s repeats an earlier guard (by %s): one guard per variable", v.Name(), ix.Guarded[v].Name())
+			malformed("//gosree:guarded_by on %s repeats an earlier guard (by %s): one guard per variable", v.Name(), ix.Guarded[v].Name())
 			return
 		}
 	}
@@ -124,16 +124,16 @@ func applyGuardedBy(pass *analysis.Pass, ix *Index, target ast.Node, args string
 	}
 }
 
-// applyHolds records `//safe:holds mu` on a function: mu resolves to a field of the receiver's struct
+// applyHolds records `//gosree:holds mu` on a function: mu resolves to a field of the receiver's struct
 // first, then to a package variable. The ownership pass checks that every call site holds it.
 func applyHolds(pass *analysis.Pass, ix *Index, target ast.Node, args string, malformed func(string, ...any)) {
 	fd, ok := target.(*ast.FuncDecl)
 	if !ok {
-		malformed("//safe:holds must be in a function's doc comment")
+		malformed("//gosree:holds must be in a function's doc comment")
 		return
 	}
 	if !isIdent(args) {
-		malformed("//safe:holds needs one mutex name")
+		malformed("//gosree:holds needs one mutex name")
 		return
 	}
 	fn, ok := pass.TypesInfo.Defs[fd.Name].(*types.Func)
@@ -150,16 +150,16 @@ func applyHolds(pass *analysis.Pass, ix *Index, target ast.Node, args string, ma
 		}
 	}
 	if mu == nil {
-		malformed("//safe:holds names %q, which is neither a field of the receiver nor a package variable", args)
+		malformed("//gosree:holds names %q, which is neither a field of the receiver nor a package variable", args)
 		return
 	}
 	if why := notValueMutex(mu.Type()); why != "" {
-		malformed("//safe:holds names %s, which %s", args, why)
+		malformed("//gosree:holds names %s, which %s", args, why)
 		return
 	}
 	for _, held := range ix.Holds[fn] {
 		if held == mu {
-			malformed("//safe:holds %s repeats an earlier //safe:holds on %s", args, fn.Name())
+			malformed("//gosree:holds %s repeats an earlier //gosree:holds on %s", args, fn.Name())
 			return
 		}
 	}

@@ -13,10 +13,10 @@ import (
 
 // Stats is imm apart from its guarded field, so goroutines may share it.
 //
-//safe:imm
+//gosree:imm
 type Stats struct {
 	mu sync.Mutex
-	n  int //safe:guarded_by mu
+	n  int //gosree:guarded_by mu
 }
 
 func (s *Stats) inc() {

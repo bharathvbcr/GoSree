@@ -179,7 +179,7 @@ func MutateGlobalViaHelper() { // want MutateGlobalViaHelper:"ownership summary"
 // 16 (Item 3 & 7): SAFE009 in-place closure without capturing mu, mutex alias, and TryLock bool variable
 func TestInPlaceClosureWithoutMuCapture() { // want TestInPlaceClosureWithoutMuCapture:"ownership summary"
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	_ = x
 	go func() {
 		mu.Lock()
@@ -195,7 +195,7 @@ func TestInPlaceClosureWithoutMuCapture() { // want TestInPlaceClosureWithoutMuC
 
 func TestGuardedTryLockBoolVarAndAlias() { // want TestGuardedTryLockBoolVarAndAlias:"ownership summary"
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	_ = x
 	go func() {
 		m := &mu
@@ -210,10 +210,10 @@ func TestGuardedTryLockBoolVarAndAlias() { // want TestGuardedTryLockBoolVarAndA
 	}
 }
 
-// 17 (Item 2): Selective //safe:guarded_by on multi-variable declaration
+// 17 (Item 2): Selective //gosree:guarded_by on multi-variable declaration
 func TestSelectiveGuardedBy() { // want TestSelectiveGuardedBy:"ownership summary"
 	var rw sync.RWMutex
-	var x, y int = 0, 1 //safe:guarded_by rw x
+	var x, y int = 0, 1 //gosree:guarded_by rw x
 	go func() {
 		rw.Lock()
 		x = 2
@@ -301,8 +301,8 @@ func TestBorrowMoveAndIsoConversion(ch chan *int) { // want TestBorrowMoveAndIso
 	ch <- cap.BorrowMut(&z) // want `CAP003: stack-scoped borrow 'z' \(\\mub\) cannot cross goroutine boundary: cannot be sent on a channel`
 }
 
-// 23. SAFE005: Mutating an //safe:imm struct's array field via slice, clear, or mutating helper
-//safe:imm
+// 23. SAFE005: Mutating an //gosree:imm struct's array field via slice, clear, or mutating helper
+//gosree:imm
 type ImmArrayCfg struct { // want ImmArrayCfg:"imm"
 	arr [4]int
 }
@@ -312,9 +312,9 @@ func mutateIntPtr(p *int) {
 }
 
 func TestImmArraySliceAndHelperMutation(c *ImmArrayCfg) { // want TestImmArraySliceAndHelperMutation:"ownership summary"
-	c.arr[:][0] = 1         // want `SAFE005: write to a field of ImmArrayCfg, which is //safe:imm; imm values are only written by their composite literal`
-	clear(c.arr[:])         // want `SAFE005: write to a field of ImmArrayCfg, which is //safe:imm; imm values are only written by their composite literal`
-	mutateIntPtr(&c.arr[0]) // want `SAFE005: write to a field of ImmArrayCfg, which is //safe:imm; imm values are only written by their composite literal`
+	c.arr[:][0] = 1         // want `SAFE005: write to a field of ImmArrayCfg, which is //gosree:imm; imm values are only written by their composite literal`
+	clear(c.arr[:])         // want `SAFE005: write to a field of ImmArrayCfg, which is //gosree:imm; imm values are only written by their composite literal`
+	mutateIntPtr(&c.arr[0]) // want `SAFE005: write to a field of ImmArrayCfg, which is //gosree:imm; imm values are only written by their composite literal`
 }
 
 // 24. SAFE006: Mutating an unguarded package variable through a local struct pointer or getter helper
@@ -356,7 +356,7 @@ func TestHandlerWriteViaLocalStructAndHelper() { // want TestHandlerWriteViaLoca
 // 26. SAFE009: Unlocking a captured mutex inside an in-place closure or spawned goroutine
 func TestClosureAndGoroutineUnlockKillsLock() { // want TestClosureAndGoroutineUnlockKillsLock:"ownership summary"
 	var mu1 sync.Mutex
-	var x1 int //safe:guarded_by mu1
+	var x1 int //gosree:guarded_by mu1
 	go func() {
 		mu1.Lock()
 		_ = x1
@@ -369,7 +369,7 @@ func TestClosureAndGoroutineUnlockKillsLock() { // want TestClosureAndGoroutineU
 	x1 = 1 // want `SAFE009: local variable x1 is guarded by mu1 but is written here without holding it`
 
 	var mu2 sync.Mutex
-	var x2 int //safe:guarded_by mu2
+	var x2 int //gosree:guarded_by mu2
 	mu2.Lock()
 	go func() {
 		_ = x2 // want `SAFE009: local variable x2 is guarded by mu2 but is read here without holding it`
@@ -472,38 +472,38 @@ func TestHandlerHelperClosureFactoryAndStripPrefix(mux *http.ServeMux) { // want
 	mux.Handle("/strip", http.StripPrefix("/strip", &StripPrefixCounter{}))
 }
 
-// 32. SAFE007 & SAFE009: //safe:holds unlocking via defer/helper, calling //safe:holds via go/defer after unlock, and method-value unlock
+// 32. SAFE007 & SAFE009: //gosree:holds unlocking via defer/helper, calling //gosree:holds via go/defer after unlock, and method-value unlock
 type GuardedCounter struct {
 	mu  sync.Mutex
-	val int //safe:guarded_by mu
+	val int //gosree:guarded_by mu
 }
 
 func unlockGuardedCounter(g *GuardedCounter) {
 	g.mu.Unlock()
 }
 
-//safe:holds mu
+//gosree:holds mu
 func (g *GuardedCounter) badDeferUnlock() {
-	defer g.mu.Unlock() // want `SAFE007: badDeferUnlock is //safe:holds mu but unlocks it here`
+	defer g.mu.Unlock() // want `SAFE007: badDeferUnlock is //gosree:holds mu but unlocks it here`
 	g.val++
 }
 
-//safe:holds mu
+//gosree:holds mu
 func (g *GuardedCounter) badHelperUnlock() {
-	unlockGuardedCounter(g) // want `SAFE007: badHelperUnlock is //safe:holds mu but unlocks it here`
+	unlockGuardedCounter(g) // want `SAFE007: badHelperUnlock is //gosree:holds mu but unlocks it here`
 }
 
-//safe:holds mu
+//gosree:holds mu
 func (g *GuardedCounter) bumpHeld() {
 	g.val++
 }
 
 func TestHoldsGoDeferAndMethodValUnlock(g2 *GuardedCounter) { // want TestHoldsGoDeferAndMethodValUnlock:"ownership summary"
 	g1 := &GuardedCounter{}
-	go g1.bumpHeld() // want `SAFE009: bumpHeld requires mu to be held \(//safe:holds mu\), but it is not held here`
+	go g1.bumpHeld() // want `SAFE009: bumpHeld requires mu to be held \(//gosree:holds mu\), but it is not held here`
 
 	g2.mu.Lock()
-	defer g2.bumpHeld() // want `SAFE009: bumpHeld requires mu to be held \(//safe:holds mu\), but it is not held here`
+	defer g2.bumpHeld() // want `SAFE009: bumpHeld requires mu to be held \(//gosree:holds mu\), but it is not held here`
 	unlock := g2.mu.Unlock
 	unlock()
 	g2.val = 10 // want `SAFE009: field val is guarded by mu but is written here without holding it`
@@ -525,7 +525,7 @@ func TestIdentityPassThroughAndDeferHelperUnlock(c *ImmConfig, g *GuardedCounter
 	*idIntPtrHelper(&unguardedIdentityGlobal) = 88
 
 	g.mu.Lock()
-	defer g.bumpHeld()            // want `SAFE009: bumpHeld requires mu to be held \(//safe:holds mu\), but it is not held here`
+	defer g.bumpHeld()            // want `SAFE009: bumpHeld requires mu to be held \(//gosree:holds mu\), but it is not held here`
 	defer unlockGuardedCounter(g)
 }
 

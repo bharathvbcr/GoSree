@@ -26,7 +26,7 @@ type Config struct {
 	// Primary worker pool configuration
 	Workers cap.Mut[int] ` + "`json:\"workers\" db:\"workers\"`" + ` //gosree:mub
 	Timeout /*gosree:rob*/ cap.Ref[int] /* inline */ ` + "`json:\"timeout\"`" + `
-	Secret  cap.Iso[string] ` + "`yaml:\"secret,omitempty\"`" + ` //safe:iso
+	Secret  cap.Iso[string] ` + "`yaml:\"secret,omitempty\"`" + ` //gosree:iso
 	// Doc comment for metadata
 	Metadata cap.Imm[string] ` + "`json:\"metadata\"`" + `
 }
@@ -56,7 +56,7 @@ func main() {
 	erasedStr := string(erased)
 
 	// Verify directives are completely gone
-	if strings.Contains(erasedStr, "//gosree:") || strings.Contains(erasedStr, "/*gosree:") || strings.Contains(erasedStr, "//safe:") {
+	if strings.Contains(erasedStr, "//gosree:") || strings.Contains(erasedStr, "/*gosree:") || strings.Contains(erasedStr, "//gosree:") {
 		t.Errorf("Directives survived erasure:\n%s", erasedStr)
 	}
 

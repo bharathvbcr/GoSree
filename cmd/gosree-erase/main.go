@@ -485,16 +485,13 @@ type span struct {
 	end   int
 }
 
-// isDirective reports whether text is a gosree, gosree, or legacy safe directive comment.
+// isDirective reports whether text is a //gosree: or /*gosree: directive comment.
 func isDirective(text string) bool {
 	t := strings.TrimSpace(text)
-	return strings.HasPrefix(t, "//gosree:") || strings.HasPrefix(t, "//sree:") ||
-		strings.HasPrefix(t, "//gosree:") || strings.HasPrefix(t, "//safe:") ||
-		strings.HasPrefix(t, "/*gosree:") || strings.HasPrefix(t, "/*sree:") ||
-		strings.HasPrefix(t, "/*gosree:") || strings.HasPrefix(t, "/*safe:")
+	return strings.HasPrefix(t, "//gosree:") || strings.HasPrefix(t, "/*gosree:")
 }
 
-// stripDirectives removes all //gosree: and //safe: directive comments cleanly
+// stripDirectives removes all //gosree: and /*gosree: directive comments cleanly
 // using exact AST token byte offsets without corrupting doc comments.
 func stripDirectives(src []byte) []byte {
 	fset := token.NewFileSet()

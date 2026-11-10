@@ -79,7 +79,7 @@ func TestTier1_DirectivesErasure(t *testing.T) {
 		var strippedLines []string
 		for _, line := range strings.Split(string(content), "\n") {
 			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "//gosree:") || strings.HasPrefix(trimmed, "//safe:") {
+			if strings.HasPrefix(trimmed, "//gosree:") || strings.HasPrefix(trimmed, "//gosree:") {
 				strippedLines = append(strippedLines, "")
 				continue
 			}

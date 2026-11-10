@@ -13,7 +13,7 @@ type Job struct{ ID int }
 // publishes it, and the write after Unlock races with any reader that updates it under the lock.
 var regMu sync.Mutex
 
-var registry = map[string]*Job{} //safe:guarded_by regMu
+var registry = map[string]*Job{} //gosree:guarded_by regMu
 
 func register() {
 	j := &Job{}
@@ -35,7 +35,7 @@ func bumpRegistered() {
 // pointer stored into it is still written by the publisher.
 type Hub struct {
 	mu  sync.Mutex
-	cur *Job //safe:guarded_by mu
+	cur *Job //gosree:guarded_by mu
 }
 
 func (h *Hub) loop() {

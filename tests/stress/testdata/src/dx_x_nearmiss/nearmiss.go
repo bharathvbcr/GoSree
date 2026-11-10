@@ -1,7 +1,7 @@
 // Package dx_x_nearmiss is the next round after dx_directive: spellings of a directive that a reader
 // takes for one and parseDirective does not accept. Each is reported as SAFE007 at the comment and
 // has no effect, so the check it asks for visibly does not run (fail closed), and prose that merely
-// starts with "safe:" or "gosree:" stays clean.
+// starts with "gosree:" stays clean.
 //
 // Do not gofmt this file: it holds the spellings gofmt produces from typos, next to the typos.
 package dx_x_nearmiss
@@ -15,13 +15,13 @@ type Job struct{ ID int }
 
 type S struct {
 	mu sync.Mutex
-	a  int //  safe:guarded_by mu // HIT(SAFE007) two spaces after the slashes
-	b  int //	safe:guarded_by mu // HIT(SAFE007) a tab after the slashes
-	c  int // safe: guarded_by mu // HIT(SAFE007) spaces after the slashes and after the colon
-	d  int //SAFE:GUARDED_BY mu // HIT(SAFE007) all capitals
-	e  int //Safe:guarded-by mu // HIT(SAFE007) wrong prefix case and a hyphen: within edit distance 2 of guarded_by
-	f  int //safe:gaurded_by mu // HIT(SAFE007) exact prefix, transposed verb: an unknown directive, with a suggestion
-	g  int /*safe: guarded_by mu*/ // control: the exact prefix with a space after the colon is a directive, and it is applied
+	a  int //  gosree:guarded_by mu // HIT(SAFE007) two spaces after the slashes
+	b  int //	gosree:guarded_by mu // HIT(SAFE007) a tab after the slashes
+	c  int // gosree: guarded_by mu // HIT(SAFE007) spaces after the slashes and after the colon
+	d  int //GOSREE:GUARDED_BY mu // HIT(SAFE007) all capitals
+	e  int //Gosree:guarded-by mu // HIT(SAFE007) wrong prefix case and a hyphen: within edit distance 2 of guarded_by
+	f  int //gosree:gaurded_by mu // HIT(SAFE007) exact prefix, transposed verb: an unknown directive, with a suggestion
+	g  int /*gosree: guarded_by mu*/ // control: the exact prefix with a space after the colon is a directive, and it is applied
 }
 
 func (s *S) unlocked() {
@@ -78,13 +78,13 @@ func emptyTyped() {}
 // gosree: // HIT(SAFE007)
 func emptyFormatted() {}
 
-// Prose is left alone: after "safe:" or "gosree:" and a space, only a verb spelled exactly, followed by
+// Prose is left alone: after "gosree:" and a space, only a verb spelled exactly, followed by
 // white space or the end of the line, is taken for a directive.
 //
-// safe: this lock is held by the caller
+// gosree: this lock is held by the caller
 // gosree: see docs/DIRECTIVES.md
-// Safe: unsafe.Pointer is never used here.
-// safe: is this right? It is.
+// Gosree: unsafe.Pointer is never used here.
+// gosree: is this right? It is.
 // Thread-safe: yes.
 // gosree:isolation is a design note, not a verb.
 func prose() {}

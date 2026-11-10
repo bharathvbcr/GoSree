@@ -2,7 +2,7 @@ package imm
 
 // Config is shared read-only between goroutines.
 //
-//safe:imm
+//gosree:imm
 type Config struct { // want Config:"imm"
 	name   string
 	port   int
@@ -41,15 +41,15 @@ func sendFieldAddr(ch chan *int, c *Config) {
 
 // Bad holds a slice, which another goroutine could still mutate.
 //
-//safe:imm
-type Bad struct { // want `SAFE005: //safe:imm type Bad is not immutable: field names has type \[\]string`
+//gosree:imm
+type Bad struct { // want `SAFE005: //gosree:imm type Bad is not immutable: field names has type \[\]string`
 	names []string
 }
 
 // Exported fields can be written by other packages.
 //
-//safe:imm
-type Open struct { // want `SAFE005: //safe:imm type Open is not immutable: field Port is exported`
+//gosree:imm
+type Open struct { // want `SAFE005: //gosree:imm type Open is not immutable: field Port is exported`
 	Port int
 }
 

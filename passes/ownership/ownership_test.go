@@ -13,7 +13,7 @@ func TestMoves(t *testing.T) {
 	if len(results) != 1 {
 		t.Fatalf("got %d results, want 1", len(results))
 	}
-	// One //safe:iso parameter: j of the owned-parameter test.
+	// One //gosree:iso parameter: j of the owned-parameter test.
 	if got := results[0].Result.(*ownership.Stats).Iso; got != 1 {
 		t.Errorf("Stats.Iso = %d, want 1", got)
 	}
@@ -46,7 +46,7 @@ func TestHandlerWrites(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "handlers", "store", "store/inner")
 }
 
-// TestGuarded checks SAFE009: guarded memory is accessed only under its mutex, //safe:holds helpers
+// TestGuarded checks SAFE009: guarded memory is accessed only under its mutex, //gosree:holds helpers
 // are called with it held, and nothing read from guarded memory leaves the lock.
 func TestGuarded(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "guarded")
@@ -59,7 +59,7 @@ func TestGuardedLocals(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "guardedlocal")
 }
 
-// TestSuppression checks that //safe:unsafe on a transfer mutes everything that transfer reports, and
+// TestSuppression checks that //gosree:unsafe on a transfer mutes everything that transfer reports, and
 // that Stats counts transfers, suppressed transfers and suppressed findings once each.
 func TestSuppression(t *testing.T) {
 	results := analysistest.Run(t, analysistest.TestData(), ownership.Analyzer, "supp")

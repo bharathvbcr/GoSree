@@ -19,7 +19,7 @@ import (
 // with no body) it reads the callee's summary instead: passing shared memory to a parameter the
 // callee may write is a write. It stops at spawn sites (the transfer rules own a goroutine the handler
 // starts) and at interface and dynamic calls, which are a stated gap. It runs inside the
-// registration's transfer check, so a //safe:unsafe on the registration mutes every write it finds.
+// registration's transfer check, so a //gosree:unsafe on the registration mutes every write it finds.
 
 // checkHandlerWrites reports SAFE008 for the handler registered at sp.
 func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {

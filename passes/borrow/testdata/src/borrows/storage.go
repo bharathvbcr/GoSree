@@ -17,7 +17,7 @@ type StructWithRobField struct {
 
 // Field with legacy safe prefix -> BORROW001
 type StructWithLegacyField struct {
-	//safe:mub
+	//gosree:mub
 	data *string // want `BORROW001: struct field 'data' cannot have second-class borrow type`
 }
 

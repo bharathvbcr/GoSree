@@ -11,10 +11,10 @@ import (
 
 // Store is imm apart from its guarded field, so goroutines may share it.
 //
-//safe:imm
+//gosree:imm
 type Store struct {
 	mu sync.Mutex
-	m  map[string]int //safe:guarded_by mu
+	m  map[string]int //gosree:guarded_by mu
 }
 
 func (s *Store) get(k string) int {

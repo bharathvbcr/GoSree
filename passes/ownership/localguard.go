@@ -7,7 +7,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// Guarded local variables. A local annotated //safe:guarded_by lives in a cell: an Alloc in the
+// Guarded local variables. A local annotated //gosree:guarded_by lives in a cell: an Alloc in the
 // function that declares it and, in each closure that captures it, a free variable bound to that
 // Alloc. Its mutex has a cell the same way, or is a package variable. A cell is the root of a guard
 // path, so a closure that locks its captured mu holds the guard of its captured x.

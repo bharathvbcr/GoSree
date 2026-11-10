@@ -6,13 +6,13 @@ func DirectivesIsoParam(p *int) int {
 	return *p
 }
 
-// TC-T1-9.2: Legacy //safe:* directives backward compatibility
-//safe:iso q
+// TC-T1-9.2: Legacy //gosree:* directives backward compatibility
+//gosree:iso q
 func LegacySafeParam(q *int) int {
 	return *q
 }
 
-//safe:imm
+//gosree:imm
 type LegacyImmType struct {
 	Val int
 }

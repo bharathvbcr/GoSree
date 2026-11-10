@@ -104,6 +104,6 @@ func later() { sharedHelper() }
 // guarded_by naming a mutex that is never locked: SAFE006 is silenced, SAFE009 must take over.
 var gmu sync.Mutex
 
-var neverLocked int //safe:guarded_by gmu
+var neverLocked int //gosree:guarded_by gmu
 
 func writeUnlocked() { neverLocked = 1 } // HIT(SAFE009)

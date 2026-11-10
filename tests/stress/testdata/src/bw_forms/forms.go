@@ -64,11 +64,11 @@ func typedVarAssignedLater() {
 	*b1 = 2
 }
 
-// 7. legacy //safe: prefix.
+// 7. legacy //gosree: prefix.
 func legacyPrefix() {
 	x := 0
-	b1 := &x //safe:mut
-	b2 := &x //safe:mut // HIT(BORROW002)
+	b1 := &x //gosree:mut
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	*b1 = 2
 }

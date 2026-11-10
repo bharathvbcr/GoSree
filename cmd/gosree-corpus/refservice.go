@@ -190,8 +190,8 @@ func loadAnnotationTable(file string) (annotationTable, error) {
 		default:
 			return tab, fmt.Errorf("%s:%d: mode %q, want before or trail", file, n, cols[4])
 		}
-		if a.file == "" || a.scope == "" || !strings.HasPrefix(a.directive, "//safe:") || a.verdict == "" {
-			return tab, fmt.Errorf("%s:%d: file, scope, a //safe: directive and a verdict are required", file, n)
+		if a.file == "" || a.scope == "" || !strings.HasPrefix(a.directive, "//gosree:") || a.verdict == "" {
+			return tab, fmt.Errorf("%s:%d: file, scope, a //gosree: directive and a verdict are required", file, n)
 		}
 		tab.rows = append(tab.rows, a)
 	}
@@ -229,7 +229,7 @@ func unescape(s string) string {
 func directiveCounts(rows []annotation) map[string]int {
 	m := map[string]int{}
 	for _, a := range rows {
-		verb, args, _ := strings.Cut(strings.TrimPrefix(a.directive, "//safe:"), " ")
+		verb, args, _ := strings.Cut(strings.TrimPrefix(a.directive, "//gosree:"), " ")
 		switch verb {
 		case "holds", "iso":
 			m[verb] += len(strings.FieldsFunc(args, func(r rune) bool { return r == ',' || r == ' ' }))

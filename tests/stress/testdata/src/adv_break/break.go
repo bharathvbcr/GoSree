@@ -19,7 +19,7 @@ type RawCfg FrozenCfg
 
 type Vault struct {
 	mu      sync.Mutex
-	balance int //safe:guarded_by mu
+	balance int //gosree:guarded_by mu
 }
 
 func idPtr[T any](p *T) *T { return p }

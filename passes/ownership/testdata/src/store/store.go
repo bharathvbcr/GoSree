@@ -72,7 +72,7 @@ func Forward(s *Store) { inner.Set(&s.data) } // want Forward:"ownership summary
 // Counter's map is guarded: SAFE009 checks its accesses here, so Hit is not a writer of c.
 type Counter struct {
 	mu   sync.Mutex
-	hits map[string]int //safe:guarded_by mu
+	hits map[string]int //gosree:guarded_by mu
 }
 
 func NewCounter() *Counter { return &Counter{hits: map[string]int{}} } // want NewCounter:"ownership summary"

@@ -82,7 +82,7 @@ func appendMove(ch chan []int) {
 // Cross-package lock acquire summary (FuncFact.Acquires) and spawner summary (FuncFact.Spawns).
 func crossPackageLockAndSpawn() {
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	_ = x
 	go func() {
 		lib.LockMu(&mu)

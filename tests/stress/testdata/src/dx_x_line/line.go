@@ -48,7 +48,7 @@ type T struct {
 //line line.go:600
 	a int
 //line line.go:600
-	b int //safe:guarded_by mu
+	b int //gosree:guarded_by mu
 }
 
 func (t *T) touch() {

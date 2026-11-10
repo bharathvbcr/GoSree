@@ -44,8 +44,8 @@ func TestLoadAnnotationTable(t *testing.T) {
 	}
 	header := strings.Join(tableColumns, "\t") + "\n"
 	tab, err := loadAnnotationTable(write("# a comment\n#rev abc123\n" + header +
-		"a/b.go\tfunc (s *S) M(\t\\t\\tmu.Lock()\t2\tbefore\t//safe:unsafe reason\tSAFE002\tPOLICY:x\tc\tnote\n" +
-		"a/b.go\ttype S struct {\t\\tn int\t\ttrail\t//safe:guarded_by mu\tSAFE008\tGUARDED\t\t\n"))
+		"a/b.go\tfunc (s *S) M(\t\\t\\tmu.Lock()\t2\tbefore\t//gosree:unsafe reason\tSAFE002\tPOLICY:x\tc\tnote\n" +
+		"a/b.go\ttype S struct {\t\\tn int\t\ttrail\t//gosree:guarded_by mu\tSAFE008\tGUARDED\t\t\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,11 +64,11 @@ func TestLoadAnnotationTable(t *testing.T) {
 	}
 	for _, tc := range []struct{ body, want string }{
 		{"file\tscope\n", "header must be"},
-		{header + "a.go\tfunc F(\t\t\tbefore\t//safe:unsafe r\tX\n", "columns"},
-		{header + "a.go\tfunc F(\t\t0\tbefore\t//safe:unsafe r\tX\tV\t\t\n", "occurrence"},
-		{header + "a.go\tfunc F(\t\t\tabove\t//safe:unsafe r\tX\tV\t\t\n", "mode"},
+		{header + "a.go\tfunc F(\t\t\tbefore\t//gosree:unsafe r\tX\n", "columns"},
+		{header + "a.go\tfunc F(\t\t0\tbefore\t//gosree:unsafe r\tX\tV\t\t\n", "occurrence"},
+		{header + "a.go\tfunc F(\t\t\tabove\t//gosree:unsafe r\tX\tV\t\t\n", "mode"},
 		{header + "a.go\tfunc F(\t\t\tbefore\t// not a directive\tX\tV\t\t\n", "required"},
-		{header + "a.go\tfunc F(\t\t\tbefore\t//safe:unsafe r\tX\t\t\t\n", "required"},
+		{header + "a.go\tfunc F(\t\t\tbefore\t//gosree:unsafe r\tX\t\t\t\n", "required"},
 		{"# only comments\n", "no header"},
 	} {
 		if _, err := loadAnnotationTable(write(tc.body)); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -80,9 +80,9 @@ func TestLoadAnnotationTable(t *testing.T) {
 // TestCheckApplied checks that a run whose parsed directives differ from the table fails.
 func TestCheckApplied(t *testing.T) {
 	rows := []annotation{
-		{directive: "//safe:unsafe r"},
-		{directive: "//safe:guarded_by mu"},
-		{directive: "//safe:iso fn, onPanic"},
+		{directive: "//gosree:unsafe r"},
+		{directive: "//gosree:guarded_by mu"},
+		{directive: "//gosree:iso fn, onPanic"},
 	}
 	ok := PackageStats{Findings: map[string]int{}}
 	ok.UnsafeScope, ok.Guarded, ok.Iso = 1, 1, 2
@@ -99,11 +99,11 @@ func TestCheckApplied(t *testing.T) {
 	if err := checkApplied(rows, bad, true); err == nil || !strings.Contains(err.Error(), "malformed") {
 		t.Errorf("a malformed directive: got %v", err)
 	}
-	if err := checkApplied([]annotation{{directive: "//safe:bogus"}}, PackageStats{}, true); err == nil || !strings.Contains(err.Error(), "unknown directive") {
+	if err := checkApplied([]annotation{{directive: "//gosree:bogus"}}, PackageStats{}, true); err == nil || !strings.Contains(err.Error(), "unknown directive") {
 		t.Errorf("an unknown directive: got %v", err)
 	}
 	// A row in a test file is written into the copy either way, but only loaded with -tests.
-	withTest := append(rows, annotation{file: "p/x_test.go", directive: "//safe:unsafe r"})
+	withTest := append(rows, annotation{file: "p/x_test.go", directive: "//gosree:unsafe r"})
 	if err := checkApplied(withTest, ok, false); err != nil {
 		t.Errorf("a test-file row without -tests: %v", err)
 	}

@@ -56,7 +56,7 @@ type EmbeddedBlockComment struct {
 }
 
 type EmbeddedLegacyBlockComment struct {
-	*int /*safe:rob*/ // want `BORROW001: embedded struct field cannot have second-class borrow type`
+	*int /*gosree:rob*/ // want `BORROW001: embedded struct field cannot have second-class borrow type`
 }
 
 type EmbeddedDocComment struct {
@@ -65,8 +65,8 @@ type EmbeddedDocComment struct {
 }
 
 type BlockCommentStruct struct {
-	f1 *int /*safe:mut*/ // want `BORROW001: struct field 'f1' cannot have second-class borrow type`
-	f2 *int /*safe:rob*/ // want `BORROW001: struct field 'f2' cannot have second-class borrow type`
+	f1 *int /*gosree:mut*/ // want `BORROW001: struct field 'f1' cannot have second-class borrow type`
+	f2 *int /*gosree:rob*/ // want `BORROW001: struct field 'f2' cannot have second-class borrow type`
 }
 
 // ============================================================================

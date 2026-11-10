@@ -17,10 +17,10 @@ import (
 // Category is the diagnostic category for this pass.
 const Category = "SAFE001"
 
-// Analyzer reports unsafe, cgo, linkname and raw reflect writes outside //safe:unsafe scopes.
+// Analyzer reports unsafe, cgo, linkname and raw reflect writes outside //gosree:unsafe scopes.
 var Analyzer = &analysis.Analyzer{
 	Name:     "safeunsafe",
-	Doc:      "forbid package unsafe, cgo, //go:linkname and reflect writes outside //safe:unsafe (" + Category + ")",
+	Doc:      "forbid package unsafe, cgo, //go:linkname and reflect writes outside //gosree:unsafe (" + Category + ")",
 	Run:      run,
 	Requires: []*analysis.Analyzer{annot.Analyzer},
 }
@@ -42,7 +42,7 @@ func run(pass *analysis.Pass) (any, error) {
 	for _, file := range pass.Files {
 		for _, imp := range file.Imports {
 			if path, err := strconv.Unquote(imp.Path.Value); err == nil && path == "C" {
-				report(imp, `cgo (import "C") bypasses Go's memory safety; wrap it in //safe:unsafe <reason>`)
+				report(imp, `cgo (import "C") bypasses Go's memory safety; wrap it in //gosree:unsafe <reason>`)
 			}
 		}
 		for _, cg := range file.Comments {
@@ -80,7 +80,7 @@ func run(pass *analysis.Pass) (any, error) {
 			case *ast.Ident:
 				// Matching the identifier, not a selector, also catches a dot import of unsafe or reflect.
 				if obj, ok := pass.TypesInfo.Uses[n]; ok && obj.Pkg() != nil && obj.Pkg().Path() == "unsafe" && unsafeMembers[obj.Name()] {
-					report(n, "unsafe."+obj.Name()+" bypasses Go's memory safety; wrap it in //safe:unsafe <reason>")
+					report(n, "unsafe."+obj.Name()+" bypasses Go's memory safety; wrap it in //gosree:unsafe <reason>")
 				} else if !handledIdent[n] {
 					if name := reflectSymbol(pass.TypesInfo.Uses[n]); name != "" {
 						report(n, name+" writes or exposes memory through reflection")

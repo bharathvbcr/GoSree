@@ -6,7 +6,7 @@ import "sync"
 // Capturing x in the second goroutine is not a use after the first one took it: x is guarded.
 func lockDiscipline() {
 	var mu sync.Mutex
-	var x int16 = 0 //safe:guarded_by mu
+	var x int16 = 0 //gosree:guarded_by mu
 	_ = x
 	ch := make(chan bool, 2)
 	go func() {
@@ -28,7 +28,7 @@ func lockDiscipline() {
 // writeBeforeLock is TestRaceMutex: the writes come before the lock.
 func writeBeforeLock() {
 	var mu sync.Mutex
-	var x int16 = 0 //safe:guarded_by mu
+	var x int16 = 0 //gosree:guarded_by mu
 	_ = x
 	ch := make(chan bool, 2)
 	go func() {
@@ -51,7 +51,7 @@ func writeBeforeLock() {
 func otherMutex() {
 	var mu1 sync.Mutex
 	var mu2 sync.Mutex
-	var x int8 = 0 //safe:guarded_by mu1
+	var x int8 = 0 //gosree:guarded_by mu1
 	_ = x
 	ch := make(chan bool, 2)
 	go func() {
@@ -73,7 +73,7 @@ func otherMutex() {
 // writeUnderRLock is TestRaceRWMutexMultipleReaders: y is guarded too, and readers write it.
 func writeUnderRLock() {
 	var mu sync.RWMutex
-	var x, y int64 = 0, 1 //safe:guarded_by mu
+	var x, y int64 = 0, 1 //gosree:guarded_by mu
 	ch := make(chan bool, 2)
 	go func() {
 		mu.Lock()
@@ -96,7 +96,7 @@ func writeUnderRLock() {
 // under Lock after starting them, and its initialisation runs before any goroutine can see x.
 func readersAndWriter() {
 	var mu sync.RWMutex
-	x := int64(0) //safe:guarded_by mu
+	x := int64(0) //gosree:guarded_by mu
 	ch := make(chan bool, 2)
 	go func() {
 		mu.RLock()
@@ -120,7 +120,7 @@ func readersAndWriter() {
 // afterSharing reads x unlocked once a goroutine can see it; before that, no lock is needed.
 func afterSharing() {
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	x = 5
 	go func() {
 		mu.Lock()
@@ -133,7 +133,7 @@ func afterSharing() {
 // muNotCaptured: a goroutine that does not capture mu cannot hold it.
 func muNotCaptured() {
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	mu.Lock()
 	go func() {
 		x++ // want `SAFE009: local variable x is guarded by mu but is written here without holding it`
@@ -144,7 +144,7 @@ func muNotCaptured() {
 // leaves: a guarded map read under the lock must not be returned.
 func leaves() map[string]int {
 	var mu sync.Mutex
-	m := map[string]int{} //safe:guarded_by mu
+	m := map[string]int{} //gosree:guarded_by mu
 	go func() {
 		mu.Lock()
 		m["a"] = 1
@@ -159,7 +159,7 @@ var gmu sync.Mutex
 
 // byPackageMutex: a local guarded by a package mutex, which every closure can reach.
 func byPackageMutex() {
-	n := 0 //safe:guarded_by gmu
+	n := 0 //gosree:guarded_by gmu
 	go func() {
 		gmu.Lock()
 		n++
@@ -178,7 +178,7 @@ func byPackageMutex() {
 func funcUnlock() {
 	ch := make(chan bool, 1)
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	_ = x
 	go func() {
 		mu.Lock()
@@ -198,7 +198,7 @@ func funcUnlock() {
 func asFunc4() {
 	c := make(chan bool, 1)
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	_ = x
 	go func() {
 		x = func() int {
@@ -218,7 +218,7 @@ func asFunc4() {
 func asFunc3() {
 	c := make(chan bool, 1)
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	go func() {
 		func(x int) {
 			_ = x
@@ -250,7 +250,7 @@ func lockAndRelease(mu *sync.Mutex) int {
 // A function that locks on some paths only, or releases before returning, acquires nothing.
 func notAcquired() {
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	go func() {
 		mu.Lock()
 		x++
@@ -265,7 +265,7 @@ func notAcquired() {
 func inner() {
 	var mu sync.Mutex
 	go func() {
-		n := 0 //safe:guarded_by mu
+		n := 0 //gosree:guarded_by mu
 		go func() {
 			mu.Lock()
 			n++

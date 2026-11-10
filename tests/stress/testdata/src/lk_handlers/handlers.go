@@ -140,7 +140,7 @@ func lazy(mux *http.ServeMux) { mux.Handle("/l", &Lazy{}) }
 
 type Safe struct {
 	mu   sync.Mutex
-	n    int //safe:guarded_by mu
+	n    int //gosree:guarded_by mu
 	hits atomic.Int64
 	m    sync.Map
 	ch   chan int

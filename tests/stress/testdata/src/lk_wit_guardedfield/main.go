@@ -13,10 +13,10 @@ import (
 
 // Log is imm apart from its guarded field, so goroutines may share it.
 //
-//safe:imm
+//gosree:imm
 type Log struct {
 	mu  sync.Mutex
-	buf bytes.Buffer //safe:guarded_by mu
+	buf bytes.Buffer //gosree:guarded_by mu
 }
 
 func (l *Log) locked(s string) {

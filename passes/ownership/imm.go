@@ -12,9 +12,9 @@ import (
 	"github.com/bharathvbcr/gosree/internal/kinds"
 )
 
-// validateImm decides which //safe:imm annotations hold. An imm type must be a struct whose fields
+// validateImm decides which //gosree:imm annotations hold. An imm type must be a struct whose fields
 // are all unexported (so only its own package can write them) and all shareable, except fields
-// annotated //safe:guarded_by, which may have any type: SAFE009 checks every access to them under the
+// annotated //gosree:guarded_by, which may have any type: SAFE009 checks every access to them under the
 // struct's own mutex. Validity is computed to a fixpoint because a field may point to another imm
 // type of the same package.
 func (st *state) validateImm() {
@@ -44,7 +44,7 @@ func (st *state) validateImm() {
 		}
 	}
 	for tn, msg := range problems {
-		prefix := st.ix.ImmPrefixOf(tn) + "imm"
+		prefix := annot.Prefix + "imm"
 		st.report(st.ix.ImmTypes[tn], Imm, fmt.Sprintf("%s type %s is not immutable: %s", prefix, tn.Name(), msg))
 	}
 }
@@ -129,16 +129,6 @@ func pointee(t types.Type) types.Type {
 	return nil
 }
 
-func (st *state) immPrefixOf(t types.Type) string {
-	if n, ok := types.Unalias(t).(*types.Named); ok {
-		tn := n.Origin().Obj()
-		if st.ix != nil {
-			return st.ix.ImmPrefixOf(tn) + "imm"
-		}
-	}
-	return "//gosree:imm"
-}
-
 // checkImmStores reports SAFE005 for writes into imm memory outside its composite literal, for
 // taking the address of an imm variable (which would let it be reassigned under a sharer), and for
 // mutable borrows targeting fields of immutable types.
@@ -206,7 +196,7 @@ func (st *state) checkImmWrite(ins ssa.Instruction, addr ssa.Value) {
 	if !pos.IsValid() {
 		pos = firstPos
 	}
-	prefix := st.immPrefixOf(immType)
+	prefix := annot.Prefix + "imm"
 	st.report(pos, Imm, fmt.Sprintf("write to a field of %s, which is %s; imm values are only written by their composite literal", typeName(immType), prefix))
 }
 
@@ -392,7 +382,7 @@ func (st *state) checkImmDerivedCalls(fa *ssa.FieldAddr, immType types.Type, val
 				if !pos.IsValid() {
 					pos = fa.Pos()
 				}
-				prefix := st.immPrefixOf(immType)
+				prefix := annot.Prefix + "imm"
 				st.report(pos, Imm, fmt.Sprintf("write to a field of %s, which is %s; imm values are only written by their composite literal", typeName(immType), prefix))
 			}
 		}
@@ -425,7 +415,7 @@ func (st *state) checkImmStore(s *ssa.Store) {
 	if !pos.IsValid() {
 		pos = firstPos
 	}
-	prefix := st.immPrefixOf(immType)
+	prefix := annot.Prefix + "imm"
 	st.report(pos, Imm, fmt.Sprintf("write to a field of %s, which is %s; imm values are only written by their composite literal", typeName(immType), prefix))
 }
 
@@ -454,7 +444,7 @@ func (st *state) checkImmAddr(a *ssa.Alloc) {
 				continue
 			}
 		}
-		prefix := st.immPrefixOf(t)
+		prefix := annot.Prefix + "imm"
 		st.report(posOf(r, r), Imm, fmt.Sprintf("taking the address of %s, a variable of %s type %s, exposes it to reassignment; construct shared imm values with &%s{...}",
 			describe(a), prefix, typeName(t), typeName(t)))
 		return

@@ -4,10 +4,10 @@ import "sync"
 
 type S struct {
 	mu sync.Mutex
-	a  int // safe:guarded_by mu // want `SAFE007: "// safe:guarded_by mu" is not a gosree directive, so it has no effect: write it as //safe:guarded_by mu`
-	b  int //Safe:guardedby mu // want `SAFE007: "//Safe:guardedby mu" is not a gosree directive`
-	c  int //safe:guarded_by	mu
-	d  int //safe:gaurded_by mu // want `SAFE007: unknown directive //safe:gaurded_by \(did you mean //safe:guarded_by\?`
+	a  int // gosree:guarded_by mu // want `SAFE007: "// gosree:guarded_by mu" is not a gosree directive, so it has no effect: write it as //gosree:guarded_by mu`
+	b  int //Gosree:guardedby mu // want `SAFE007: "//Gosree:guardedby mu" is not a gosree directive`
+	c  int //gosree:guarded_by	mu
+	d  int //gosree:gaurded_by mu // want `SAFE007: unknown directive //gosree:gaurded_by \(did you mean //gosree:guarded_by\?`
 }
 
 // GOSREE:ISO p // want `SAFE007: "// GOSREE:ISO p" is not a gosree directive, so it has no effect: write it as //gosree:iso p`
@@ -18,9 +18,9 @@ func empty() {}
 
 // Prose is not a directive.
 //
-// safe: this lock is held by the caller
+// gosree: this lock is held by the caller
 // gosree: see the docs
-// Safe: unsafe.Pointer is never used here.
+// Gosree: unsafe.Pointer is never used here.
 // gosree:isolation is a design note
 func prose() {}
 

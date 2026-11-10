@@ -7,10 +7,10 @@ import "sync"
 
 type S struct {
 	mu sync.Mutex
-	n  int //safe:guarded_by mu
+	n  int //gosree:guarded_by mu
 }
 
-//safe:holds mu
+//gosree:holds mu
 func (s *S) bumpLocked() { s.n++ }
 
 // Control: two objects of one type.

@@ -39,7 +39,7 @@ func Status(url string) (int, error) {
 // 3. a mutex left locked on an early return: the next Lock deadlocks (rs_w_lockleak runs it).
 type Account struct {
 	mu      sync.Mutex
-	balance int //safe:guarded_by mu
+	balance int //gosree:guarded_by mu
 }
 
 func (a *Account) Withdraw(n int) bool {

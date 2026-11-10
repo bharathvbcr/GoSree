@@ -23,7 +23,7 @@ func Size(t *Thing) int { return t.n + len(t.data) }
 
 // Consume takes ownership of its argument.
 //
-//safe:iso t
+//gosree:iso t
 func Consume(ch chan *Thing, t *Thing) { ch <- t }
 
 // LockMu acquires a parameter mutex and returns holding it.

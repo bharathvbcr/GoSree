@@ -46,7 +46,7 @@ func setHook() { hook = 1 }
 var hooks = []func(){setHook}
 
 // A guarded variable is checked at every access instead (SAFE009).
-var guardedCount int //safe:guarded_by mu
+var guardedCount int //gosree:guarded_by mu
 
 func addGuarded() {
 	mu.Lock()
@@ -56,7 +56,7 @@ func addGuarded() {
 
 // The escape hatch on the declaration accepts it.
 //
-//safe:unsafe a test seam, only reassigned by tests that run sequentially
+//gosree:unsafe a test seam, only reassigned by tests that run sequentially
 var now = func() int { return 0 }
 
 func stubNow() { now = func() int { return 1 } }
@@ -65,12 +65,12 @@ func stubNow() { now = func() int { return 1 } }
 // not SAFE006; an unguarded field beside it still is.
 var finVar struct {
 	sync.Mutex
-	cnt int //safe:guarded_by Mutex
+	cnt int //gosree:guarded_by Mutex
 }
 
 var mixed struct { // want `SAFE006: package variable mixed is written outside init`
 	sync.Mutex
-	hits  int //safe:guarded_by Mutex
+	hits  int //gosree:guarded_by Mutex
 	loose int
 }
 

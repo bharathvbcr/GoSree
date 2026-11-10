@@ -1,26 +1,26 @@
 package a
 
-//safe:bogus // want `SAFE007: unknown directive //safe:bogus`
+//gosree:bogus // want `SAFE007: unknown directive //gosree:bogus`
 func unknown() {}
 
-//safe:iso q // want `SAFE007: //safe:iso names "q", which is not a parameter of misnamed`
+//gosree:iso q // want `SAFE007: //gosree:iso names "q", which is not a parameter of misnamed`
 func misnamed(p *int) { _ = p }
 
-//safe:iso p
+//gosree:iso p
 func named(p *int) { _ = p }
 
 func missingReason() {
-	//safe:unsafe // want `SAFE007: //safe:unsafe needs a reason`
+	//gosree:unsafe // want `SAFE007: //gosree:unsafe needs a reason`
 	_ = 1
 }
 
-//safe:imm // want `SAFE007: //safe:imm must be in a type declaration's doc comment`
+//gosree:imm // want `SAFE007: //gosree:imm must be in a type declaration's doc comment`
 func notAType() {}
 
-//safe:imm
+//gosree:imm
 type T struct{ n int }
 
 func dangling() {
 	_ = 1
-	//safe:unsafe nothing follows // want `SAFE007: //safe:unsafe is not attached to a statement or declaration`
+	//gosree:unsafe nothing follows // want `SAFE007: //gosree:unsafe is not attached to a statement or declaration`
 }

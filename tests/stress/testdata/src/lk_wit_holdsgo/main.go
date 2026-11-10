@@ -1,7 +1,7 @@
 // WITNESS: race
 //
-// A //safe:holds helper started with a go statement runs on a goroutine that does not hold the
-// caller's lock. The call-site check of //safe:holds looks only at *ssa.Call, so the go statement
+// A //gosree:holds helper started with a go statement runs on a goroutine that does not hold the
+// caller's lock. The call-site check of //gosree:holds looks only at *ssa.Call, so the go statement
 // is accepted, and the helper body is checked as if mu were held.
 package main
 
@@ -12,13 +12,13 @@ import (
 
 // S is imm apart from its guarded field, so goroutines may share it.
 //
-//safe:imm
+//gosree:imm
 type S struct {
 	mu sync.Mutex
-	n  int //safe:guarded_by mu
+	n  int //gosree:guarded_by mu
 }
 
-//safe:holds mu
+//gosree:holds mu
 func (s *S) bumpLocked() { s.n++ }
 
 func main() {

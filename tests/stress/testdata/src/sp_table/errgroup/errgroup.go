@@ -6,7 +6,7 @@ import "sync"
 type Group struct {
 	wg  sync.WaitGroup
 	mu  sync.Mutex
-	err error //safe:guarded_by mu
+	err error //gosree:guarded_by mu
 }
 
 func (g *Group) Go(f func() error) {

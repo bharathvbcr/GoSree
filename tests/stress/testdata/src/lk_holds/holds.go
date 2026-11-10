@@ -1,4 +1,4 @@
-// Package lk_holds attacks the //safe:holds contract: a helper marked holds mu assumes mu is held
+// Package lk_holds attacks the //gosree:holds contract: a helper marked holds mu assumes mu is held
 // on entry and accesses guarded memory freely, so every way of running it without mu held is a hole.
 // The call-site check looks only at static *ssa.Call instructions.
 package lk_holds
@@ -8,13 +8,13 @@ import "sync"
 // S is imm apart from its guarded field, so goroutines may share it (as in the ownership
 // testdata, shareServer): the only thing wrong below is the lock.
 //
-//safe:imm
+//gosree:imm
 type S struct {
 	mu sync.Mutex
-	n  int //safe:guarded_by mu
+	n  int //gosree:guarded_by mu
 }
 
-//safe:holds mu
+//gosree:holds mu
 func (s *S) bumpLocked() { s.n++ }
 
 // Control: a plain call without the lock is reported.

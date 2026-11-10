@@ -1,5 +1,5 @@
 // Package dx_directive attacks the directive lexer (internal/annot/annot.go:213 parseDirective).
-// A comment that is not exactly "//gosree:" or "//safe:" (or the /*...*/ forms) is not a directive and
+// A comment that is not exactly "//gosree:" or "//gosree:" (or the /*...*/ forms) is not a directive and
 // is dropped without a word. For //gosree:unsafe that fails closed (the finding stays). For every
 // directive that asks for a check (iso, guarded_by, holds, imm, mub, rob) it fails open: the author
 // believes a guarantee is checked and none is. An unknown verb after a correct prefix is reported,
@@ -12,19 +12,19 @@ type Job struct{ ID int }
 
 type S struct {
 	mu sync.Mutex
-	n  int //safe:guarded_by mu
-	m  int // safe:guarded_by mu // HIT(SAFE007) one space after the slashes; reported as a near miss, not applied, so m stays unguarded
-	k  int //Safe:guarded_by mu // HIT(SAFE007) capitalised prefix; reported as a near miss
-	q  int /* safe:guarded_by mu */ // HIT(SAFE007) block form with a space; reported as a near miss
-	t  int //safe:guarded_by	mu // a tab separates the verb from its argument as a space does (rb_directives:78): t is guarded by mu
-	b  int //safe:guardedby mu // HIT(SAFE007)
+	n  int //gosree:guarded_by mu
+	m  int // gosree:guarded_by mu // HIT(SAFE007) one space after the slashes; reported as a near miss, not applied, so m stays unguarded
+	k  int //Gosree:guarded_by mu // HIT(SAFE007) capitalised prefix; reported as a near miss
+	q  int /* gosree:guarded_by mu */ // HIT(SAFE007) block form with a space; reported as a near miss
+	t  int //gosree:guarded_by	mu // a tab separates the verb from its argument as a space does (rb_directives:78): t is guarded by mu
+	b  int //gosree:guardedby mu // HIT(SAFE007)
 }
 
 func (s *S) unlocked() {
 	s.n++ // HIT(SAFE009)
-	s.m++ // MISS(SAFE009): m's guard was written "// safe:guarded_by mu" and never took effect
-	s.k++ // MISS(SAFE009): k's guard was written "//Safe:guarded_by mu" and never took effect
-	s.q++ // MISS(SAFE009): q's guard was written "/* safe:guarded_by mu */" and never took effect
+	s.m++ // MISS(SAFE009): m's guard was written "// gosree:guarded_by mu" and never took effect
+	s.k++ // MISS(SAFE009): k's guard was written "//Gosree:guarded_by mu" and never took effect
+	s.q++ // MISS(SAFE009): q's guard was written "/* gosree:guarded_by mu */" and never took effect
 }
 
 func (s *S) locked() {

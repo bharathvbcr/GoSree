@@ -1,6 +1,6 @@
 // Package ownership checks that memory handed to another goroutine is owned by the sender and not
 // used by it afterwards, that package variables are not mutated across goroutines, and that
-// //safe:imm types are never written after construction.
+// //gosree:imm types are never written after construction.
 //
 // Rules:
 //
@@ -8,15 +8,15 @@
 //	         variable, or memory a callee kept)
 //	SAFE003  a value is used after it was moved to another goroutine
 //	SAFE004  a moved value also escapes somewhere else (stored, returned, retained by a callee)
-//	SAFE005  a //safe:imm type is malformed or written after construction
-//	SAFE006  a package variable is written outside initialisation and not //safe:guarded_by
+//	SAFE005  a //gosree:imm type is malformed or written after construction
+//	SAFE006  a package variable is written outside initialisation and not //gosree:guarded_by
 //	SAFE008  a handler writes memory it shares with its other invocations (handlerwrite.go)
-//	SAFE009  an access to //safe:guarded_by memory without holding its mutex (lockset.go)
+//	SAFE009  an access to //gosree:guarded_by memory without holding its mutex (lockset.go)
 //	CAP003   a stack-scoped borrow (\mub or \rob) crosses a goroutine boundary
 //
 // A value crosses to another goroutine when it is an argument of a go statement, the closure a go
 // statement starts, a callback handed to a function that runs it on another goroutine (spawn.go), a
-// value sent on a channel, or an argument for a //safe:iso parameter. A closure's captured variables
+// value sent on a channel, or an argument for a //gosree:iso parameter. A closure's captured variables
 // cross only when the closure itself does.
 package ownership
 
@@ -43,7 +43,7 @@ const (
 	GlobalUse = "SAFE006"
 	// HandlerWrite is a write through memory a handler shares with its other invocations.
 	HandlerWrite = "SAFE008"
-	// GuardViolation is an access to //safe:guarded_by memory without its mutex (lockset.go).
+	// GuardViolation is an access to //gosree:guarded_by memory without its mutex (lockset.go).
 	GuardViolation = "SAFE009"
 	// BorrowEscape is a stack-scoped borrow crossing a goroutine boundary.
 	BorrowEscape = "CAP003"
@@ -61,9 +61,9 @@ const TransferRelated = "the transfer that causes this finding"
 // Analyzer is the ownership checker.
 var Analyzer = &analysis.Analyzer{
 	Name: "safeownership",
-	Doc:  "check moves of memory between goroutines, package-variable mutation, //safe:imm types, handler writes, and borrow escapes (SAFE002-SAFE006, SAFE008, SAFE009, CAP003)",
+	Doc:  "check moves of memory between goroutines, package-variable mutation, //gosree:imm types, handler writes, and borrow escapes (SAFE002-SAFE006, SAFE008, SAFE009, CAP003)",
 	Run:  run,
-	// unsafeban is required for its order only: it mutes SAFE001 findings with //safe:unsafe too, so
+	// unsafeban is required for its order only: it mutes SAFE001 findings with //gosree:unsafe too, so
 	// it must have run before this pass counts the scopes that muted nothing (Stats.UnsafeStale).
 	Requires:  []*analysis.Analyzer{annot.Analyzer, unsafeban.Analyzer, buildssa.Analyzer},
 	FactTypes: []analysis.Fact{new(FuncFact), new(ImmFact)},
@@ -81,22 +81,22 @@ type Stats struct {
 	// whose only findings were muted at their own line (a use after the move) is flagged but not
 	// suppressed: the hatch is not on the transfer.
 	FlaggedTransfers int `json:"flagged_transfers"`
-	// SuppressedTransfers counts transfers inside a //safe:unsafe scope that had a finding to mute.
+	// SuppressedTransfers counts transfers inside a //gosree:unsafe scope that had a finding to mute.
 	SuppressedTransfers int `json:"suppressed_transfers"`
-	// Suppressed counts distinct findings (position and rule) muted by //safe:unsafe, from any rule.
+	// Suppressed counts distinct findings (position and rule) muted by //gosree:unsafe, from any rule.
 	Suppressed int `json:"suppressed_findings"`
-	// UnsafeScope counts the //safe:unsafe directives in the package, and UnsafeStale those that muted
+	// UnsafeScope counts the //gosree:unsafe directives in the package, and UnsafeStale those that muted
 	// no finding of any rule. A finding is charged to the innermost scope around its own position, or,
 	// when the transfer that caused it is in a scope, to the transfer's scope.
 	UnsafeScope int `json:"unsafe_directives"`
 	UnsafeStale int `json:"unsafe_stale"`
-	// Guarded counts fields and package variables annotated //safe:guarded_by, and Holds the
-	// //safe:holds directives. Like imm and iso they are checked claims, not escape hatches: neither
+	// Guarded counts fields and package variables annotated //gosree:guarded_by, and Holds the
+	// //gosree:holds directives. Like imm and iso they are checked claims, not escape hatches: neither
 	// counts toward the hatch ratio or the override budget.
 	Guarded int `json:"guarded_directives"`
 	Holds   int `json:"holds_directives"`
-	// Imm counts the //safe:imm types of the package that satisfy the imm rules, and Iso the parameters
-	// named by //safe:iso. Both are checked claims too.
+	// Imm counts the //gosree:imm types of the package that satisfy the imm rules, and Iso the parameters
+	// named by //gosree:iso. Both are checked claims too.
 	Imm int `json:"imm_types"`
 	Iso int `json:"iso_params"`
 }
@@ -110,9 +110,9 @@ type state struct {
 	sums    map[*ssa.Function]*summary
 	stats   *Stats
 	reports map[reportKey]bool
-	// suppressed holds the findings muted by //safe:unsafe, so each counts once in Stats.
+	// suppressed holds the findings muted by //gosree:unsafe, so each counts once in Stats.
 	suppressed map[reportKey]bool
-	// muted is set while checking a transfer that lies in a //safe:unsafe scope: every finding it
+	// muted is set while checking a transfer that lies in a //gosree:unsafe scope: every finding it
 	// produces is muted, wherever it is. mutedFindings counts findings muted that way.
 	muted         bool
 	mutedFindings int

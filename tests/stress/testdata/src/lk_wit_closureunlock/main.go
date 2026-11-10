@@ -9,10 +9,10 @@ import "sync"
 
 // S is imm apart from its guarded field, so goroutines may share it.
 //
-//safe:imm
+//gosree:imm
 type S struct {
 	mu sync.Mutex
-	n  int //safe:guarded_by mu
+	n  int //gosree:guarded_by mu
 }
 
 func (s *S) bump() {

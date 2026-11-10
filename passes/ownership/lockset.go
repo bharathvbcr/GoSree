@@ -15,8 +15,8 @@ import (
 	"github.com/bharathvbcr/gosree/internal/annot"
 )
 
-// SAFE009: memory annotated //safe:guarded_by is read or written only while its mutex is held, a
-// //safe:holds helper is called only with its mutex held, and nothing non-shareable read from guarded
+// SAFE009: memory annotated //gosree:guarded_by is read or written only while its mutex is held, a
+// //gosree:holds helper is called only with its mutex held, and nothing non-shareable read from guarded
 // memory leaves the lock (returned, sent, stored elsewhere, handed to a goroutine or to a callee that
 // may keep it).
 //
@@ -27,7 +27,7 @@ import (
 // a deferred Unlock changes nothing until return. A call may release a lock: a function of this
 // package that unlocks one of its parameters' mutexes (summarised), or any function of another
 // package or dynamic call that receives the mutex or an object containing it. A closure called in
-// place starts with its caller's locks; any other function starts with none, plus its //safe:holds.
+// place starts with its caller's locks; any other function starts with none, plus its //gosree:holds.
 
 type guardPath struct {
 	root  ssa.Value
@@ -477,7 +477,7 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 		changed = false
 		for _, fn := range fns {
 			if st.holdsOf(fn) != nil {
-				continue // a //safe:holds function must not release (SAFE007 checks it)
+				continue // a //gosree:holds function must not release (SAFE007 checks it)
 			}
 			forEachInstr(fn, func(ins ssa.Instruction) {
 				c, ok := ins.(ssa.CallInstruction)
@@ -529,7 +529,7 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 	return out
 }
 
-// holdsOf returns the //safe:holds mutexes of fn, or nil.
+// holdsOf returns the //gosree:holds mutexes of fn, or nil.
 func (st *state) holdsOf(fn *ssa.Function) []*types.Var {
 	obj, ok := fn.Object().(*types.Func)
 	if !ok {
@@ -538,7 +538,7 @@ func (st *state) holdsOf(fn *ssa.Function) []*types.Var {
 	return st.ix.Holds[obj.Origin()]
 }
 
-// holdsPaths maps fn's //safe:holds mutexes to guard paths in fn (callee) or, given the call's
+// holdsPaths maps fn's //gosree:holds mutexes to guard paths in fn (callee) or, given the call's
 // arguments, in the caller.
 func (st *state) holdsPaths(fn *ssa.Function, recv ssa.Value) []guardPath {
 	var out []guardPath
@@ -571,7 +571,7 @@ func (st *state) holdsPaths(fn *ssa.Function, recv ssa.Value) []guardPath {
 	return out
 }
 
-// holdsEntry is the lockset of fn's //safe:holds mutexes.
+// holdsEntry is the lockset of fn's //gosree:holds mutexes.
 func (st *state) holdsEntry(fn *ssa.Function) lockset {
 	var recv ssa.Value
 	if len(fn.Params) > 0 {
@@ -584,7 +584,7 @@ func (st *state) holdsEntry(fn *ssa.Function) lockset {
 	return entry
 }
 
-// entryLocks is what fn may assume held on entry: its //safe:holds mutexes, and for a closure called
+// entryLocks is what fn may assume held on entry: its //gosree:holds mutexes, and for a closure called
 // in place, what its caller holds at every such call.
 func (st *state) entryLocks(gs *guardState, fn *ssa.Function) lockset {
 	entry := st.holdsEntry(fn)
@@ -1065,13 +1065,13 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 		if _, ok := before[ins]; !ok {
 			return // unreachable
 		}
-		// Releasing a //safe:holds mutex inside the helper breaks its contract.
+		// Releasing a //gosree:holds mutex inside the helper breaks its contract.
 		if ci, ok := ins.(ssa.CallInstruction); ok {
 			cc := ci.Common()
 			if k, recv := lockOp(cc); k == opUnlock {
 				if p, ok := pathOf(recv); ok && slices.Contains(holdsOwn, p) {
 					st.report(ci.Pos(), annot.CategoryMalformed, fmt.Sprintf(
-						"%s is //safe:holds %s but unlocks it here", fn.Name(), muName(st.holdsOf(fn), holdsOwn, p)))
+						"%s is //gosree:holds %s but unlocks it here", fn.Name(), muName(st.holdsOf(fn), holdsOwn, p)))
 				}
 			} else if callee, bindings := directCallee(cc.Value); callee != nil && len(holdsOwn) > 0 {
 				for _, rel := range gs.releases[callee] {
@@ -1088,7 +1088,7 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 					}
 					if ok && slices.Contains(holdsOwn, p) {
 						st.report(ci.Pos(), annot.CategoryMalformed, fmt.Sprintf(
-							"%s is //safe:holds %s but unlocks it here", fn.Name(), muName(st.holdsOf(fn), holdsOwn, p)))
+							"%s is //gosree:holds %s but unlocks it here", fn.Name(), muName(st.holdsOf(fn), holdsOwn, p)))
 						break
 					}
 				}
@@ -1105,7 +1105,7 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 				note(ins, s, false)
 			}
 		}
-		// //safe:holds helpers need their mutex held at the call.
+		// //gosree:holds helpers need their mutex held at the call.
 		if ci, ok := ins.(ssa.CallInstruction); ok && !ci.Common().IsInvoke() {
 			cc := ci.Common()
 			if callee := cc.StaticCallee(); callee != nil && st.holdsOf(callee) != nil {
@@ -1158,7 +1158,7 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 					if !isHeld {
 						mu := st.holdsOf(callee)[min(i, len(st.holdsOf(callee))-1)]
 						st.report(ci.Pos(), GuardViolation, fmt.Sprintf(
-							"%s requires %s to be held (//safe:holds %s), but it is not held here",
+							"%s requires %s to be held (//gosree:holds %s), but it is not held here",
 							callee.Name(), mu.Name(), mu.Name()))
 					}
 				}
@@ -1177,7 +1177,7 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 			where = fn.Name()
 		}
 		st.report(f.pos, GuardViolation, fmt.Sprintf(
-			"%s is guarded by %s but is %s here without holding it (lock %s, or mark %s //safe:holds %s)",
+			"%s is guarded by %s but is %s here without holding it (lock %s, or mark %s //gosree:holds %s)",
 			f.s.name(), f.s.mu.Name(), verb, f.s.mu.Name(), where, f.s.mu.Name()))
 	}
 }

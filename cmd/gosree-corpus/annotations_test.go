@@ -72,9 +72,9 @@ func TestApplyAnnotations(t *testing.T) {
 	}
 	write()
 	anns := []annotation{
-		{file: "p.go", scope: "func F(", directive: "//safe:iso fn", before: true},
-		{file: "p.go", scope: "func F(", line: "\tgo fn() // start", directive: "//safe:unsafe reason", before: true},
-		{file: "p.go", scope: "func F(", line: "\tx := 0", directive: "//safe:guarded_by mu"},
+		{file: "p.go", scope: "func F(", directive: "//gosree:iso fn", before: true},
+		{file: "p.go", scope: "func F(", line: "\tgo fn() // start", directive: "//gosree:unsafe reason", before: true},
+		{file: "p.go", scope: "func F(", line: "\tx := 0", directive: "//gosree:guarded_by mu"},
 	}
 	if err := applyAnnotations(dir, anns); err != nil {
 		t.Fatal(err)
@@ -83,13 +83,13 @@ func TestApplyAnnotations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "package p\n\n//safe:iso fn\nfunc F(fn func()) {\n\t//safe:unsafe reason\n\tgo fn() // start\n\tx := 0 //safe:guarded_by mu\n}\n"
+	want := "package p\n\n//gosree:iso fn\nfunc F(fn func()) {\n\t//gosree:unsafe reason\n\tgo fn() // start\n\tx := 0 //gosree:guarded_by mu\n}\n"
 	if string(got) != want {
 		t.Errorf("annotated:\n%s\nwant:\n%s", got, want)
 	}
 
 	write()
-	err = applyAnnotations(dir, []annotation{{file: "p.go", scope: "func F(", line: "\tgo fn() // start", directive: "//safe:unsafe reason"}})
+	err = applyAnnotations(dir, []annotation{{file: "p.go", scope: "func F(", line: "\tgo fn() // start", directive: "//gosree:unsafe reason"}})
 	if err == nil || !strings.Contains(err.Error(), "already has a comment") {
 		t.Errorf("trailing directive after a comment: got %v, want a refusal", err)
 	}

@@ -7,7 +7,7 @@ import "sync"
 
 type S struct {
 	mu   sync.Mutex
-	n    int //safe:guarded_by mu
+	n    int //gosree:guarded_by mu
 	cond *sync.Cond
 }
 
@@ -117,7 +117,7 @@ func (s *S) tryIgnored() {
 
 var (
 	gmu   sync.Mutex
-	total int //safe:guarded_by gmu
+	total int //gosree:guarded_by gmu
 )
 
 // A same-package helper that unlocks a package-level mutex.

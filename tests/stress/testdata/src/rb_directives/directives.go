@@ -1,4 +1,4 @@
-// Package rb_directives puts a //gosree: or //safe: directive on every kind of declaration and
+// Package rb_directives puts a //gosree: or //gosree: directive on every kind of declaration and
 // statement, in legal but unusual places. The parser must report or ignore each one, never panic.
 // It does not: every placement below is either applied, reported as SAFE007, or ignored.
 package rb_directives
@@ -29,11 +29,11 @@ const (
 //gosree:guarded_by // HIT(SAFE007)
 var (
 	mu sync.Mutex
-	//safe:guarded_by mu
+	//gosree:guarded_by mu
 	counter int
-	//safe:guarded_by nosuchmutex // HIT(SAFE007)
+	//gosree:guarded_by nosuchmutex // HIT(SAFE007)
 	other int
-	//safe:guarded_by counter // HIT(SAFE007)
+	//gosree:guarded_by counter // HIT(SAFE007)
 	third int
 )
 
@@ -42,7 +42,7 @@ var (
 //gosree:iso p
 //gosree:mub q
 //gosree:rob p // HIT(SAFE007)
-//safe:holds mu
+//gosree:holds mu
 func Bodyless(p, q *int) // HIT(SAFE001)
 
 //gosree:iso // HIT(SAFE007)
@@ -63,7 +63,7 @@ func unknownVerb() {}
 // An empty verb (//gosree: alone) is not a directive to gofmt, which rewrites it to this line.
 func emptyVerb() {}
 
-//safe:unsafe // HIT(SAFE007)
+//gosree:unsafe // HIT(SAFE007)
 func emptyReason() {}
 
 /*gosree:unsafe block form */
@@ -134,24 +134,24 @@ L:
 type S struct {
 	//gosree:mut // HIT(SAFE007)
 	f1 int // HIT(BORROW001)
-	//safe:guarded_by f1 // HIT(SAFE007)
+	//gosree:guarded_by f1 // HIT(SAFE007)
 	f2 int
 	mu sync.Mutex
-	//safe:guarded_by mu
-	//safe:guarded_by mu // HIT(SAFE007) a repeated guard is reported
+	//gosree:guarded_by mu
+	//gosree:guarded_by mu // HIT(SAFE007) a repeated guard is reported
 	f3 int
 }
 
 // SBlank guards a blank field: accepted silently, which is harmless.
 type SBlank struct {
 	mu sync.Mutex
-	//safe:guarded_by mu
+	//gosree:guarded_by mu
 	_ int
 }
 
 type SEmbed struct {
 	mu sync.Mutex
-	//safe:guarded_by mu // HIT(SAFE007)
+	//gosree:guarded_by mu // HIT(SAFE007)
 	sync.RWMutex
 }
 

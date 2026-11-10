@@ -74,12 +74,12 @@ func init() {
 
 // Classifier answers Shareable for one package's view of the world.
 type Classifier struct {
-	// IsImm reports whether a named type is a verified //safe:imm type.
+	// IsImm reports whether a named type is a verified //gosree:imm type.
 	IsImm func(*types.TypeName) bool
 	memo  map[types.Type]bool
 }
 
-// NewClassifier returns a Classifier that consults isImm for //safe:imm types.
+// NewClassifier returns a Classifier that consults isImm for //gosree:imm types.
 func NewClassifier(isImm func(*types.TypeName) bool) *Classifier {
 	return &Classifier{IsImm: isImm, memo: map[types.Type]bool{}}
 }

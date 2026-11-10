@@ -1,4 +1,4 @@
-// Package guarded tests SAFE009: memory annotated //safe:guarded_by is read or written only while its
+// Package guarded tests SAFE009: memory annotated //gosree:guarded_by is read or written only while its
 // mutex is held, and nothing read from it leaves the lock.
 package guarded
 
@@ -9,10 +9,10 @@ import (
 
 type Cache struct {
 	mu    sync.Mutex
-	hits  map[string]int //safe:guarded_by mu
-	n     int            //safe:guarded_by mu
+	hits  map[string]int //gosree:guarded_by mu
+	n     int            //gosree:guarded_by mu
 	rw    sync.RWMutex
-	data  []int //safe:guarded_by rw
+	data  []int //gosree:guarded_by rw
 	other sync.Mutex
 	free  int
 }
@@ -65,7 +65,7 @@ func (c *Cache) tryOrReturn() {
 
 // A helper whose callers hold the lock.
 //
-//safe:holds mu
+//gosree:holds mu
 func (c *Cache) evictLocked() { clear(c.hits) }
 
 func (c *Cache) evict() {
@@ -83,7 +83,7 @@ func (c *Cache) inPlace() {
 
 type Embedded struct {
 	sync.Mutex
-	n int //safe:guarded_by Mutex
+	n int //gosree:guarded_by Mutex
 }
 
 func (e *Embedded) inc() {
@@ -94,7 +94,7 @@ func (e *Embedded) inc() {
 
 var (
 	gmu   sync.Mutex
-	total int //safe:guarded_by gmu
+	total int //gosree:guarded_by gmu
 )
 
 // Initialisation runs before any other goroutine.
@@ -131,7 +131,7 @@ func (c *Cache) wrongMutex() {
 }
 
 func (c *Cache) evictUnlocked() {
-	c.evictLocked() // want `SAFE009: evictLocked requires mu to be held \(//safe:holds mu\), but it is not held here`
+	c.evictLocked() // want `SAFE009: evictLocked requires mu to be held \(//gosree:holds mu\), but it is not held here`
 }
 
 // A function of another package that receives c may unlock c.mu.
@@ -186,12 +186,12 @@ func addTotalUnlocked() {
 // An imm type may hold guarded fields: its other fields never change after the composite literal,
 // and SAFE009 checks the guarded ones at every access, so the whole value may be shared.
 //
-//safe:imm
+//gosree:imm
 type server struct {
 	name string
 	mu   sync.Mutex
-	hits map[string]int //safe:guarded_by mu
-	n    int            //safe:guarded_by mu
+	hits map[string]int //gosree:guarded_by mu
+	n    int            //gosree:guarded_by mu
 }
 
 func shareServer(ch chan *server) string {
@@ -219,16 +219,16 @@ func renameServer(s *server) {
 
 // A map that is not guarded still makes the type mutable.
 //
-//safe:imm
-type leaky struct { // want `SAFE005: //safe:imm type leaky is not immutable: field m has type map\[string\]int`
+//gosree:imm
+type leaky struct { // want `SAFE005: //gosree:imm type leaky is not immutable: field m has type map\[string\]int`
 	mu sync.Mutex
 	m  map[string]int
 }
 
 // --- SAFE007 ---
 
-//safe:holds mu
+//gosree:holds mu
 func (c *Cache) badLocked() {
-	c.mu.Unlock() // want `SAFE007: badLocked is //safe:holds mu but unlocks it here`
+	c.mu.Unlock() // want `SAFE007: badLocked is //gosree:holds mu but unlocks it here`
 	c.mu.Lock()
 }

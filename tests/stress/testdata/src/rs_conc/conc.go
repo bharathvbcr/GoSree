@@ -3,7 +3,7 @@
 // in safe Rust. What Rust does prevent: unlocking a mutex you do not hold (the guard is the only
 // way to unlock), a negative counter on a join handle (there is none), and mixing atomic and plain
 // access to one variable (an AtomicI64 has no plain access). gosree's SAFE009 checks access to
-// //safe:guarded_by memory; the question here is whether its lockset notices the lock misuse.
+// //gosree:guarded_by memory; the question here is whether its lockset notices the lock misuse.
 package rs_conc
 
 import (
@@ -14,7 +14,7 @@ import (
 // 1. lock-order deadlock: Transfer(a, b) and Transfer(b, a) on two goroutines.
 type Acct struct {
 	mu  sync.Mutex
-	bal int //safe:guarded_by mu
+	bal int //gosree:guarded_by mu
 }
 
 func Transfer(from, to *Acct, n int) {

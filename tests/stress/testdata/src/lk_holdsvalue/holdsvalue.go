@@ -1,4 +1,4 @@
-// Package lk_holdsvalue locks a fixed crash: a //safe:holds method called through a method value.
+// Package lk_holdsvalue locks a fixed crash: a //gosree:holds method called through a method value.
 //
 // The static callee of f() is the bound-method wrapper, whose object is the annotated method, so
 // the holds check runs; the wrapper call has no arguments, so there is no receiver to ask the type
@@ -14,10 +14,10 @@ import "sync"
 
 type S struct {
 	mu sync.Mutex
-	n  int //safe:guarded_by mu
+	n  int //gosree:guarded_by mu
 }
 
-//safe:holds mu
+//gosree:holds mu
 func (s *S) bumpLocked() { s.n++ }
 
 func (s *S) methodValue() {

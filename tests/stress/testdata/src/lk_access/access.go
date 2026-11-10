@@ -12,10 +12,10 @@ import (
 
 type S struct {
 	mu   sync.Mutex
-	n    int64          //safe:guarded_by mu
-	m    map[string]int //safe:guarded_by mu
-	data []int          //safe:guarded_by mu
-	buf  bytes.Buffer   //safe:guarded_by mu
+	n    int64          //gosree:guarded_by mu
+	m    map[string]int //gosree:guarded_by mu
+	data []int          //gosree:guarded_by mu
+	buf  bytes.Buffer   //gosree:guarded_by mu
 	free int
 }
 
@@ -126,7 +126,7 @@ func (s *S) copyGuarded() int64 {
 // Struct comparison reads every field.
 type P struct {
 	mu sync.Mutex
-	n  int //safe:guarded_by mu
+	n  int //gosree:guarded_by mu
 }
 
 func equal(a, b *P) bool {

@@ -31,7 +31,7 @@ func goroutineCaptureUse() int {
 
 // TC-T1-5.4: \iso pointer passed to owned parameter: caller binding invalidated (SAFE003)
 //
-//safe:iso p
+//gosree:iso p
 func consumePacket(ch chan *packet, p *packet) {
 	ch <- p
 }

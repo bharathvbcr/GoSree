@@ -39,18 +39,18 @@ type annotation struct {
 // code change.
 var corpusAnnotations = []annotation{
 	// Lock discipline, no race.
-	{file: "mutex_test.go", test: "TestNoRaceMutex", scope: "func TestNoRaceMutex(", line: "\tvar x int16 = 0", directive: "//safe:guarded_by mu"},
-	{file: "rwmutex_test.go", test: "TestNoRaceRWMutexMultipleReaders", scope: "func TestNoRaceRWMutexMultipleReaders(", line: "\tx := int64(0)", directive: "//safe:guarded_by mu"},
-	{file: "rwmutex_test.go", test: "TestNoRaceRWMutexTransitive", scope: "func TestNoRaceRWMutexTransitive(", line: "\tx := int64(0)", directive: "//safe:guarded_by mu"},
-	{file: "mop_test.go", test: "TestNoRaceFuncUnlock", scope: "func TestNoRaceFuncUnlock(", line: "\tx := 0", directive: "//safe:guarded_by mu"},
-	{file: "mop_test.go", test: "TestNoRaceAsFunc4", scope: "func TestNoRaceAsFunc4(", line: "\tx := 0", directive: "//safe:guarded_by mu"},
-	{file: "finalizer_test.go", test: "TestNoRaceFinGlobal", scope: "var finVar struct {", line: "\tcnt int", directive: "//safe:guarded_by Mutex"},
+	{file: "mutex_test.go", test: "TestNoRaceMutex", scope: "func TestNoRaceMutex(", line: "\tvar x int16 = 0", directive: "//gosree:guarded_by mu"},
+	{file: "rwmutex_test.go", test: "TestNoRaceRWMutexMultipleReaders", scope: "func TestNoRaceRWMutexMultipleReaders(", line: "\tx := int64(0)", directive: "//gosree:guarded_by mu"},
+	{file: "rwmutex_test.go", test: "TestNoRaceRWMutexTransitive", scope: "func TestNoRaceRWMutexTransitive(", line: "\tx := int64(0)", directive: "//gosree:guarded_by mu"},
+	{file: "mop_test.go", test: "TestNoRaceFuncUnlock", scope: "func TestNoRaceFuncUnlock(", line: "\tx := 0", directive: "//gosree:guarded_by mu"},
+	{file: "mop_test.go", test: "TestNoRaceAsFunc4", scope: "func TestNoRaceAsFunc4(", line: "\tx := 0", directive: "//gosree:guarded_by mu"},
+	{file: "finalizer_test.go", test: "TestNoRaceFinGlobal", scope: "var finVar struct {", line: "\tcnt int", directive: "//gosree:guarded_by Mutex"},
 	// The same shapes with a race.
-	{file: "mutex_test.go", test: "TestRaceMutex", scope: "func TestRaceMutex(", line: "\tvar x int16 = 0", directive: "//safe:guarded_by mu"},
-	{file: "mutex_test.go", test: "TestRaceMutex2", scope: "func TestRaceMutex2(", line: "\tvar x int8 = 0", directive: "//safe:guarded_by mu1"},
-	{file: "rwmutex_test.go", test: "TestRaceMutexRWMutex", scope: "func TestRaceMutexRWMutex(", line: "\tvar x int16 = 0", directive: "//safe:guarded_by mu1"},
-	{file: "rwmutex_test.go", test: "TestRaceRWMutexMultipleReaders", scope: "func TestRaceRWMutexMultipleReaders(", line: "\tvar x, y int64 = 0, 1", directive: "//safe:guarded_by mu"},
-	{file: "mop_test.go", test: "TestRaceAsFunc3", scope: "func TestRaceAsFunc3(", line: "\tx := 0", directive: "//safe:guarded_by mu"},
+	{file: "mutex_test.go", test: "TestRaceMutex", scope: "func TestRaceMutex(", line: "\tvar x int16 = 0", directive: "//gosree:guarded_by mu"},
+	{file: "mutex_test.go", test: "TestRaceMutex2", scope: "func TestRaceMutex2(", line: "\tvar x int8 = 0", directive: "//gosree:guarded_by mu1"},
+	{file: "rwmutex_test.go", test: "TestRaceMutexRWMutex", scope: "func TestRaceMutexRWMutex(", line: "\tvar x int16 = 0", directive: "//gosree:guarded_by mu1"},
+	{file: "rwmutex_test.go", test: "TestRaceRWMutexMultipleReaders", scope: "func TestRaceRWMutexMultipleReaders(", line: "\tvar x, y int64 = 0, 1", directive: "//gosree:guarded_by mu"},
+	{file: "mop_test.go", test: "TestRaceAsFunc3", scope: "func TestRaceAsFunc3(", line: "\tx := 0", directive: "//gosree:guarded_by mu"},
 }
 
 // annotatedTests names the corpus tests the annotations are for, in table order.

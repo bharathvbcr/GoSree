@@ -92,7 +92,7 @@ func sendParam(ch chan *Job, j *Job) {
 
 // An iso parameter is owned, so it can be moved on.
 //
-//safe:iso j
+//gosree:iso j
 func forward(ch chan *Job, j *Job) {
 	ch <- j
 }
@@ -177,7 +177,7 @@ func hatch() {
 	x := 0
 	_ = x
 	go func() { x = 1 }()
-	//safe:unsafe the test only checks suppression
+	//gosree:unsafe the test only checks suppression
 	x = 2
 }
 

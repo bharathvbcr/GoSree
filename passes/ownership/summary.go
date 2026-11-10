@@ -17,7 +17,7 @@ type FuncFact struct {
 	// Leaks[i]: the function may retain, share or move argument i, or mix it with memory the caller
 	// does not own, other than by linking it to another argument or a result (Links).
 	Leaks []bool
-	// Iso[i]: parameter i is //safe:iso, so passing an argument to it moves the argument.
+	// Iso[i]: parameter i is //gosree:iso, so passing an argument to it moves the argument.
 	Iso []bool
 	// Spawns[i]: parameter i is a function value that the callee starts on another goroutine or sends
 	// on a channel, so passing a callback to it is a goroutine boundary.
@@ -46,7 +46,7 @@ func (*FuncFact) AFact() {}
 
 func (f *FuncFact) String() string { return "ownership summary" }
 
-// ImmFact marks a named type whose //safe:imm annotation passed validation.
+// ImmFact marks a named type whose //gosree:imm annotation passed validation.
 type ImmFact struct{ Imm bool }
 
 // AFact marks ImmFact as an analysis fact.

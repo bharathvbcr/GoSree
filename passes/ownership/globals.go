@@ -10,11 +10,11 @@ import (
 )
 
 // checkGlobals reports SAFE006 at the declaration of every package variable of this package that is
-// written outside initialisation and is not //safe:guarded_by. A package variable is accessed in
+// written outside initialisation and is not //gosree:guarded_by. A package variable is accessed in
 // place by whatever goroutine touches it, so a write after initialisation is shared mutable state
 // whatever its type; sync and atomic types are written through method calls, which are not writes
 // here. The writes are attached as related positions, so a reader (or the race-corpus scorer) can
-// see which code makes the variable mutable. A //safe:unsafe on the declaration accepts it.
+// see which code makes the variable mutable. A //gosree:unsafe on the declaration accepts it.
 //
 // Initialisation is init, package variable initialisers, and init-only helpers: functions every
 // caller of which is initialisation and whose value is never taken.
@@ -96,7 +96,7 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 			related = append(related, analysis.RelatedInformation{Pos: w, Message: "written here"})
 		}
 		st.reportRelated(g.Pos(), GlobalUse, fmt.Sprintf(
-			"package variable %s is written outside init%s; guard it with //safe:guarded_by or write it only during initialisation",
+			"package variable %s is written outside init%s; guard it with //gosree:guarded_by or write it only during initialisation",
 			g.Name(), st.at(ws[0])), related)
 	}
 }

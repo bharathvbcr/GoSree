@@ -27,10 +27,10 @@ func multiRob(p, q *int) {}
 func mixedParams(p, q *int) {}
 
 // Legacy prefix parameter directives
-//safe:mub p
+//gosree:mub p
 func legacyMub(p *int) {}
 
-//safe:rob p
+//gosree:rob p
 func legacyRob(p *int) {}
 
 // Method receiver parameter directive
@@ -74,7 +74,7 @@ func localAssignments() {
 	var b7 = &x
 
 	// Legacy prefix on local assignment
-	//safe:mut
+	//gosree:mut
 	b8 := &x
 
 	// Explicit LHS name in argument

@@ -38,7 +38,7 @@ import (
 //	X       a field of a non-shareable type from outside the module (an override would vouch for it)
 //	E       an exported field on an exported type outside internal/ (another module could write it)
 //	G       a field written after construction under a lock and read only in functions that take
-//	        one: a //safe:guarded_by row would make it allowed (annotation work, not a blocker)
+//	        one: a //gosree:guarded_by row would make it allowed (annotation work, not a blocker)
 //	OK      only slots the rule allows: shareable, guarded_by, imm-candidate structs, interface and
 //	        func fields whose stored values are themselves candidates
 //
@@ -227,7 +227,7 @@ func worst(classes []string) string {
 	return "(unresolved)"
 }
 
-// readDirectives records //safe:guarded_by fields and //safe:imm types from the syntax.
+// readDirectives records //gosree:guarded_by fields and //gosree:imm types from the syntax.
 func (c *census) readDirectives() {
 	for _, p := range c.pkgs {
 		for _, f := range p.Syntax {
@@ -239,14 +239,14 @@ func (c *census) readDirectives() {
 						if !ok {
 							continue
 						}
-						if hasDirective(n.Doc, "safe:imm") || hasDirective(ts.Doc, "safe:imm") {
+						if hasDirective(n.Doc, "gosree:imm") || hasDirective(ts.Doc, "gosree:imm") {
 							if tn, ok := p.TypesInfo.Defs[ts.Name].(*types.TypeName); ok {
 								c.imm[tn] = true
 							}
 						}
 					}
 				case *ast.Field:
-					if hasDirective(n.Doc, "safe:guarded_by") || hasDirective(n.Comment, "safe:guarded_by") {
+					if hasDirective(n.Doc, "gosree:guarded_by") || hasDirective(n.Comment, "gosree:guarded_by") {
 						for _, id := range n.Names {
 							if v, ok := p.TypesInfo.Defs[id].(*types.Var); ok {
 								c.guarded[v] = true

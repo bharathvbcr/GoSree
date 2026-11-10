@@ -5,13 +5,13 @@
 // TestNoRace* functions it leaves clean. The corpus is copied into <out>/racecorpus on every run and
 // never committed: it is GOROOT content, and copying it fresh ties the numbers to the installed Go
 // release. Files that cannot build outside GOROOT (cgo, GOROOT-internal imports) are skipped and
-// counted. It then measures a second copy, <out>/racecorpus-annotated, carrying the //safe:guarded_by
+// counted. It then measures a second copy, <out>/racecorpus-annotated, carrying the //gosree:guarded_by
 // directives its lock-discipline tests would have (annotations.go), and reports both.
 //
 //	go run ./cmd/gosree-corpus -out build
 //
 // With -module it analyses the packages of any module instead and reports how often the
-// //safe:unsafe escape hatch was needed: suppressed transfers over all transfers, per package and in
+// //gosree:unsafe escape hatch was needed: suppressed transfers over all transfers, per package and in
 // total, with the findings that remain. The report goes to <out>/module-report.json.
 //
 //	go run ./cmd/gosree-corpus -module ~/src/service [-tests] [packages]

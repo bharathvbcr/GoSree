@@ -206,7 +206,7 @@ func checkApplied(rows []annotation, t PackageStats, tests bool) error {
 	var bad []string
 	for verb := range want {
 		if _, ok := got[verb]; !ok {
-			bad = append(bad, "unknown directive //safe:"+verb)
+			bad = append(bad, "unknown directive //gosree:"+verb)
 		}
 	}
 	for verb, n := range got {
@@ -283,10 +283,10 @@ func printModuleSummary(rep ModuleReport, path string) {
 		fmt.Fprintf(&b, "  (%d packages with no transfers, suppressions or findings)\n", quiet)
 	}
 	t := rep.Total
-	fmt.Fprintf(&b, "  total: %d transfers, %d needed //safe:unsafe = %.1f%% (abandon threshold 20%%)\n",
+	fmt.Fprintf(&b, "  total: %d transfers, %d needed //gosree:unsafe = %.1f%% (abandon threshold 20%%)\n",
 		t.Transfers, t.SuppressedTransfers, 100*t.HatchRatio())
 	fmt.Fprintf(&b, "         %d flagged (muted or not), %d clean\n", t.FlaggedTransfers, t.Clean)
-	fmt.Fprintf(&b, "         %d findings muted, %d //safe:unsafe directives (%d muted nothing); remaining findings: %s\n",
+	fmt.Fprintf(&b, "         %d findings muted, %d //gosree:unsafe directives (%d muted nothing); remaining findings: %s\n",
 		t.Suppressed, t.UnsafeScope, t.UnsafeStale, findings(t.Findings))
 	fmt.Fprintf(&b, "         checked claims (not counted as escape hatches): %d guarded_by, %d holds, %d imm, %d iso\n",
 		t.Guarded, t.Holds, t.Imm, t.Iso)
@@ -294,7 +294,7 @@ func printModuleSummary(rep ModuleReport, path string) {
 		fmt.Fprintf(&b, "  archived %s at %s (%s); %d annotations; gosree %s\n", rep.Subdir, rep.Rev, rep.Repo, rep.Annotations, rep.GosreeCommit)
 	}
 	b.WriteString("  transfers are go statements, callbacks run on another goroutine (time.AfterFunc, WaitGroup.Go,\n" +
-		"  errgroup, net/http handlers), channel sends and //safe:iso arguments\n")
+		"  errgroup, net/http handlers), channel sends and //gosree:iso arguments\n")
 	fmt.Fprintf(&b, "  report: %s\n", path)
 	if _, err := os.Stdout.Write(b.Bytes()); err != nil {
 		log.Fatalf("write summary: %v", err)

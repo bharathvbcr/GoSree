@@ -10,10 +10,10 @@ import (
 
 type S struct {
 	mu    sync.Mutex
-	n     int            //safe:guarded_by mu
-	m     map[string]int //safe:guarded_by mu
-	data  []int          //safe:guarded_by mu
-	ready bool           //safe:guarded_by mu
+	n     int            //gosree:guarded_by mu
+	m     map[string]int //gosree:guarded_by mu
+	data  []int          //gosree:guarded_by mu
+	ready bool           //gosree:guarded_by mu
 	cond  *sync.Cond
 }
 
@@ -90,7 +90,7 @@ func (s *S) snapshotManual() []int {
 // A sharded map: each shard is locked and used through the same index expression.
 type shard struct {
 	mu sync.Mutex
-	m  map[string]int //safe:guarded_by mu
+	m  map[string]int //gosree:guarded_by mu
 }
 
 type Sharded struct {
@@ -115,7 +115,7 @@ func (c *Sharded) putPtr(k string, v int) {
 // Control: a generic box.
 type Box[T any] struct {
 	mu sync.Mutex
-	v  T //safe:guarded_by mu
+	v  T //gosree:guarded_by mu
 }
 
 func (b *Box[T]) Set(v T) {

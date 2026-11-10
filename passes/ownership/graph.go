@@ -528,7 +528,7 @@ func (g *graph) closureUsedOnlyAtCallSites(mc *ssa.MakeClosure, v ssa.Value, dep
 	return true
 }
 
-// isIsoArg reports whether v is passed to a //safe:iso parameter of the static callee, which owns it.
+// isIsoArg reports whether v is passed to a //gosree:iso parameter of the static callee, which owns it.
 func (g *graph) isIsoArg(cc *ssa.CallCommon, v ssa.Value) bool {
 	fn := cc.StaticCallee()
 	if fn == nil {

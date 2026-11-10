@@ -20,5 +20,5 @@ func asmAdd(a, b int) int // want `SAFE001: function asmAdd has no Go body`
 
 // The escape hatch covers a bodiless declaration as well.
 //
-//safe:unsafe the assembly is reviewed separately
+//gosree:unsafe the assembly is reviewed separately
 func asmSub(a, b int) int

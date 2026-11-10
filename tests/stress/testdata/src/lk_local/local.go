@@ -13,7 +13,7 @@ func set(p *int) { *p = 1 }
 // Control: the goroutine writes x directly without the lock.
 func direct() {
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -30,7 +30,7 @@ func direct() {
 // p's cell, which is not x's cell.
 func throughPointer() {
 	var mu sync.Mutex
-	x := 0  //safe:guarded_by mu
+	x := 0  //gosree:guarded_by mu
 	p := &x // HIT(SAFE009)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -47,7 +47,7 @@ func throughPointer() {
 // The goroutine hands x's address to a helper: no access at the call, a write in set.
 func throughHelper() {
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -63,7 +63,7 @@ func throughHelper() {
 // Control: the declaring function after the goroutine starts needs the lock.
 func declaringAfterShare() {
 	var mu sync.Mutex
-	x := 0 //safe:guarded_by mu
+	x := 0 //gosree:guarded_by mu
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -79,7 +79,7 @@ func declaringAfterShare() {
 // A guarded int64 incremented atomically in one goroutine and under the lock in another.
 func atomicMix() {
 	var mu sync.Mutex
-	var x int64 //safe:guarded_by mu
+	var x int64 //gosree:guarded_by mu
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {

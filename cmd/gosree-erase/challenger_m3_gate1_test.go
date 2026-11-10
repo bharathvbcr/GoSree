@@ -89,7 +89,7 @@ import "github.com/bharathvbcr/gosree/cap"
 //gosree:imm
 type GlobalConfig struct {
 	// TimeoutSec is duration.
-	//safe:imm
+	//gosree:imm
 	TimeoutSec int
 }
 
@@ -106,7 +106,7 @@ const MaxRetries = 5
 
 // DoWork executes the main task.
 //gosree:iso x
-//safe:iso y
+//gosree:iso y
 //gosree:mut z
 // More documentation after directives.
 func DoWork(x cap.Iso[int], y *int, z cap.Mut[int]) {
@@ -114,7 +114,7 @@ func DoWork(x cap.Iso[int], y *int, z cap.Mut[int]) {
 
 // Compute is an isolated helper.
 	//gosree:iso a
-	//safe:imm
+	//gosree:imm
 func Compute(a *int) {}
 `
 	res, err := Erase([]byte(src))
@@ -123,7 +123,7 @@ func Compute(a *int) {}
 	}
 
 	out := string(res)
-	if strings.Contains(out, "//gosree:") || strings.Contains(out, "//safe:") {
+	if strings.Contains(out, "//gosree:") || strings.Contains(out, "//gosree:") {
 		t.Fatalf("output still contains directives:\n%s", out)
 	}
 
@@ -251,7 +251,7 @@ func Calc() int {
 	}
 
 	out := string(res)
-	if strings.Contains(out, "/*gosree:") || strings.Contains(out, "/*safe:") {
+	if strings.Contains(out, "/*gosree:") || strings.Contains(out, "/*gosree:") {
 		t.Fatalf("inline comments were not stripped:\n%s", out)
 	}
 

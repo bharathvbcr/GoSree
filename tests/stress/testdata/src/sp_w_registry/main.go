@@ -11,7 +11,7 @@ type Job struct{ ID int }
 
 var regMu sync.Mutex
 
-var registry = map[string]*Job{} //safe:guarded_by regMu
+var registry = map[string]*Job{} //gosree:guarded_by regMu
 
 func bump(done chan struct{}) {
 	regMu.Lock()

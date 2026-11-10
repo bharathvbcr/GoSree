@@ -26,7 +26,7 @@ func Foo(p *int, q *int) int {
 }
 
 // Config stores port.
-//safe:imm
+//gosree:imm
 type Config struct {
 	Port int
 }
@@ -37,7 +37,7 @@ type Config struct {
 	}
 
 	out := string(res)
-	if strings.Contains(out, "//gosree:") || strings.Contains(out, "//safe:") {
+	if strings.Contains(out, "//gosree:") || strings.Contains(out, "//gosree:") {
 		t.Fatalf("output still contains directive comments:\n%s", out)
 	}
 
@@ -67,7 +67,7 @@ func TestInlineCommentErasure(t *testing.T) {
 func Bar() {
 	x := 10
 	b1 := &x /*gosree:mut*/
-	b2 := &x /*safe:rob*/
+	b2 := &x /*gosree:rob*/
 	_ = b1
 	_ = b2
 }
@@ -77,7 +77,7 @@ func Bar() {
 		t.Fatalf("Erase returned error: %v", err)
 	}
 	out := string(res)
-	if strings.Contains(out, "/*gosree:") || strings.Contains(out, "/*safe:") {
+	if strings.Contains(out, "/*gosree:") || strings.Contains(out, "/*gosree:") {
 		t.Fatalf("output still contains inline block comments:\n%s", out)
 	}
 }
@@ -353,7 +353,7 @@ import (
 )
 
 // Item holds data.
-//safe:imm
+//gosree:imm
 type Item struct {
 	Count int
 }
@@ -400,7 +400,7 @@ import "github.com/bharathvbcr/gosree/cap"
 //gosree:imm
 type Config struct{ Port int }
 
-//sree:iso item
+//gosree:iso item
 func Process(item cap.Iso[Config], count cap.Mut[int]) *Config {
 	//gosree:unsafe intentional
 	b := cap.BorrowMut(count)
@@ -413,7 +413,7 @@ func Process(item cap.Iso[Config], count cap.Mut[int]) *Config {
 		t.Fatalf("Erase returned error: %v", err)
 	}
 	out := string(res)
-	for _, forbidden := range []string{"//gosree:", "//sree:", "github.com/bharathvbcr/gosree/cap", "cap.Iso", "cap.Mut", "cap.BorrowMut", "cap.Move"} {
+	for _, forbidden := range []string{"//gosree:", "/*gosree:", "github.com/bharathvbcr/gosree/cap", "cap.Iso", "cap.Mut", "cap.BorrowMut", "cap.Move"} {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("erased output still contains %q:\n%s", forbidden, out)
 		}

@@ -888,13 +888,13 @@ func F(p cap.Mut[C.int]) C.int { return C.twice(*cap.Move(p)) }
 	})
 
 	t.Run("safe_prefix_comment_is_a_directive", func(t *testing.T) {
-		// README.md:7 defines //safe: as a directive prefix, so a comment that
-		// starts with it is removed by design; "// safe:" (with a space) is prose
+		// README.md:7 defines //gosree: as a directive prefix, so a comment that
+		// starts with it is removed by design; "// gosree:" (with a space) is prose
 		// and must survive.
-		src := "package p\n\n//safe: callers may share this value.\n// safe: this prose stays.\nfunc F() {}\n"
+		src := "package p\n\n//gosree: callers may share this value.\n// gosree: this prose stays.\nfunc F() {}\n"
 		out := mustErase(t, src)
-		if strings.Contains(out, "callers may share") || !strings.Contains(out, "// safe: this prose stays.\nfunc F() {}") {
-			t.Errorf("//safe: handling changed:\n%s", out)
+		if strings.Contains(out, "callers may share") || !strings.Contains(out, "// gosree: this prose stays.\nfunc F() {}") {
+			t.Errorf("//gosree: handling changed:\n%s", out)
 		}
 		lockPassed(t)
 	})

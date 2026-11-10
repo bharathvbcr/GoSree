@@ -9,7 +9,7 @@ import "sync"
 
 var (
 	gmu   sync.Mutex
-	total int //safe:guarded_by gmu
+	total int //gosree:guarded_by gmu
 )
 
 func release() { gmu.Unlock() }

@@ -274,7 +274,7 @@ func scaleShapes() []scaleShape {
 			var b strings.Builder
 			b.WriteString("import \"sync\"\n\ntype G struct {\n\tmu sync.Mutex\n")
 			for i := range n {
-				fmt.Fprintf(&b, "\t//safe:guarded_by mu\n\tf%d int\n", i)
+				fmt.Fprintf(&b, "\t//gosree:guarded_by mu\n\tf%d int\n", i)
 			}
 			b.WriteString("}\n\nfunc (g *G) F() {\n")
 			for i := range n {

@@ -19,7 +19,7 @@ import (
 func (st *state) checkTransfers(g *graph) {
 	for _, t := range g.transfers {
 		st.stats.Transfers++
-		// A //safe:unsafe on the transfer covers everything the transfer causes, including uses
+		// A //gosree:unsafe on the transfer covers everything the transfer causes, including uses
 		// after it that lie outside the scope.
 		muted := st.ix.Suppressed(t.pos)
 		before, raised := st.mutedFindings, st.findings
@@ -82,7 +82,7 @@ func (st *state) checkTransfer(g *graph, t transfer) {
 		e := earliest(foreign)
 		why := "it may alias " + e.desc + st.at(e.pos)
 		if e.desc == what {
-			why = "the caller still holds it (mark the parameter //safe:iso to take ownership)"
+			why = "the caller still holds it (mark the parameter //gosree:iso to take ownership)"
 		}
 		st.report(t.pos, NotOwned, fmt.Sprintf("%s is %s but is not owned here: %s", what, t.what, why))
 	}
