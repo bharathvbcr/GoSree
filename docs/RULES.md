@@ -621,6 +621,7 @@ Treats Go `(T, error)` multi-returns as a coupled sum type `Result<T, E>` rather
 - Blanking the error while using the companion value (`n, _ := strconv.Atoi(s); use(n)`) is rejected, reported at the call as `ERR002: companion value from strconv.Atoi() is used after discarding its error with '_'`. A fully blanked or companion-blank assignment with no bound companion is not flagged.
 - Reading, dereferencing, ranging over (covered by `tests/stress/testdata/src/er_unwrap`), sending, using as a `make` length, or returning `T` alongside a `nil` error on any CFG path where `err == nil` has not been established (e.g., logging `if err != nil { log.Println(err) }` without returning or assigning a fallback value to `T`) is rejected.
 - Idiomatic `io.Reader.Read` partial reads (`if n > 0 { ... }` and `if err != nil && err != io.EOF { return err }`) refine the companion byte count cleanly.
+- Assigning the pair on mutually exclusive branches and checking once after the join (`if c { v, err = f() } else { v, err = g() }; if err != nil { return err }; use(v)`) is accepted: tuples with the same flags whose error slots meet in one phi, bound in blocks that cannot reach one another, share one identity in the solver. Binds inside a loop (they reach each other through the back edge) and classes of more than 64 tuples (`MAX_CANON_CLASS`) are not merged and can still be reported; see [ERROR_DISCIPLINE.md](ERROR_DISCIPLINE.md), section on the abstract state.
 
 ### Failing Example
 ```go
