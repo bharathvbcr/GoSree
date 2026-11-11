@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 
+	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/analysis/checker"
 	"golang.org/x/tools/go/packages"
 
 	"github.com/bharathvbcr/gosree/internal/annot"
@@ -127,11 +129,32 @@ func runModule(o moduleOpts) {
 	if len(pkgs) == 0 {
 		log.Fatalf("no packages matched %q in %s", patterns, abs)
 	}
-	byID := map[string]*PackageStats{}
 	acts := analyze(pkgs)
 	if o.census {
 		runCensus(pkgs, acts, o.table.rows, abs, out)
 	}
+	rep.Dir, rep.Patterns = abs, patterns
+	rep.Packages, rep.Total = moduleStats(acts)
+	if o.table != nil {
+		if err := checkApplied(o.table.rows, rep.Total, tests); err != nil {
+			for _, f := range malformedFindings(acts, abs) {
+				log.Printf("%s: %s", f.Pos, f.Message)
+			}
+			log.Fatalf("-annotate: %v", err)
+		}
+	}
+	path := writeJSON(out, "module-report.json", rep)
+	if o.list {
+		writeJSON(out, "module-findings.json", listFindings(acts, abs))
+	}
+	printModuleSummary(rep, path)
+}
+
+// moduleStats totals what the analyzers found, per package and overall. The stale analyzer's SAFE007
+// reports are counted as UnsafeStale, not as findings; findingDiagnostics is the one place that
+// says so, for the report and for -list alike.
+func moduleStats(acts []*checker.Action) ([]PackageStats, PackageStats) {
+	byID := map[string]*PackageStats{}
 	for _, act := range acts {
 		ps := byID[act.Package.ID]
 		if ps == nil {
@@ -144,9 +167,8 @@ func runModule(o moduleOpts) {
 				log.Fatalf("%s returned no hatches for %s", act.Analyzer.Name, act.Package.ID)
 			}
 			ps.UnsafeStale = len(hatches)
-			continue // its SAFE007 reports are counted here, not as findings
 		}
-		for _, d := range act.Diagnostics {
+		for _, d := range findingDiagnostics(act) {
 			ps.Findings[d.Category]++
 		}
 		if act.Analyzer == ownership.Analyzer {
@@ -157,37 +179,42 @@ func runModule(o moduleOpts) {
 			ps.Stats = *s
 		}
 	}
-
-	rep.Dir, rep.Patterns = abs, patterns
-	rep.Total = PackageStats{Package: "total", Findings: map[string]int{}}
+	var pkgs []PackageStats
+	total := PackageStats{Package: "total", Findings: map[string]int{}}
 	for _, ps := range byID {
 		ps.Hatch = ps.HatchRatio()
 		ps.Clean = ps.Transfers - ps.FlaggedTransfers
-		rep.Packages = append(rep.Packages, *ps)
-		rep.Total.add(ps.Stats)
-		rep.Total.UnsafeStale += ps.UnsafeStale
+		pkgs = append(pkgs, *ps)
+		total.add(ps.Stats)
+		total.UnsafeStale += ps.UnsafeStale
 		for c, n := range ps.Findings {
-			rep.Total.Findings[c] += n
+			total.Findings[c] += n
 		}
 	}
-	rep.Total.Hatch = rep.Total.HatchRatio()
-	rep.Total.Clean = rep.Total.Transfers - rep.Total.FlaggedTransfers
-	sort.Slice(rep.Packages, func(i, j int) bool { return rep.Packages[i].Package < rep.Packages[j].Package })
-	if o.table != nil {
-		if err := checkApplied(o.table.rows, rep.Total, tests); err != nil {
-			for _, f := range listFindings(acts, abs) {
-				if f.Category == annot.CategoryMalformed {
-					log.Printf("%s: %s", f.Pos, f.Message)
-				}
-			}
-			log.Fatalf("-annotate: %v", err)
+	total.Hatch = total.HatchRatio()
+	total.Clean = total.Transfers - total.FlaggedTransfers
+	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].Package < pkgs[j].Package })
+	return pkgs, total
+}
+
+// findingDiagnostics returns the diagnostics of act that count as findings.
+func findingDiagnostics(act *checker.Action) []analysis.Diagnostic {
+	if act.Analyzer == stale.Analyzer {
+		return nil
+	}
+	return act.Diagnostics
+}
+
+// malformedFindings lists the directives gosree could not apply (SAFE007 from the parser or a pass),
+// positioned relative to dir: what a table that did not apply has to be fixed against.
+func malformedFindings(acts []*checker.Action, dir string) []Finding {
+	var out []Finding
+	for _, f := range listFindings(acts, dir) {
+		if f.Category == annot.CategoryMalformed {
+			out = append(out, f)
 		}
 	}
-	path := writeJSON(out, "module-report.json", rep)
-	if o.list {
-		writeJSON(out, "module-findings.json", listFindings(acts, abs))
-	}
-	printModuleSummary(rep, path)
+	return out
 }
 
 // add sums s into the total. It names every Stats field, so a field added to Stats without a line

@@ -668,24 +668,82 @@ func (c *census) interfaceClasses(t types.Type) []string {
 	return out
 }
 
-// classesOf returns the classes over n and every module struct it reaches.
+// classesOf returns the classes over n and every module struct it reaches. Types that reference
+// each other (Server{cfg *Config}, Config{srv *Server}) share one class, the join over the whole
+// strongly connected component, so the answer does not depend on which member is asked first.
 func (c *census) classesOf(n *types.Named) []string {
 	if cl, ok := c.closure[n]; ok {
 		return cl
 	}
-	c.closure[n] = nil // cycle guard: a type reached again adds nothing new
-	ct := c.own(n)
-	cl := append([]string(nil), ct.Own...)
-	for _, child := range ct.childTypes {
-		cl = union(cl, c.classesOf(child))
+	s := &sccWalk{c: c, index: map[*types.Named]int{}, low: map[*types.Named]int{}, onStack: map[*types.Named]bool{}, owns: map[*types.Named]ownResult{}}
+	s.visit(n)
+	return c.closure[n]
+}
+
+// sccWalk is Tarjan's algorithm over the struct-reference graph that own reports. A component is
+// closed only once every type it reaches outside itself has a final closure, so nothing computed
+// inside an open cycle is ever cached.
+type sccWalk struct {
+	c       *census
+	next    int
+	index   map[*types.Named]int
+	low     map[*types.Named]int
+	onStack map[*types.Named]bool
+	stack   []*types.Named
+	owns    map[*types.Named]ownResult
+}
+
+func (s *sccWalk) visit(v *types.Named) {
+	s.index[v], s.low[v] = s.next, s.next
+	s.next++
+	s.stack = append(s.stack, v)
+	s.onStack[v] = true
+	own := s.c.own(v)
+	s.owns[v] = own
+	for _, ch := range own.childTypes {
+		if _, done := s.c.closure[ch]; done {
+			continue
+		}
+		if _, seen := s.index[ch]; !seen {
+			s.visit(ch)
+			s.low[v] = min(s.low[v], s.low[ch])
+		} else if s.onStack[ch] {
+			s.low[v] = min(s.low[v], s.index[ch])
+		}
+	}
+	if s.low[v] != s.index[v] {
+		return
+	}
+	var members []*types.Named
+	in := map[*types.Named]bool{}
+	for {
+		m := s.stack[len(s.stack)-1]
+		s.stack = s.stack[:len(s.stack)-1]
+		s.onStack[m] = false
+		members = append(members, m)
+		in[m] = true
+		if m == v {
+			break
+		}
+	}
+	var cl []string
+	for _, m := range members {
+		o := s.owns[m]
+		cl = union(cl, o.Own)
+		for _, ch := range o.childTypes {
+			if !in[ch] {
+				cl = union(cl, s.c.closure[ch])
+			}
+		}
 	}
 	if len(cl) == 0 {
 		cl = []string{classOK}
 	}
 	slices.Sort(cl)
-	c.closure[n] = cl
-	ct.Closure = cl
-	return cl
+	for _, m := range members {
+		s.c.closure[m] = cl
+		s.owns[m].Closure = cl
+	}
 }
 
 type ownResult struct {
