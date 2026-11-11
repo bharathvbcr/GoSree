@@ -593,16 +593,18 @@ func probeGoLanguage(ctx context.Context) (string, error) {
 	return goLanguageVersion(strings.TrimSpace(string(out)))
 }
 
-var goVersionPattern = regexp.MustCompile(`^go(\d+\.\d+)(?:$|[.a-z])`)
+var goVersionPattern = regexp.MustCompile(`^(?:devel )?go(\d+\.\d+)((?:rc|beta)\d+)?`)
 
-// goLanguageVersion turns a toolchain version ("go1.27.3", "go1.27rc1", "go1.27") into the language
-// version a go.mod line names ("1.27").
+// goLanguageVersion turns a toolchain version into the language version a go.mod line names:
+// "go1.27.3" and "go1.27" give "1.27"; a release candidate keeps its suffix ("go1.27rc1" gives
+// "1.27rc1"), because "go 1.27" is newer than go1.27rc1 and would make the go command look for
+// another toolchain; a development build ("devel go1.28-abc ...") gives its base release "1.28".
 func goLanguageVersion(v string) (string, error) {
 	m := goVersionPattern.FindStringSubmatch(v)
 	if m == nil {
 		return "", fmt.Errorf("cannot derive a language version from the go command's version %q", v)
 	}
-	return m[1], nil
+	return m[1] + m[2], nil
 }
 
 func canonicalPackageDir(dir string) (string, error) {
@@ -628,14 +630,17 @@ func canonicalPackageDir(dir string) (string, error) {
 // no compiled text to compare. It is still erased, and the erased text must
 // parse, so a file `-w` would rewrite is never skipped unexamined; its name is
 // returned in unverified ("dir/name") because it was not compiled.
-func VerifyDirectoriesEquivalence(byDir map[string]map[string][]byte, eraseFn func([]byte) ([]byte, error)) (unverified []string, err error) {
-	return verifyDirectories(byDir, eraseFn, defaultEquivVerifyTimeout, verifyDirectoryWithSharedOverlay)
+//
+// ctx cancels the run: a cancelled ctx stops the directory in progress (its
+// subprocesses are killed) and no later directory is started.
+func VerifyDirectoriesEquivalence(ctx context.Context, byDir map[string]map[string][]byte, eraseFn func([]byte) ([]byte, error)) (unverified []string, err error) {
+	return verifyDirectories(ctx, byDir, eraseFn, defaultEquivVerifyTimeout, verifyDirectoryWithSharedOverlay)
 }
 
 // dirVerifier verifies the active files of one directory; tests substitute their own.
 type dirVerifier func(ctx context.Context, dir string, files map[string][]byte, eraseFn func([]byte) ([]byte, error), sharedOverlay map[string][]byte) (*EquivReport, error)
 
-func verifyDirectories(byDir map[string]map[string][]byte, eraseFn func([]byte) ([]byte, error), perDir time.Duration, verifyOne dirVerifier) ([]string, error) {
+func verifyDirectories(parent context.Context, byDir map[string]map[string][]byte, eraseFn func([]byte) ([]byte, error), perDir time.Duration, verifyOne dirVerifier) ([]string, error) {
 	dirs := make([]string, 0, len(byDir))
 	for dir := range byDir {
 		dirs = append(dirs, dir)
@@ -684,8 +689,11 @@ func verifyDirectories(byDir map[string]map[string][]byte, eraseFn func([]byte) 
 		if len(active) == 0 {
 			continue
 		}
+		if err := parent.Err(); err != nil {
+			return unverified, fmt.Errorf("verification cancelled before %s: %w", dir, err)
+		}
 		err := func() error {
-			ctx, cancel := context.WithTimeout(context.Background(), perDir)
+			ctx, cancel := context.WithTimeout(parent, perDir)
 			defer cancel()
 			_, err := verifyOne(ctx, canonByDir[dir], active, eraseFn, sharedOverlay)
 			return err

@@ -13,7 +13,7 @@ import (
 )
 
 func TestGoLanguageVersion(t *testing.T) {
-	for in, want := range map[string]string{"go1.27.3": "1.27", "go1.27": "1.27", "go1.28rc1": "1.28", "go1.24.0": "1.24"} {
+	for in, want := range map[string]string{"go1.27.3": "1.27", "go1.27": "1.27", "go1.28rc1": "1.28rc1", "go1.24.0": "1.24"} {
 		got, err := goLanguageVersion(in)
 		if err != nil || got != want {
 			t.Errorf("goLanguageVersion(%q) = %q, %v; want %q", in, got, err, want)
@@ -78,7 +78,7 @@ func TestVerifyDirectoriesDeadlinePerDirectory(t *testing.T) {
 			return nil, ctx.Err()
 		}
 	}
-	if _, err := verifyDirectories(byDir, identity, 100*time.Millisecond, one); err != nil {
+	if _, err := verifyDirectories(context.Background(), byDir, identity, 100*time.Millisecond, one); err != nil {
 		t.Fatalf("5 directories at 40 ms each under a 100 ms per-directory deadline: %v", err)
 	}
 	if calls != 5 {
@@ -90,7 +90,7 @@ func TestVerifyDirectoriesDeadlinePerDirectory(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	_, err := verifyDirectories(byDir, identity, 20*time.Millisecond, slow)
+	_, err := verifyDirectories(context.Background(), byDir, identity, 20*time.Millisecond, slow)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("a directory over its deadline: got %v, want a deadline error", err)
 	}
@@ -123,7 +123,7 @@ func TestVerifyDirectoriesCoversExcludedFiles(t *testing.T) {
 		verified++
 		return &EquivReport{}, nil
 	}
-	unverified, err := verifyDirectories(byDir, erase, time.Second, one)
+	unverified, err := verifyDirectories(context.Background(), byDir, erase, time.Second, one)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,11 +145,11 @@ func TestVerifyDirectoriesCoversExcludedFiles(t *testing.T) {
 		}
 		return src, nil
 	}
-	if _, err := verifyDirectories(byDir, failing, time.Second, one); err == nil || !strings.Contains(err.Error(), "x.go") {
+	if _, err := verifyDirectories(context.Background(), byDir, failing, time.Second, one); err == nil || !strings.Contains(err.Error(), "x.go") {
 		t.Errorf("erase failure on an excluded file: got %v", err)
 	}
 	broken := func(src []byte) ([]byte, error) { return []byte("package"), nil }
-	if _, err := verifyDirectories(byDir, broken, time.Second, one); err == nil || !strings.Contains(err.Error(), "does not parse") {
+	if _, err := verifyDirectories(context.Background(), byDir, broken, time.Second, one); err == nil || !strings.Contains(err.Error(), "does not parse") {
 		t.Errorf("unparsable erased text: got %v", err)
 	}
 }
@@ -198,5 +198,35 @@ func TestVerifyTargetsNamesUncompiledFiles(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not compile-verified") || !strings.Contains(stderr.String(), "a_test.go") {
 		t.Errorf("stderr does not name the uncompiled file: %q", stderr.String())
+	}
+}
+
+// TestVerifyDirectoriesCancelled: cancelling the parent context mid-run stops the directory in
+// progress and starts no later one, and the run fails.
+func TestVerifyDirectoriesCancelled(t *testing.T) {
+	byDir := fakeDirs(t, 5)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	one := func(ctx context.Context, dir string, _ map[string][]byte, _ func([]byte) ([]byte, error), _ map[string][]byte) (*EquivReport, error) {
+		calls++
+		if calls == 2 {
+			cancel() // Ctrl-C arrives while the second directory is being verified
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return &EquivReport{}, nil
+	}
+	_, err := verifyDirectories(ctx, byDir, identity, time.Minute, one)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("got %v, want a cancellation error", err)
+	}
+	if calls != 2 {
+		t.Errorf("%d directories were started, want 2: none after the cancel", calls)
+	}
+	// Already cancelled before the first directory: nothing runs.
+	calls = 0
+	if _, err := verifyDirectories(ctx, byDir, identity, time.Minute, one); !errors.Is(err, context.Canceled) || calls != 0 {
+		t.Errorf("pre-cancelled: err %v, %d calls", err, calls)
 	}
 }

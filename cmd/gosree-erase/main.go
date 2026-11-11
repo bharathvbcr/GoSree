@@ -26,6 +26,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,9 +35,11 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // eraseFunc is the signature of Erase; tests substitute their own.
@@ -52,10 +55,15 @@ type options struct {
 	stdout  io.Writer
 	stderr  io.Writer
 	erase   eraseFunc
+	// ctx cancels a -verify run (Ctrl-C, SIGTERM); nil means never.
+	ctx context.Context
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := runContext(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, Erase)
+	stop()
+	os.Exit(code)
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -63,7 +71,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func runWith(args []string, stdin io.Reader, stdout, stderr io.Writer, erase eraseFunc) int {
-	o := &options{stdin: stdin, stdout: stdout, stderr: stderr, erase: erase}
+	return runContext(context.Background(), args, stdin, stdout, stderr, erase)
+}
+
+func runContext(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, erase eraseFunc) int {
+	o := &options{stdin: stdin, stdout: stdout, stderr: stderr, erase: erase, ctx: ctx}
 	flags := flag.NewFlagSet("gosree-erase", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.BoolVar(&o.write, "w", false, "write result to (source) file instead of stdout")
@@ -161,6 +173,14 @@ was written); 2 invalid flags, including -w or -o together with -l or -d.
 		return 1
 	}
 	return 0
+}
+
+// context returns the run's cancellation context.
+func (o *options) context() context.Context {
+	if o.ctx == nil {
+		return context.Background()
+	}
+	return o.ctx
 }
 
 func (o *options) errorf(format string, args ...any) {
@@ -379,9 +399,11 @@ func (o *options) processStream() (err error) {
 		return err
 	}
 	if o.verify {
-		if _, verr := VerifyCompiledTextEquivalence(map[string][]byte{"stdin.go": src}, o.erase); verr != nil {
+		if _, verr := VerifyCompiledTextEquivalenceContext(o.context(), map[string][]byte{"stdin.go": src}, o.erase); verr != nil {
 			return fmt.Errorf("equivalence verification failed: %w", verr)
 		}
+		// Say so: a verification that ran and passed must not look like one that never ran.
+		o.errorf("gosree-erase: <stdin>: equivalence verified")
 	}
 	return o.emit("<stdin>", src, out)
 }
@@ -440,7 +462,7 @@ func (o *options) verifyTargets(targets []target) error {
 			files[name] = sibSrc
 		}
 	}
-	unverified, err := VerifyDirectoriesEquivalence(byDir, o.erase)
+	unverified, err := VerifyDirectoriesEquivalence(o.context(), byDir, o.erase)
 	var notCompiled []string
 	for _, name := range unverified {
 		if selected[name] {
@@ -640,6 +662,13 @@ func stripDirectives(src []byte) []byte {
 			if isDirective(c.Text) {
 				start := fset.Position(c.Pos()).Offset
 				end := fset.Position(c.End()).Offset
+				if strings.HasPrefix(c.Text, "/*") {
+					// c.Text has its carriage returns stripped, so Slash+len(Text) falls short of a
+					// CRLF comment's real end; the closing */ is in the source.
+					if k := bytes.Index(src[start+2:], []byte("*/")); k >= 0 {
+						end = start + 2 + k + 2
+					}
+				}
 
 				isBlock := strings.HasPrefix(strings.TrimSpace(c.Text), "/*")
 				lineStart := start

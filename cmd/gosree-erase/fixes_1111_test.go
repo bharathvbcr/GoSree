@@ -188,6 +188,9 @@ func genSource(rng *rand.Rand) string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\treturn x\n}\n")
+	if rng.IntN(3) == 0 { // CRLF sources: the scanner strips \r from comment text
+		return strings.ReplaceAll(b.String(), "\n", "\r\n")
+	}
 	return b.String()
 }
 
@@ -213,6 +216,7 @@ func FuzzStripDirectives(f *testing.F) {
 	for range 40 {
 		f.Add(genSource(rng))
 	}
+	f.Add("package p\r\n\r\nfunc f(a, b int) int {\r\n\treturn a /*gosree:x\r\n\r\n*/ + b\r\n}\r\n")
 	f.Add("package p\n\nfunc f(x int) int {\n\treturn /*gosree:mut*/x\n}\n")
 	f.Fuzz(func(t *testing.T, src string) {
 		checkStrip(t, src)
