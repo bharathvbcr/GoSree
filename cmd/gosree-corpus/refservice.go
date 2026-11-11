@@ -265,7 +265,8 @@ type Finding struct {
 	Related []string `json:"related,omitempty"`
 }
 
-// listFindings returns every diagnostic of the root actions, positioned relative to dir.
+// listFindings returns every finding of the root actions (findingDiagnostics, the same set the report
+// counts), positioned relative to dir.
 func listFindings(acts []*checker.Action, dir string) []Finding {
 	var out []Finding
 	for _, act := range acts {
@@ -277,7 +278,7 @@ func listFindings(acts []*checker.Action, dir string) []Finding {
 			}
 			return fmt.Sprintf("%s:%d:%d", file, p.Line, p.Column)
 		}
-		for _, d := range act.Diagnostics {
+		for _, d := range findingDiagnostics(act) {
 			f := Finding{
 				Package:  act.Package.ID,
 				Pos:      where(d.Pos),
