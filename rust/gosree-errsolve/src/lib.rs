@@ -30,15 +30,14 @@ pub const MAX_PHI_ARITY: usize = 4_096;
 pub const MAX_OPS_PER_BLOCK: usize = 262_144;
 pub const MAX_COMPANIONS: usize = 256;
 pub const MAX_ITERATIONS_PER_FUNC: usize = 250_000;
-pub const MAX_CALLGRAPH_ITERS: usize = 4_096;
 
 /// Per-function solver-state budget: `num_blocks * num_slots` may not exceed this.
 ///
 /// The solver keeps four full abstract states per block (entry, exit and up to two outgoing
 /// edges), each `num_slots` cells of `size_of::<SlotCell>()` = 28 bytes, so a function costs at
 /// most `4 * 28 = 112` bytes per (block, slot) cell. `2^23 = 8,388,608` cells is therefore at
-/// most 896 MiB of Rust solver state for one function (0.875 GiB); the Go oracle measures about
-/// 150 bytes per cell (about 1.2 GiB at the budget). States are allocated per function and
+/// most 896 MiB of Rust solver state for one function (0.875 GiB); the Go oracle measured
+/// 1.3 to 1.6 GiB at the budget, so the 1 GiB target holds for this engine only. States are allocated per function and
 /// dropped before the next function is solved, so the peak is the largest function, not the
 /// sum over functions. `MaxStateCells` in `internal/gusseterr/wire.go` is the mirror.
 pub const MAX_STATE_CELLS_PER_FUNC: u64 = 8_388_608;
@@ -859,7 +858,9 @@ pub fn solve_package<F>(funcs: &[FuncIR], check_cancel: &mut F) -> Result<Packag
 where
     F: FnMut() -> bool,
 {
-    solve_package_capped(funcs, check_cancel, MAX_CALLGRAPH_ITERS)
+    // Summaries only flip false -> true, so at most `funcs.len()` sweeps change one and one more
+    // confirms: `funcs.len() + 1` is a proven bound and the cap below is an invariant check.
+    solve_package_capped(funcs, check_cancel, funcs.len() + 1)
 }
 
 /// Union-find root with path halving.
@@ -889,10 +890,13 @@ const MAX_CANON_CLASS: usize = 64;
 /// path (`a, err := f(); if retry { _, err = g() }`) stay separate, because there the check
 /// after the join does not prove `f`'s error nil. Binds inside a loop reach each other through
 /// the back edge and so are never merged. Returns `None` when no tuple changes identity.
-fn canonical_tuples(fn_ir: &FuncIR) -> Option<Vec<u32>> {
+fn canonical_tuples<F: FnMut() -> bool>(
+    fn_ir: &FuncIR,
+    check_cancel: &mut F,
+) -> Result<Option<Vec<u32>>, SolveError> {
     let n_tuples = fn_ir.tuples.len();
     if n_tuples < 2 || fn_ir.blocks.iter().all(|b| b.phis.is_empty()) {
-        return None;
+        return Ok(None);
     }
     let mut parent: Vec<u32> = (0..fn_ir.slot_flags.len() as u32).collect();
     for block in &fn_ir.blocks {
@@ -931,13 +935,19 @@ fn canonical_tuples(fn_ir: &FuncIR) -> Option<Vec<u32>> {
         if members.len() < 2 || members.len() > MAX_CANON_CLASS {
             continue;
         }
+        if !check_cancel() {
+            return Err(SolveError::Cancelled);
+        }
         let mut reach: std::collections::BTreeMap<u32, Vec<bool>> =
             std::collections::BTreeMap::new();
         for &t in members {
             for &bb in &bind_blocks[t as usize] {
-                reach
-                    .entry(bb)
-                    .or_insert_with(|| reachable_blocks_from(fn_ir, bb));
+                if !reach.contains_key(&bb) {
+                    if !check_cancel() {
+                        return Err(SolveError::Cancelled);
+                    }
+                    reach.insert(bb, reachable_blocks_from(fn_ir, bb));
+                }
             }
         }
         let exclusive = |t: u32, u: u32| {
@@ -962,13 +972,18 @@ fn canonical_tuples(fn_ir: &FuncIR) -> Option<Vec<u32>> {
             }
         }
     }
-    changed.then_some(canon)
+    Ok(changed.then_some(canon))
 }
 
 /// Returns `fn_ir` with every `BindTuple` rewritten to its canonical tuple id, or `None` when
 /// nothing changes.
-fn with_canonical_tuples(fn_ir: &FuncIR) -> Option<FuncIR> {
-    let canon = canonical_tuples(fn_ir)?;
+fn with_canonical_tuples<F: FnMut() -> bool>(
+    fn_ir: &FuncIR,
+    check_cancel: &mut F,
+) -> Result<Option<FuncIR>, SolveError> {
+    let Some(canon) = canonical_tuples(fn_ir, check_cancel)? else {
+        return Ok(None);
+    };
     let mut out = fn_ir.clone();
     for block in &mut out.blocks {
         for op in &mut block.ops {
@@ -977,11 +992,11 @@ fn with_canonical_tuples(fn_ir: &FuncIR) -> Option<FuncIR> {
             }
         }
     }
-    Some(out)
+    Ok(Some(out))
 }
 
-/// `solve_package` with an explicit call-graph iteration cap (the public entry point passes
-/// `MAX_CALLGRAPH_ITERS`; tests pass a small cap to reach it).
+/// `solve_package` with an explicit call-graph sweep cap (the public entry point passes
+/// `funcs.len() + 1`, the proven convergence bound; tests pass a small cap to reach the error).
 pub fn solve_package_capped<F>(
     funcs: &[FuncIR],
     check_cancel: &mut F,
@@ -990,7 +1005,10 @@ pub fn solve_package_capped<F>(
 where
     F: FnMut() -> bool,
 {
-    let canon: Vec<Option<FuncIR>> = funcs.iter().map(with_canonical_tuples).collect();
+    let mut canon: Vec<Option<FuncIR>> = Vec::with_capacity(funcs.len());
+    for f in funcs {
+        canon.push(with_canonical_tuples(f, check_cancel)?);
+    }
     let funcs_view: Vec<&FuncIR> = funcs
         .iter()
         .zip(canon.iter())
@@ -1010,9 +1028,25 @@ where
     }
 
     // Phase 1: Interprocedural call-graph fixpoint for concrete error pointer returns.
-    // The summaries only ever flip false -> true, so this converges in at most one sweep per
-    // function; a chain longer than the cap fails the package rather than exporting
-    // optimistic (too-small) summaries that would hide ERR004 findings.
+    // The summaries only ever flip false -> true, so this converges in at most one changing
+    // sweep per function plus one confirming sweep. A function is re-solved only after one of
+    // its callees flipped (its result depends on nothing else), so a long chain costs one solve
+    // per function and per call edge, not one per sweep. Missing the cap would export
+    // optimistic (too-small) summaries that hide ERR004 findings, so it is an error.
+    let mut callers: Vec<Vec<u32>> = vec![Vec::new(); n_funcs];
+    for (idx, fn_ir) in funcs.iter().copied().enumerate() {
+        for block in &fn_ir.blocks {
+            for op in &block.ops {
+                if let OpIR::CallConcretePtr { callee_idx, .. } = op {
+                    let v = &mut callers[*callee_idx as usize];
+                    if v.last() != Some(&(idx as u32)) {
+                        v.push(idx as u32);
+                    }
+                }
+            }
+        }
+    }
+    let mut dirty = vec![true; n_funcs];
     let mut converged = false;
     for _iter in 0..max_callgraph_iters {
         if !check_cancel() {
@@ -1020,9 +1054,13 @@ where
         }
         let mut any_changed = false;
         for (idx, fn_ir) in funcs.iter().copied().enumerate() {
-            if may_return_nil[idx] || (fn_ir.flags & FUNC_RETURNS_CONCRETE_ERR_PTR == 0) {
+            if may_return_nil[idx]
+                || !dirty[idx]
+                || (fn_ir.flags & FUNC_RETURNS_CONCRETE_ERR_PTR == 0)
+            {
                 continue;
             }
+            dirty[idx] = false;
             if fn_ir.blocks.is_empty() {
                 may_return_nil[idx] = true;
                 any_changed = true;
@@ -1032,6 +1070,9 @@ where
             if solved.func_may_return_nil {
                 may_return_nil[idx] = true;
                 any_changed = true;
+                for &c in &callers[idx] {
+                    dirty[c as usize] = true;
+                }
             }
         }
         if !any_changed {

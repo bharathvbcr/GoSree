@@ -56,11 +56,56 @@ func TestOracleCallgraphCapFailsClosed(t *testing.T) {
 	}
 }
 
-func TestPublicCallgraphCapIsTheDocumentedConstant(t *testing.T) {
-	funcs := callChain(MaxCallgraphIters + 2)
-	_, err := SolveOracle(context.Background(), funcs)
-	want := "did not converge within 4096 iterations"
-	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Fatalf("SolveOracle on a chain longer than MaxCallgraphIters: err = %v, want %q", err, want)
+// TestPublicCallgraphCapScalesWithFuncCount: the cap is derived from the function count (the
+// proven convergence bound), so chains longer than any fixed constant still converge, while
+// the internal capped entry keeps the non-convergence error reachable.
+func TestPublicCallgraphCapScalesWithFuncCount(t *testing.T) {
+	for _, n := range []int{4097, MaxFuncs} {
+		res, err := SolveOracle(context.Background(), callChain(n))
+		if err != nil {
+			t.Fatalf("chain of %d functions: %v", n, err)
+		}
+		for i, b := range res.MayReturnNil {
+			if !b {
+				t.Fatalf("chain of %d: func %d summary not converged", n, i)
+			}
+		}
+	}
+}
+
+// phiMergedTuples is a function whose two tuples bind on exclusive branches and are merged by
+// a phi, so canonicalTuples has a class of two to examine.
+func phiMergedTuples() FuncIR {
+	return FuncIR{
+		SlotFlags: []uint8{0, SlotIsError, 0, SlotIsError, 0, SlotIsError, 0},
+		Tuples:    []TupleMeta{{ErrSlot: 1}, {ErrSlot: 3}},
+		Blocks: []BlockIR{
+			{Term: Terminator{Kind: TermCond, Target: 1, FalseBB: 2, CondKind: CondOpaque, CondSlot: NoneU32}},
+			{Ops: []OpIR{{Kind: OpBindTuple, TupleID: 0, SlotA: 1, Companions: []uint32{2}}}, Term: Terminator{Kind: TermJump, Target: 3}},
+			{Ops: []OpIR{{Kind: OpBindTuple, TupleID: 1, SlotA: 3, Companions: []uint32{4}}}, Term: Terminator{Kind: TermJump, Target: 3}},
+			{
+				Phis: []PhiIR{
+					{DstSlot: 6, Incoming: []PhiEdge{{PredBB: 1, SrcSlot: 2}, {PredBB: 2, SrcSlot: 4}}},
+					{DstSlot: 5, Incoming: []PhiEdge{{PredBB: 1, SrcSlot: 1}, {PredBB: 2, SrcSlot: 3}}},
+				},
+				Term: Terminator{Kind: TermStop},
+			},
+		},
+	}
+}
+
+func TestCanonicalTuplesHonoursCancellation(t *testing.T) {
+	fn := phiMergedTuples()
+	canon, err := canonicalTuples(context.Background(), &fn)
+	if err != nil || len(canon) != 2 || canon[1] != 0 {
+		t.Fatalf("live ctx: canon = %v, err = %v, want tuple 1 merged into 0", canon, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := canonicalTuples(ctx, &fn); err == nil {
+		t.Fatal("cancelled ctx: canonicalTuples must stop with the context error")
+	}
+	if _, err := SolveOracle(ctx, []FuncIR{fn}); err == nil {
+		t.Fatal("cancelled ctx: SolveOracle must fail")
 	}
 }

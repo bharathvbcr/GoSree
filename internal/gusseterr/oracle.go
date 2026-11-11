@@ -717,7 +717,9 @@ type deferCloseRec struct {
 // SolveOracle runs the pure-Go reference abstract-interpretation solver,
 // matching rust/gosree-errsolve bit-for-bit.
 func SolveOracle(ctx context.Context, funcs []FuncIR) (PackageResult, error) {
-	return solveOracle(ctx, funcs, MaxCallgraphIters)
+	// Summaries only flip false -> true, so at most len(funcs) sweeps change one and one more
+	// confirms: len(funcs)+1 is a proven bound and the cap in solveOracle is an invariant check.
+	return solveOracle(ctx, funcs, len(funcs)+1)
 }
 
 // maxCanonClass mirrors MAX_CANON_CLASS in rust/gosree-errsolve/src/lib.rs.
@@ -729,10 +731,10 @@ const maxCanonClass = 64
 // unreachable from one another, so one check after a join promotes the companions of whichever
 // call ran, but two binds on one path (`a, err := f(); if retry { _, err = g() }`) stay
 // separate. It returns nil when nothing changes.
-func canonicalTuples(fn *FuncIR) []uint32 {
+func canonicalTuples(ctx context.Context, fn *FuncIR) ([]uint32, error) {
 	nTuples := len(fn.Tuples)
 	if nTuples < 2 {
-		return nil
+		return nil, nil
 	}
 	anyPhi := false
 	for i := range fn.Blocks {
@@ -742,7 +744,7 @@ func canonicalTuples(fn *FuncIR) []uint32 {
 		}
 	}
 	if !anyPhi {
-		return nil
+		return nil, nil
 	}
 	parent := make([]uint32, len(fn.SlotFlags))
 	for i := range parent {
@@ -798,10 +800,16 @@ func canonicalTuples(fn *FuncIR) []uint32 {
 		if len(members) < 2 || len(members) > maxCanonClass {
 			continue
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		reach := make(map[uint32][]bool)
 		for _, t := range members {
 			for _, bb := range bindBlocks[t] {
 				if _, ok := reach[bb]; !ok {
+					if err := ctx.Err(); err != nil {
+						return nil, err
+					}
 					reach[bb] = reachableBlocksFromOracle(fn, bb)
 				}
 			}
@@ -835,17 +843,17 @@ func canonicalTuples(fn *FuncIR) []uint32 {
 		}
 	}
 	if !changed {
-		return nil
+		return nil, nil
 	}
-	return canon
+	return canon, nil
 }
 
 // withCanonicalTuples returns fn with every BindTuple rewritten to its canonical tuple id,
 // copying only the blocks it changes; fn itself is never modified.
-func withCanonicalTuples(fn FuncIR) FuncIR {
-	canon := canonicalTuples(&fn)
-	if canon == nil {
-		return fn
+func withCanonicalTuples(ctx context.Context, fn FuncIR) (FuncIR, error) {
+	canon, err := canonicalTuples(ctx, &fn)
+	if err != nil || canon == nil {
+		return fn, err
 	}
 	blocks := slices.Clone(fn.Blocks)
 	for bi := range blocks {
@@ -864,18 +872,21 @@ func withCanonicalTuples(fn FuncIR) FuncIR {
 		}
 	}
 	fn.Blocks = blocks
-	return fn
+	return fn, nil
 }
 
-// solveOracle is SolveOracle with an explicit call-graph iteration cap (tests pass a small cap
-// to reach it).
+// solveOracle is SolveOracle with an explicit call-graph sweep cap (tests pass a small cap to
+// reach the error).
 func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (PackageResult, error) {
 	if ctx == nil {
 		return PackageResult{}, errors.New("gusseterr: nil context")
 	}
 	funcs := make([]FuncIR, len(funcsIn))
 	for i := range funcsIn {
-		funcs[i] = withCanonicalTuples(funcsIn[i])
+		var err error
+		if funcs[i], err = withCanonicalTuples(ctx, funcsIn[i]); err != nil {
+			return PackageResult{}, err
+		}
 	}
 	nFuncs := len(funcs)
 	mayReturnNil := make([]bool, nFuncs)
@@ -888,9 +899,30 @@ func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (
 	}
 
 	// Phase 1: Interprocedural call-graph fixpoint.
-	// The summaries only flip false -> true, so this converges in at most one sweep per
-	// function; a chain longer than the cap fails the package rather than exporting
-	// optimistic summaries that would hide ERR004 findings.
+	// The summaries only flip false -> true, so this converges in at most one changing sweep
+	// per function plus one confirming sweep. A function is re-solved only after one of its
+	// callees flipped (its result depends on nothing else), so a long chain costs one solve per
+	// function and per call edge, not one per sweep. Missing the cap would export optimistic
+	// summaries that hide ERR004 findings, so it is an error.
+	callers := make([][]uint32, nFuncs)
+	for idx := range funcs {
+		for bi := range funcs[idx].Blocks {
+			for oi := range funcs[idx].Blocks[bi].Ops {
+				op := &funcs[idx].Blocks[bi].Ops[oi]
+				if op.Kind != OpCallConcretePtr {
+					continue
+				}
+				c := op.SlotB
+				if n := len(callers[c]); n == 0 || callers[c][n-1] != uint32(idx) {
+					callers[c] = append(callers[c], uint32(idx))
+				}
+			}
+		}
+	}
+	dirty := make([]bool, nFuncs)
+	for i := range dirty {
+		dirty[i] = true
+	}
 	converged := false
 	for range maxCallgraphIters {
 		if err := ctx.Err(); err != nil {
@@ -898,9 +930,10 @@ func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (
 		}
 		anyChanged := false
 		for idx := range funcs {
-			if mayReturnNil[idx] || funcs[idx].Flags&FuncReturnsConcreteErrPtr == 0 {
+			if mayReturnNil[idx] || !dirty[idx] || funcs[idx].Flags&FuncReturnsConcreteErrPtr == 0 {
 				continue
 			}
+			dirty[idx] = false
 			if len(funcs[idx].Blocks) == 0 {
 				mayReturnNil[idx] = true
 				anyChanged = true
@@ -913,6 +946,9 @@ func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (
 			if fnMayNil {
 				mayReturnNil[idx] = true
 				anyChanged = true
+				for _, c := range callers[idx] {
+					dirty[c] = true
+				}
 			}
 		}
 		if !anyChanged {

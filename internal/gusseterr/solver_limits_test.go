@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bharathvbcr/gosree/internal/gusseterr"
 )
@@ -212,30 +213,35 @@ func TestTuplesMergedByPhiPromoteAfterOneCheck(t *testing.T) {
 	}
 }
 
-// TestNativeCallgraphCapFailsClosed runs the real cap (MaxCallgraphIters) through the engine
-// that is linked: a chain longer than the cap must fail the package, not return summaries.
-func TestNativeCallgraphCapFailsClosed(t *testing.T) {
-	if testing.Short() {
-		t.Skip("solves ~8M tiny functions")
-	}
-	n := gusseterr.MaxCallgraphIters + 2
-	funcs := make([]gusseterr.FuncIR, n)
-	for i := range funcs {
-		if i+1 == n {
-			funcs[i] = gusseterr.FuncIR{Flags: gusseterr.FuncReturnsConcreteErrPtr | gusseterr.FuncExternalMayNil}
-			continue
+// TestNativeCallgraphChainsConverge runs chains longer than any fixed constant through the
+// linked engine: the cap is derived from the function count, so valid input converges.
+func TestNativeCallgraphChainsConverge(t *testing.T) {
+	for _, n := range []int{gusseterr.MaxFuncs/4 + 1, gusseterr.MaxFuncs} {
+		funcs := make([]gusseterr.FuncIR, n)
+		for i := range funcs {
+			if i+1 == n {
+				funcs[i] = gusseterr.FuncIR{Flags: gusseterr.FuncReturnsConcreteErrPtr | gusseterr.FuncExternalMayNil}
+				continue
+			}
+			funcs[i] = gusseterr.FuncIR{
+				Flags:     gusseterr.FuncReturnsConcreteErrPtr,
+				SlotFlags: []uint8{0},
+				Blocks: []gusseterr.BlockIR{{
+					Ops:  []gusseterr.OpIR{{Kind: gusseterr.OpCallConcretePtr, SiteID: 1, SlotA: 0, SlotB: uint32(i + 1)}},
+					Term: gusseterr.Terminator{Kind: gusseterr.TermReturn, SiteID: 2, RetSlot: 0},
+				}},
+			}
 		}
-		funcs[i] = gusseterr.FuncIR{
-			Flags:     gusseterr.FuncReturnsConcreteErrPtr,
-			SlotFlags: []uint8{0},
-			Blocks: []gusseterr.BlockIR{{
-				Ops:  []gusseterr.OpIR{{Kind: gusseterr.OpCallConcretePtr, SiteID: 1, SlotA: 0, SlotB: uint32(i + 1)}},
-				Term: gusseterr.Terminator{Kind: gusseterr.TermReturn, SiteID: 2, RetSlot: 0},
-			}},
+		start := time.Now()
+		res, err := gusseterr.Solve(context.Background(), funcs)
+		t.Logf("chain n=%d: %v (NativeActive=%v)", n, time.Since(start), gusseterr.NativeActive())
+		if err != nil {
+			t.Fatalf("chain of %d functions: %v", n, err)
 		}
-	}
-	_, err := gusseterr.Solve(context.Background(), funcs)
-	if err == nil || !strings.Contains(err.Error(), "did not converge within 4096 iterations") {
-		t.Fatalf("Solve on a chain longer than the cap: err = %v, want a non-convergence error", err)
+		for i, b := range res.MayReturnNil {
+			if !b {
+				t.Fatalf("chain of %d: func %d summary not converged", n, i)
+			}
+		}
 	}
 }

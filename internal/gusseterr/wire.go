@@ -24,13 +24,13 @@ const (
 	MaxOpsPerBlock       = 262_144
 	MaxCompanions        = 256
 	MaxIterationsPerFunc = 250_000
-	MaxCallgraphIters    = 4_096
 
 	// MaxStateCells bounds blocks x slots for one function. The solver holds four full
 	// abstract states per block (entry, exit and up to two outgoing edges): 4 x 28 = 112 bytes
-	// per (block, slot) cell in Rust, about 150 bytes per cell measured in the Go oracle. So
-	// 2^23 = 8,388,608 cells is at most 896 MiB of Rust state (about 1.2 GiB in the oracle) for
-	// the largest single function; states are freed between functions, so the bound does not
+	// per (block, slot) cell in Rust, so 2^23 = 8,388,608 cells is at most 896 MiB of Rust state
+	// (measured peak RSS about 0.9 GiB). The Go oracle clones a state per step and measured 1.3 to
+	// 1.6 GiB at the budget (shapes 2048x4096, 32768x256, 8192x1024), so the roughly 1 GiB target
+	// holds for the Rust engine only. States are freed between functions, so the bound does not
 	// multiply with MaxFuncs. Mirrors MAX_STATE_CELLS_PER_FUNC in rust/gosree-errsolve/src/lib.rs.
 	MaxStateCells = 8_388_608
 )

@@ -114,13 +114,17 @@ fn callgraph_cap_fails_closed_instead_of_exporting_optimistic_summaries() {
 }
 
 #[test]
-fn public_entry_uses_the_documented_cap() {
-    // Longer than MAX_CALLGRAPH_ITERS sweeps: the real cap, not a test cap.
-    let funcs = call_chain(MAX_CALLGRAPH_ITERS + 2);
-    assert_eq!(
-        solve_package(&funcs, &mut || true).unwrap_err(),
-        SolveError::CallgraphBudgetExceeded(MAX_CALLGRAPH_ITERS)
-    );
+fn public_entry_converges_on_chains_up_to_max_funcs() {
+    // Callers before callees: one changing sweep per function. The cap is derived from the
+    // function count, so valid chains of any length up to MAX_FUNCS converge.
+    for n in [4_097, MAX_FUNCS] {
+        let funcs = call_chain(n);
+        let start = std::time::Instant::now();
+        let res = solve_package(&funcs, &mut || true).expect("converges");
+        eprintln!("chain n={n}: {:?}", start.elapsed());
+        assert_eq!(res.may_return_nil.len(), n);
+        assert!(res.may_return_nil.iter().all(|&b| b));
+    }
 }
 
 /// The IR the lowering emits for
