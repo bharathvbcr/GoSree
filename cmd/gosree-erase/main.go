@@ -386,14 +386,17 @@ func (o *options) processStream() (err error) {
 	return o.emit("<stdin>", src, out)
 }
 
+// verifyTargets verifies equivalence for the selected files, directory by directory. Every selected
+// file takes part, _test.go files included: one the build cannot compile here is erased and parsed
+// instead, and named on stderr as not compile-verified. A sibling file that cannot be read fails the
+// run: verifying a package without part of it proves nothing about it.
 func (o *options) verifyTargets(targets []target) error {
 	byDir := map[string]map[string][]byte{}
+	hasCode := map[string]bool{}
+	selected := map[string]bool{}
 	var dirs []string
 	for _, t := range targets {
 		base := filepath.Base(t.real)
-		if strings.HasSuffix(base, "_test.go") {
-			continue
-		}
 		src, err := os.ReadFile(t.real)
 		if err != nil {
 			return fmt.Errorf("%s: %w", t.display, err)
@@ -404,29 +407,50 @@ func (o *options) verifyTargets(targets []target) error {
 			dirs = append(dirs, dir)
 		}
 		byDir[dir][base] = src
+		selected[filepath.Join(dir, base)] = true
+		if !strings.HasSuffix(base, "_test.go") {
+			hasCode[dir] = true
+		}
 	}
 	sort.Strings(dirs)
 	for _, dir := range dirs {
+		if !hasCode[dir] {
+			continue
+		}
 		files := byDir[dir]
 		// Include any unselected sibling regular non-test .go files in the same
 		// package directory so `gosree-erase -verify pkg/one.go` resolves package-local
 		// declarations across sibling files of `pkg`.
-		if entries, err := os.ReadDir(dir); err == nil {
-			for _, ent := range entries {
-				name := ent.Name()
-				if !ent.Type().IsRegular() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-					continue
-				}
-				if _, exists := files[name]; exists {
-					continue
-				}
-				if sibSrc, rerr := os.ReadFile(filepath.Join(dir, name)); rerr == nil {
-					files[name] = sibSrc
-				}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return fmt.Errorf("%s: reading the package directory: %w", dir, err)
+		}
+		for _, ent := range entries {
+			name := ent.Name()
+			if !ent.Type().IsRegular() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
 			}
+			if _, exists := files[name]; exists {
+				continue
+			}
+			sibSrc, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return fmt.Errorf("%s: reading sibling file for verification: %w", filepath.Join(dir, name), err)
+			}
+			files[name] = sibSrc
 		}
 	}
-	return VerifyDirectoriesEquivalence(byDir, o.erase)
+	unverified, err := VerifyDirectoriesEquivalence(byDir, o.erase)
+	var notCompiled []string
+	for _, name := range unverified {
+		if selected[name] {
+			notCompiled = append(notCompiled, name)
+		}
+	}
+	if len(notCompiled) > 0 {
+		o.errorf("gosree-erase: note: %d file(s) were erased and parsed but not compile-verified (build-constrained out here, or _test.go): %s", len(notCompiled), strings.Join(notCompiled, ", "))
+	}
+	return err
 }
 
 // processFile erases one file, delivering the result as the options would for
