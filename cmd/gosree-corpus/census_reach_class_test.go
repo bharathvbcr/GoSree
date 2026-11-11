@@ -18,6 +18,22 @@ import (
 
 type B struct{ n int }
 
+type Box[T any] struct{ p *T }
+type Iface[T any] interface{ Get() T }
+type Impl struct{ n int }
+
+func (Impl) Get() B { return B{} }
+
+type SBox struct{ v any }
+type SPtrBox struct{ v any }
+type SBoxBox struct{ v any }
+type SIface struct{ v Iface[B] }
+
+func NewSBox() *SBox       { return &SBox{v: Box[B]{}} }
+func NewSPtrBox() *SPtrBox { return &SPtrBox{v: &Box[B]{}} }
+func NewSBoxBox() *SBoxBox { return &SBoxBox{v: Box[Box[B]]{}} }
+func NewSIface(i Iface[B]) *SIface { return &SIface{v: i} }
+
 func (b *B) Bump() { b.n++ }
 
 // External (non-module) struct types, plain and generic.
@@ -42,11 +58,11 @@ func NewSExtGeneric() *SExtGeneric { return &SExtGeneric{v: atomic.Pointer[B]{}}
 func NewSStruct() *SStruct         { return &SStruct{v: B{}} }
 func NewSPtr() *SPtr               { return &SPtr{v: &B{}} }
 
-func Serve(a *XArr, b *XArrArr, c *XArrPtr, d *XExtGeneric, e *XSlice, f *XMap, g *XArrB, h *SMap, i *SSlice, j *SExtGeneric, k *SStruct, l *SPtr) {
+func Serve(a *XArr, b *XArrArr, c *XArrPtr, d *XExtGeneric, e *XSlice, f *XMap, g *XArrB, h *SMap, i *SSlice, j *SExtGeneric, k *SStruct, l *SPtr, m *SBox, n *SPtrBox, o *SBoxBox, p *SIface) {
 }
 `
 
-var reachClassNames = []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"}
+var reachClassNames = []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p"}
 
 func reachClassCensus(t *testing.T, order []string) map[string][]string {
 	t.Helper()
@@ -83,6 +99,10 @@ func TestCensusReachKeepsTheFieldsOwnClass(t *testing.T) {
 		"j": {classW, classX},       // any holding atomic.Pointer[B]
 		"k": {classW},               // any holding B: a pure child
 		"l": {classW},               // any holding *B: a pure child
+		"m": {classCFrozen, classW}, // any holding Box[B]: Box's own *T, and B through the argument
+		"n": {classCFrozen, classW}, // any holding *Box[B]
+		"o": {classCFrozen, classW}, // any holding Box[Box[B]]
+		"p": {classOK, classW},      // Iface[B] stored as it came: Impl (OK) and, through the argument, B
 	}
 	for n, w := range want {
 		g := slices.Clone(got[n])

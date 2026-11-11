@@ -861,8 +861,9 @@ func (c *census) own(n *types.Named) ownResult {
 		case isSlot(ft):
 			for _, st := range c.ifaceStores[n][f.Name()] {
 				if child := namedStruct(st); child != nil && c.inModule(child.Obj().Pkg()) {
-					// A module struct, or a pointer to one, is a pure child.
-					children = append(children, child)
+					// A module struct, or a pointer to one, is a pure child: nothing about the store
+					// is classified. reach adds the struct and the type arguments of an instance.
+					children = append(children, c.reach(st)...)
 					continue
 				}
 				// Anything else keeps its own classification; the module structs it contains
