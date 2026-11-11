@@ -41,3 +41,15 @@ func writtenAfterLoop(w io.WriteCloser) {
 	}
 	_, _ = w.Write(nil)
 }
+
+func open() io.WriteCloser { return nil }
+
+// The captured variable is replaced by another closure between the write and the close.
+func replacedByCall(w io.WriteCloser) func() {
+	swap := func() { w = open() }
+	return func() {
+		_, _ = w.Write(nil)
+		swap()
+		w.Close() // FP(ERR005): the store is in another closure and calls that run it cannot be identified soundly
+	}
+}

@@ -811,6 +811,18 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 					})
 					fl.propagateBlankedMeta(alloc, x.Val)
 				} else {
+					if fv, ok := x.Addr.(*ssa.FreeVar); ok {
+						// Reassigning a captured variable replaces the resource that resourceSlot
+						// tracks: the new value starts read-only (a nil-source assign resets the
+						// written flag and touches no state a load's own slot carries).
+						ops = append(ops, gusseterr.OpIR{
+							Kind:    gusseterr.OpAssignSlot,
+							SiteID:  0,
+							SlotA:   fl.slot(fv),
+							SlotB:   gusseterr.NoneU32,
+							NilHint: gusseterr.AssignNilMayNil,
+						})
+					}
 					if isErrorInterface(x.Val.Type()) || len(fl.valErrVars[x.Val]) > 0 {
 						fl.emitObserveErr(&ops, x.Val)
 					} else {

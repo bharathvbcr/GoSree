@@ -15,3 +15,7 @@ func TestFreeVarCells(t *testing.T) {
 func TestRangeFuncCapturedResource(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errrangecapture")
 }
+
+func TestFreeVarReplacedByCallKnownFP(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errfvswap")
+}

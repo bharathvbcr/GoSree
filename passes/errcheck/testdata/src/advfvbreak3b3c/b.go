@@ -65,15 +65,7 @@ func reassignInBody(w io.WriteCloser, mkw func() io.WriteCloser) {
 	}
 }
 
-// C5: captured variable replaced by a closure called between write and close.
-func replacedByCall(w io.WriteCloser) func() {
-	swap := func() { w = open() }
-	return func() {
-		_, _ = w.Write(nil)
-		swap()
-		w.Close() // C5
-	}
-}
+// C5 (replacedByCall) moved to errfvswap, where its false positive is expected and documented.
 
 func dualCapturedReassign() error {
 	e := mk()
