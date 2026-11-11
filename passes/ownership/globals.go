@@ -3,6 +3,7 @@ package ownership
 import (
 	"fmt"
 	"go/token"
+	"go/types"
 	"sort"
 
 	"golang.org/x/tools/go/analysis"
@@ -171,19 +172,154 @@ func (st *state) markEscapedGlobals(fns []*ssa.Function, mutated map[*ssa.Global
 			if !ok || n == nil || glob.Pkg != st.ssa.Pkg || mutated[glob] {
 				continue
 			}
-		region:
-			for c := range g.region(n) {
+			region := g.region(n)
+		scan:
+			for c := range region {
 				for _, e := range c.events {
 					// An event tied to a variable is the variable's own seed (it is "stored in"
 					// itself), not something done with its memory.
-					if e.global == nil && (e.kind == evEscape || e.kind == evReturn) {
+					if e.global == nil && (e.kind == evEscape || e.kind == evReturn) && !g.formatsOnly(e, region) {
 						mutated[glob] = true
-						break region
+						break scan
 					}
 				}
 			}
 		}
 	}
+}
+
+// formatCallees are the calls that render their operands and keep none of them: the fmt and log
+// printing families. The one thing they run on an operand is a method fmt looks for.
+var formatCallees = func() map[string]bool {
+	m := map[string]bool{}
+	for _, base := range []string{"Print", "Println", "Printf"} {
+		for _, pre := range []string{"fmt.", "log.", "(*log.Logger)."} {
+			m[pre+base] = true
+		}
+	}
+	for _, base := range []string{"Fatal", "Fatalf", "Fatalln", "Panic", "Panicf", "Panicln"} {
+		m["log."+base] = true
+		m["(*log.Logger)."+base] = true
+	}
+	for _, base := range []string{"Sprint", "Sprintf", "Sprintln", "Fprint", "Fprintf", "Fprintln", "Errorf", "Append", "Appendf", "Appendln"} {
+		m["fmt."+base] = true
+	}
+	return m
+}()
+
+// calledByFormat names the methods fmt calls on an operand (Stringer, error, Formatter, GoStringer)
+// or on a writer (Write).
+var calledByFormat = map[string]bool{"String": true, "Error": true, "Format": true, "GoString": true, "Write": true}
+
+// formatsOnly reports whether e is the escape of a call to a printing function that cannot leak
+// anything in region: every operand whose class is in region has a type with no method the call
+// would run. An operand the call's arguments do not spell out (a spread slice, an interface value)
+// fails closed. fmt.Errorf keeps a %w operand, but only an error value, which has an Error method.
+func (g *graph) formatsOnly(e event, region map[*node]bool) bool {
+	call, ok := e.instr.(ssa.CallInstruction)
+	if !ok {
+		return false
+	}
+	callee := call.Common().StaticCallee()
+	if callee == nil || !formatCallees[calleeFullName(callee)] {
+		return false
+	}
+	relevant := func(v ssa.Value) bool {
+		n, ok := g.nodes[v]
+		return ok && n != nil && region[n.find()]
+	}
+	for _, a := range call.Common().Args {
+		for _, op := range formatOperands(a) {
+			if relevant(op) && typeCallsFormatMethod(op.Type(), map[types.Type]bool{}) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func calleeFullName(fn *ssa.Function) string {
+	if o, ok := fn.Object().(*types.Func); ok {
+		return o.FullName()
+	}
+	return ""
+}
+
+// formatOperands lists the values a printing call receives for argument a: the elements of a
+// ...any slice built in place, a boxed value's own value, or a itself.
+func formatOperands(a ssa.Value) []ssa.Value {
+	if mi, ok := a.(*ssa.MakeInterface); ok {
+		return []ssa.Value{mi.X}
+	}
+	sl, ok := a.(*ssa.Slice)
+	if !ok {
+		return []ssa.Value{a}
+	}
+	alloc, ok := sl.X.(*ssa.Alloc)
+	if !ok || alloc.Referrers() == nil {
+		return []ssa.Value{a}
+	}
+	var ops []ssa.Value
+	for _, r := range *alloc.Referrers() {
+		switch r := r.(type) {
+		case *ssa.Slice:
+		case *ssa.IndexAddr:
+			if r.Referrers() == nil {
+				continue
+			}
+			for _, u := range *r.Referrers() {
+				st, ok := u.(*ssa.Store)
+				if !ok || st.Addr != ssa.Value(r) {
+					return []ssa.Value{a, ssa.Value(alloc)}
+				}
+				ops = append(ops, formatOperands(st.Val)...)
+			}
+		default:
+			return []ssa.Value{a, ssa.Value(alloc)}
+		}
+	}
+	return ops
+}
+
+// typeCallsFormatMethod reports whether a value of type t, or anything it holds, has a method a
+// printing call runs. An interface, or a type parameter, may hold any type, so it does.
+func typeCallsFormatMethod(t types.Type, seen map[types.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	if _, isTP := t.(*types.TypeParam); isTP {
+		return true
+	}
+	for _, base := range []types.Type{t, types.NewPointer(t)} {
+		ms := types.NewMethodSet(base)
+		for i := range ms.Len() {
+			if calledByFormat[ms.At(i).Obj().Name()] {
+				return true
+			}
+		}
+	}
+	switch u := t.Underlying().(type) {
+	case *types.Interface:
+		return true
+	case *types.Pointer:
+		return typeCallsFormatMethod(u.Elem(), seen)
+	case *types.Slice:
+		return typeCallsFormatMethod(u.Elem(), seen)
+	case *types.Array:
+		return typeCallsFormatMethod(u.Elem(), seen)
+	case *types.Chan:
+		return typeCallsFormatMethod(u.Elem(), seen)
+	case *types.Map:
+		return typeCallsFormatMethod(u.Key(), seen) || typeCallsFormatMethod(u.Elem(), seen)
+	case *types.Struct:
+		for f := range u.Fields() {
+			if typeCallsFormatMethod(f.Type(), seen) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func rootsAtParam(v ssa.Value, fn *ssa.Function) bool {
