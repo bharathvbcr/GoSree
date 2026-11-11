@@ -35,6 +35,16 @@ func b() {
 func mutate(c *Config) {
 	c.Limit = 1 // want "write through shared value loaded from"
 }
+
+// A hatched and an unhatched Load merge at a phi whose first edge is the hatched one.
+func merged(cond bool) {
+	//gosree:unsafe the first Load was reviewed
+	x := live.Load()
+	if cond {
+		x = live.Load()
+	}
+	x.Limit = 2 // want "write through shared value loaded from"
+}
 `,
 	})
 	if err != nil {

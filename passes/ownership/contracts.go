@@ -266,8 +266,20 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 		enqueued[fn] = false
 		origins := shared[fn]
 		roots := make(map[ssa.Value]string, len(origins))
+		unmuted := make(map[ssa.Value]string, len(origins))
 		for v, o := range origins {
 			roots[v] = o.desc
+			if !o.muted {
+				unmuted[v] = o.desc
+			}
+		}
+		// rootOf prefers an unmuted origin: a value that several Loads reach (through a phi, or a
+		// cell stored on two paths) is muted only when no unhatched Load reaches it.
+		rootOf := func(v ssa.Value) (ssa.Value, bool) {
+			if r, ok := st.sharedLoadRoot(v, unmuted); ok {
+				return r, true
+			}
+			return st.sharedLoadRoot(v, roots)
 		}
 
 		forEachInstr(fn, func(ins ssa.Instruction) {
@@ -278,7 +290,7 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 				if _, guarded := st.slotOf(w.addr); guarded {
 					return
 				}
-				if root, ok := st.sharedLoadRoot(w.addr, roots); ok {
+				if root, ok := rootOf(w.addr); ok {
 					orig := origins[root]
 					emit(ins, orig, fmt.Sprintf(
 						"write through shared value loaded from %s%s; published atomic values are read-only once shared",
@@ -302,7 +314,7 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 				if mc := resolveClosureVal(a, 0); mc != nil {
 					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
 						for j, b := range mc.Bindings {
-							if root, ok := st.sharedLoadRoot(b, roots); ok && j < len(argFn.FreeVars) {
+							if root, ok := rootOf(b); ok && j < len(argFn.FreeVars) {
 								add(argFn, argFn.FreeVars[j], origins[root])
 							}
 						}
@@ -321,7 +333,7 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 					if _, guarded := st.slotOf(a); guarded {
 						continue
 					}
-					if root, ok := st.sharedLoadRoot(a, roots); ok {
+					if root, ok := rootOf(a); ok {
 						orig := origins[root]
 						emit(ins, orig, fmt.Sprintf(
 							"shared value loaded from %s%s is passed to %s, which writes it; published atomic values are read-only once shared",
@@ -335,12 +347,12 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 				if i >= len(callee.Params) {
 					break
 				}
-				if root, ok := st.sharedLoadRoot(a, roots); ok {
+				if root, ok := rootOf(a); ok {
 					add(callee, callee.Params[i], origins[root])
 				}
 			}
 			for j, b := range bindings {
-				if root, ok := st.sharedLoadRoot(b, roots); ok && j < len(callee.FreeVars) {
+				if root, ok := rootOf(b); ok && j < len(callee.FreeVars) {
 					add(callee, callee.FreeVars[j], origins[root])
 				}
 			}
