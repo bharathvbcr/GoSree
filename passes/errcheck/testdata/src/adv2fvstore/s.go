@@ -1,7 +1,7 @@
 // Package adv2fvstore pins 9244bb2 behavior for stores through a captured variable (identical in
-// both engines). Lines with no want are silent: P1a, P1c, P1d, P1g are PRE-EXISTING misses (a store
-// of a written value or a writable producer into a captured variable is not tracked; aabf10f is
-// silent too); P2b, P3a, P3c were false positives at aabf10f that the reset now removes (correct).
+// both engines). P1a, P1c, P1d, P1g were PRE-EXISTING misses (a store of a written value or a
+// writable producer into a captured variable was not tracked) that the store now carrying the
+// stored value's written state reports, correctly; P2b, P3a, P3c were false positives at aabf10f that the reset now removes (correct).
 // The P2a, P2c, P3b, P3d, P3e ERR005 are correct and unchanged from aabf10f.
 package adv2fvstore
 
@@ -17,7 +17,7 @@ func p1a(w io.WriteCloser, other io.WriteCloser) func() {
 	return func() {
 		_, _ = other.Write(nil)
 		w = other
-		defer w.Close() // P1a
+		defer w.Close() // P1a // want "ERR005"
 	}
 }
 
@@ -27,7 +27,7 @@ func p1c(w io.WriteCloser) func() {
 		other := open()
 		_, _ = other.Write(nil)
 		w = other
-		w.Close() // P1c
+		w.Close() // P1c // want "ERR005"
 	}
 }
 
@@ -36,7 +36,7 @@ func p1d() func() {
 	var f *os.File
 	return func() {
 		f, _ = os.Create("x") // want "ERR002"
-		defer f.Close()       // P1d
+		defer f.Close()       // P1d // want "ERR005"
 	}
 }
 
@@ -63,7 +63,7 @@ func p1f(f *os.File) func() {
 func p1g(f *os.File) func() {
 	return func() {
 		f, _ = os.OpenFile("x", os.O_WRONLY, 0) // want "ERR002"
-		f.Close()                               // P1g
+		f.Close()                               // P1g // want "ERR005"
 	}
 }
 
