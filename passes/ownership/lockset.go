@@ -559,14 +559,21 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 		}
 		return release{}, false
 	}
+	metrics := &releaseMetrics{}
+	if observeRelease != nil {
+		defer func() { observeRelease(st.pass.Pkg, *metrics) }()
+	}
 	add := func(fn *ssa.Function, r release) bool {
+		metrics.work++
 		if stepCount(r.steps) > maxReleaseSteps {
 			r.steps = truncateSteps(r.steps, maxReleaseSteps)
 			r.prefix = true
+			metrics.stepCaps++
 		}
 		if len(out[fn]) >= maxReleasesPerFn {
 			r.steps = ""
 			r.prefix = true
+			metrics.countCaps++
 		}
 		s := seen[fn]
 		if s == nil {
@@ -647,6 +654,7 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 	}
 
 	propagate := func(fn *ssa.Function) bool {
+		metrics.work++
 		changed := false
 		for _, e := range edgesOf[fn] {
 			for _, r := range out[e.callee] {
@@ -682,6 +690,7 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 	postOrder := make([]*ssa.Function, 0, len(fns))
 	var dfs func(fn *ssa.Function)
 	dfs = func(fn *ssa.Function) {
+		metrics.work++
 		if visited[fn] {
 			return
 		}

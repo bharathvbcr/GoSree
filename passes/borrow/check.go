@@ -182,7 +182,28 @@ func CheckBorrows(pass *analysis.Pass, ix *annot.Index, ssaProg *buildssa.SSA) {
 	}
 }
 
+// fallbackPos is where a finding that has no position of its own is reported: the nearest
+// enclosing function with a position (a synthetic function has none, its parent may), else the
+// start of the package's first file. A finding is never dropped for lacking a position.
+func fallbackPos(pass *analysis.Pass, fn *ssa.Function) token.Pos {
+	for f := fn; f != nil; f = f.Parent() {
+		if p := f.Pos(); p.IsValid() {
+			return p
+		}
+		if syn := f.Syntax(); syn != nil && syn.Pos().IsValid() {
+			return syn.Pos()
+		}
+	}
+	if pass != nil && len(pass.Files) > 0 {
+		return pass.Files[0].Pos()
+	}
+	return token.NoPos
+}
+
 func (bc *borrowChecker) report(pos token.Pos, cat, msg string) {
+	if !pos.IsValid() {
+		pos = fallbackPos(bc.pass, bc.fn)
+	}
 	if !pos.IsValid() || bc.ix.Mute(pos) {
 		return
 	}
@@ -1880,7 +1901,7 @@ func (bc *borrowChecker) fallbackReturnPos(origin *ssa.Alloc) token.Pos {
 	if origin != nil && origin.Pos().IsValid() {
 		return origin.Pos()
 	}
-	return bc.fn.Pos()
+	return fallbackPos(bc.pass, bc.fn)
 }
 
 func isStackVarAlloc(a *ssa.Alloc) bool {
