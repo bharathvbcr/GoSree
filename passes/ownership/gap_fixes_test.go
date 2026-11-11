@@ -276,20 +276,22 @@ func callerChild(n *Node, c []bool) {
 }
 ` + diamond.String()
 	pkgs := loadTempModule(t, "1.27", map[string]string{"p/p.go": src})
+	var work int
+	stop := ownership.ObserveRelease(func(pkgPath string, w, _, _ int) {
+		if strings.HasSuffix(pkgPath, "/p") {
+			work = w
+		}
+	})
 	g, err := checker.Analyze([]*analysis.Analyzer{ownership.Analyzer}, pkgs, nil)
+	stop()
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
 	// A work bound instead of a wall clock: the release summaries of this package do a few hundred
 	// units of work (call-graph visits, propagations, additions); an exponential walk does millions.
-	for _, act := range g.Roots {
-		if st, ok := act.Result.(*ownership.Stats); ok {
-			work, _, _ := ownership.ReleaseMetrics(st)
-			t.Logf("release summary work = %d", work)
-			if work > 500 {
-				t.Fatalf("recursive releaseSummaries did %d units of work (want <= 500)", work)
-			}
-		}
+	t.Logf("release summary work = %d", work)
+	if work == 0 || work > 500 {
+		t.Fatalf("recursive releaseSummaries did %d units of work (want between 1 and 500)", work)
 	}
 	safe009 := map[int]bool{}
 	hasSafe003 := false

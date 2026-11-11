@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
@@ -192,20 +193,29 @@ func register(mux *http.ServeMux) {
 
 func releaseMetricsOf(t *testing.T, src string) (work, stepCaps, countCaps int) {
 	t.Helper()
+	var mu sync.Mutex
+	seen := 0
+	stop := ownership.ObserveRelease(func(pkgPath string, w, sc, cc int) {
+		mu.Lock()
+		defer mu.Unlock()
+		if pkgPath == "p" {
+			work, stepCaps, countCaps = w, sc, cc
+			seen++
+		}
+	})
+	defer stop()
 	dir, cleanup, err := analysistest.WriteFiles(map[string]string{"p/p.go": src})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	results := analysistest.Run(t, dir, ownership.Analyzer, "p")
-	if len(results) != 1 {
-		t.Fatalf("got %d results, want 1", len(results))
+	analysistest.Run(t, dir, ownership.Analyzer, "p")
+	mu.Lock()
+	defer mu.Unlock()
+	if seen != 1 {
+		t.Fatalf("release summaries of p observed %d times, want 1 (they run only for packages with guarded fields or //gosree:holds)", seen)
 	}
-	stats, ok := results[0].Result.(*ownership.Stats)
-	if !ok {
-		t.Fatalf("result is %T, want *ownership.Stats", results[0].Result)
-	}
-	return ownership.ReleaseMetrics(stats)
+	return work, stepCaps, countCaps
 }
 
 // A release path longer than the step cap is widened to a prefix, and the widening is counted.

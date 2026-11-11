@@ -559,7 +559,10 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 		}
 		return release{}, false
 	}
-	metrics := &st.stats.release
+	metrics := &releaseMetrics{}
+	if observeRelease != nil {
+		defer func() { observeRelease(st.pass.Pkg, *metrics) }()
+	}
 	add := func(fn *ssa.Function, r release) bool {
 		metrics.work++
 		if stepCount(r.steps) > maxReleaseSteps {
