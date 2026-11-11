@@ -20,7 +20,8 @@
 //
 // Exit status: 0 when everything requested was done (a file that needs no
 // erasure counts as done); 1 when any file could not be erased or written, a
-// path could not be used, or the options are inconsistent; 2 for invalid flags.
+// path could not be used, or the options are inconsistent; 2 for invalid flags,
+// which includes -w or -o together with -l or -d (those only report).
 package main
 
 import (
@@ -85,7 +86,7 @@ erased successfully. Each file is replaced atomically (temp file and rename).
 
 Exit status: 0 everything requested was done; 1 a file could not be erased or
 written, a path could not be used, or the options conflict (with -w, nothing
-was written); 2 invalid flags.
+was written); 2 invalid flags, including -w or -o together with -l or -d.
 `)
 	}
 	if err := flags.Parse(args); err != nil {
@@ -98,6 +99,22 @@ was written); 2 invalid flags.
 	if o.write && o.outPath != "" {
 		o.errorf("error: cannot use both -w and -o")
 		return 1
+	}
+	// -l and -d only report; -w and -o say where a result goes. Taken together they used to report
+	// and write nothing (and -o was ignored), which looks like success, so they are invalid flags.
+	for _, report := range []struct {
+		on   bool
+		name string
+	}{{o.list, "-l"}, {o.diff, "-d"}} {
+		for _, dest := range []struct {
+			on   bool
+			name string
+		}{{o.write, "-w"}, {o.outPath != "", "-o"}} {
+			if report.on && dest.on {
+				o.errorf("error: cannot use %s with %s: %s only reports and writes nothing", dest.name, report.name, report.name)
+				return 2
+			}
+		}
 	}
 
 	rest := flags.Args()
@@ -345,7 +362,14 @@ func (o *options) emit(name string, src, out []byte) error {
 	return err
 }
 
-func (o *options) processStream() error {
+// processStream erases standard input. A panic while erasing becomes an error (exit 1), as it does
+// for a file: left alone it would unwind past run and exit 2, the status for invalid flags.
+func (o *options) processStream() (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("internal error while erasing standard input (nothing was written): %v", p)
+		}
+	}()
 	src, err := io.ReadAll(o.stdin)
 	if err != nil {
 		return fmt.Errorf("reading input: %w", err)
@@ -536,9 +560,39 @@ func writeAtomic(path string, data []byte, mode fs.FileMode) (err error) {
 	return os.Rename(tmp.Name(), path)
 }
 
+// span is a byte range of the source to replace. A directive comment that shares its line with
+// code is a block comment between two tokens (inline) or a line comment at the end of one; deleting
+// an inline block comment outright could join the tokens on either side (`return /*gosree:mut*/x`
+// would become `returnx`), so its replacement is decided once neighbouring spans are merged.
 type span struct {
-	start int
-	end   int
+	start, end int
+	inline     bool // a block comment with code on its line: replaced by repl, or by a separator
+	multiline  bool // an inline comment containing a newline, which the compiler reads as one
+	repl       string
+}
+
+func isBlank(b byte) bool { return b == ' ' || b == '\t' || b == '\n' || b == '\r' }
+
+// resolveInline fixes the replacement of an inline block comment from the bytes around it, so that
+// the token before and the token after stay apart. A comment that held a newline keeps one (a
+// newline after a statement's last token is a semicolon to the compiler). Otherwise, when blank
+// space follows, the comment goes with one blank before it; when code follows directly, the
+// comment is replaced by a single space unless a blank already precedes it.
+func (sp *span) resolveInline(src []byte) {
+	next := byte('\n')
+	if sp.end < len(src) {
+		next = src[sp.end]
+	}
+	switch {
+	case sp.multiline:
+		sp.repl = "\n"
+	case isBlank(next):
+		if sp.start > 0 && (src[sp.start-1] == ' ' || src[sp.start-1] == '\t') {
+			sp.start--
+		}
+	case sp.start > 0 && !isBlank(src[sp.start-1]):
+		sp.repl = " "
+	}
 }
 
 // isDirective reports whether text is a //gosree: or /*gosree: directive comment.
@@ -595,16 +649,15 @@ func stripDirectives(src []byte) []byte {
 					start = lineStart
 					end = lineEnd
 				} else if isBlock {
-					if start > 0 && (src[start-1] == ' ' || src[start-1] == '\t') {
-						start--
-					}
+					spans = append(spans, span{start: start, end: end, inline: true, multiline: bytes.IndexByte(src[start:end], '\n') >= 0})
+					continue
 				} else {
 					// Inline line comment
 					for start > lineStart && (src[start-1] == ' ' || src[start-1] == '\t') {
 						start--
 					}
 				}
-				spans = append(spans, span{start, end})
+				spans = append(spans, span{start: start, end: end})
 			}
 		}
 	}
@@ -631,21 +684,32 @@ func stripDirectives(src []byte) []byte {
 			if s.end > last.end {
 				last.end = s.end
 			}
+			last.inline = last.inline && s.inline
+			last.multiline = last.multiline || s.multiline
+			if !last.inline && last.multiline {
+				last.repl = "\n"
+			}
 		} else {
 			merged = append(merged, s)
 		}
 	}
 
-	res := make([]byte, len(src))
-	copy(res, src)
-	// Delete backwards to keep preceding offsets valid
-	for i := len(merged) - 1; i >= 0; i-- {
-		s := merged[i]
-		if s.start <= len(res) && s.end <= len(res) && s.start <= s.end {
-			res = append(res[:s.start], res[s.end:]...)
+	for i := range merged {
+		if merged[i].inline {
+			merged[i].resolveInline(src)
 		}
 	}
-	return res
+	res := make([]byte, 0, len(src))
+	at := 0
+	for _, sp := range merged {
+		if sp.start < at || sp.end > len(src) || sp.start > sp.end {
+			continue
+		}
+		res = append(res, src[at:sp.start]...)
+		res = append(res, sp.repl...)
+		at = sp.end
+	}
+	return append(res, src[at:]...)
 }
 
 func printUnifiedDiff(orig, newStr string) { writeUnifiedDiff(os.Stdout, orig, newStr) }
