@@ -194,6 +194,18 @@ Done:
      only if collections reached through aliases are per-request state. A census that walks types,
      not instances, cannot tell. The owner took the pre-registered branch: record the failure. A
      later ScholarLM pin may be measured only as a labelled second row.
+
+     Re-measured at the same pin (`bb60b53`) on 2026-11-11, after the census was made to follow
+     generic type arguments and the elements of arrays, slices, maps, channels and pointers (it had
+     missed `Box[B]`, `[]*B` and `map[K]*B` edges), and to give every type in a reference cycle one
+     class:
+     - The frozen rule clears 1 of 324 hatches, not 2.
+     - Collections written after construction are in 240 of 244 big closures, so the failure
+       condition still holds.
+     - The refuter still does not fire (18 of 261).
+     - 264 of 324 hatches (81.5%) reach a post-construction write, against 257 (79.3%) before.
+
+     The 53.2% and 11.6% bounds were derived by hand from census v2 and have not been re-derived.
    - **B9:** `guarded_by` on 50 of the 51 mutex-protected package variables. SAFE006 went from 73 to
      23 and SAFE009 from 8 to 36, with the ratio unchanged at 72.5%. Of the 28 new SAFE009, 23 are
      values read under a lock that leave it, reported by design, and 5 are lockset false positives.
