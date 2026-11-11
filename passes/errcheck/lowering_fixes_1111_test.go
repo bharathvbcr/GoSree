@@ -19,3 +19,7 @@ func TestDeferredCloseOnImplicitReturn(t *testing.T) {
 func TestNilerrConcreteErrorPointerObserved(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errnilerrptr")
 }
+
+func TestSameLineFallbackDoesNotMisattribute(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errsameline")
+}
