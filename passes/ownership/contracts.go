@@ -182,6 +182,10 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 	var queue []*ssa.Function
 	enqueued := map[*ssa.Function]bool{}
 
+	// A value is muted only while every origin that reaches it is muted: a //gosree:unsafe on one
+	// Load never covers what another, unhatched Load reaches. An origin therefore changes at most
+	// once (muted to unmuted), so each (function, value) pair is queued at most twice and the
+	// worklist below terminates without a step cap.
 	add := func(fn *ssa.Function, v ssa.Value, orig sharedLoadOrigin) {
 		if fn == nil || v == nil || st.cls.Shareable(v.Type()) {
 			return
@@ -189,7 +193,7 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 		if shared[fn] == nil {
 			shared[fn] = map[ssa.Value]sharedLoadOrigin{}
 		}
-		if _, exists := shared[fn][v]; exists {
+		if prev, exists := shared[fn][v]; exists && (!prev.muted || orig.muted) {
 			return
 		}
 		shared[fn][v] = orig
@@ -224,22 +228,26 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 		return
 	}
 
+	// A line is reported once per mutedness, so a muted report made before an unmuted origin
+	// arrived does not swallow the unmuted one.
 	type lineKey struct {
-		file string
-		line int
+		file  string
+		line  int
+		muted bool
 	}
 	reported := map[lineKey]bool{}
-	once := func(ins ssa.Instruction) bool {
+	once := func(ins ssa.Instruction, muted bool) bool {
 		p := st.pass.Fset.Position(posOf(ins, ins))
-		if reported[lineKey{p.Filename, p.Line}] {
+		k := lineKey{p.Filename, p.Line, muted}
+		if reported[k] {
 			return false
 		}
-		reported[lineKey{p.Filename, p.Line}] = true
+		reported[k] = true
 		return true
 	}
 
 	emit := func(ins ssa.Instruction, orig sharedLoadOrigin, detail string) {
-		if !once(ins) {
+		if !once(ins, orig.muted) {
 			return
 		}
 		prevMuted, prevAt := st.muted, st.transferAt
@@ -252,7 +260,7 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 		}
 	}
 
-	for steps := 0; len(queue) > 0 && steps < 10000; steps++ {
+	for len(queue) > 0 {
 		fn := queue[0]
 		queue = queue[1:]
 		enqueued[fn] = false
