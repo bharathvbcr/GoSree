@@ -10,8 +10,8 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `6b12630` (no uncommitted checker edits) |
-| Checker fingerprint | `ff1a7c9fe5e0967a`: `bash tests/stress/fingerprint.sh` |
+| Git HEAD | `d87a17d` (no uncommitted checker edits) |
+| Checker fingerprint | `990800f814fac8d4`: `bash tests/stress/fingerprint.sh` |
 | Run | 2026-11-10: `go test ./...` with and without cgo, every package `ok`; the suites that ran are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
