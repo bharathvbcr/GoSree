@@ -248,6 +248,21 @@ func (fl *funcLowerer) rootSlot(v ssa.Value) uint32 {
 	return fl.slot(v)
 }
 
+// resourceSlot is the slot that tracks whether a closable resource has been written. Beyond
+// rootSlot's unification of loads from a local cell, every load through the same captured variable
+// (a pointer-typed *ssa.FreeVar) shares the FreeVar's slot, so a write through one load and a Close
+// through another meet on one slot. Only the monotone written flag uses it: a captured variable can
+// be reassigned by other code between loads, so nilness refinements must not flow across loads and
+// stay on rootSlot.
+func (fl *funcLowerer) resourceSlot(v ssa.Value) uint32 {
+	if load, ok := v.(*ssa.UnOp); ok && load.Op == token.MUL {
+		if fv, ok := load.X.(*ssa.FreeVar); ok {
+			return fl.slot(fv)
+		}
+	}
+	return fl.rootSlot(v)
+}
+
 func (fl *funcLowerer) mem2regErrSlot(v *types.Var) uint32 {
 	if s, ok := fl.mem2regErrSlots[v]; ok {
 		return s
@@ -796,6 +811,18 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 					})
 					fl.propagateBlankedMeta(alloc, x.Val)
 				} else {
+					if fv, ok := x.Addr.(*ssa.FreeVar); ok {
+						// Reassigning a captured variable replaces the resource that resourceSlot
+						// tracks: the new value starts read-only (a nil-source assign resets the
+						// written flag and touches no state a load's own slot carries).
+						ops = append(ops, gusseterr.OpIR{
+							Kind:    gusseterr.OpAssignSlot,
+							SiteID:  0,
+							SlotA:   fl.slot(fv),
+							SlotB:   gusseterr.NoneU32,
+							NilHint: gusseterr.AssignNilMayNil,
+						})
+					}
 					if isErrorInterface(x.Val.Type()) || len(fl.valErrVars[x.Val]) > 0 {
 						fl.emitObserveErr(&ops, x.Val)
 					} else {
@@ -1038,7 +1065,7 @@ func (fl *funcLowerer) lowerCall(
 		*ops = append(*ops, gusseterr.OpIR{
 			Kind:   gusseterr.OpMarkWritable,
 			SiteID: 0,
-			SlotA:  fl.rootSlot(recv),
+			SlotA:  fl.resourceSlot(recv),
 		})
 	}
 
@@ -1050,7 +1077,7 @@ func (fl *funcLowerer) lowerCall(
 			*ops = append(*ops, gusseterr.OpIR{
 				Kind:    gusseterr.OpUnhandledClose,
 				SiteID:  sid,
-				SlotA:   fl.rootSlot(recv),
+				SlotA:   fl.resourceSlot(recv),
 				IsDefer: false,
 			})
 		}
@@ -1268,7 +1295,7 @@ func (fl *funcLowerer) lowerDefer(
 			*ops = append(*ops, gusseterr.OpIR{
 				Kind:    gusseterr.OpUnhandledClose,
 				SiteID:  sid,
-				SlotA:   fl.rootSlot(recv),
+				SlotA:   fl.resourceSlot(recv),
 				IsDefer: true,
 			})
 		}
