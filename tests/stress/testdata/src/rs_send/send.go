@@ -38,9 +38,9 @@ func Publish() {
 	routes.Store(&m)
 	go func() {
 		r := *routes.Load()
-		r["child"] = 1
+		r["child"] = 1 // HIT(SAFE005): routes.Load() returns read-only shared memory
 	}()
-	m["parent"] = 2 // MISS(SAFE003): m was published by Store and the goroutine writes it through Load: concurrent map writes
+	m["parent"] = 2 // HIT(SAFE003): m was published by Store and the goroutine writes it through Load: concurrent map writes
 }
 
 // 4. *strings.Builder shared through a sync.Pool: Put then keep using it.
@@ -50,6 +50,6 @@ func Render(name string) string {
 	b := builders.Get().(*strings.Builder)
 	b.Reset()
 	builders.Put(b)
-	b.WriteString(name) // MISS(SAFE003): b was handed back to the pool, whose next Get may be on another goroutine
+	b.WriteString(name) // HIT(SAFE003): b was handed back to the pool, whose next Get may be on another goroutine
 	return b.String()
 }

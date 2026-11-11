@@ -30,17 +30,6 @@ import (
 	"time"
 )
 
-// vetKnownBug records a finding that is present today. It fails, asking for the assertion to be
-// flipped, once the behaviour is corrected (present == false).
-func vetKnownBug(t *testing.T, id, what string, present bool) {
-	t.Helper()
-	if present {
-		t.Logf("KNOWN BUG %s (still present): %s", id, what)
-		return
-	}
-	t.Errorf("%s appears fixed: flip this assertion (%s)", id, what)
-}
-
 // vetRepoRoot is the repository root.
 func vetRepoRoot(t *testing.T) string {
 	t.Helper()
@@ -503,20 +492,22 @@ func TestVetParity(t *testing.T) {
 	}
 
 	// A diagnostic must carry a position: one without names no file, cannot be suppressed by a
-	// //gosree:unsafe scope, and cannot be reviewed.
+	// //gosree:unsafe scope, and cannot be reviewed. Regression lock for RB-NOPOS.
 	noPos := vetFilter(aFind, func(f vetFinding) bool { return f.line == 0 })
-	vetKnownBug(t, "RB-NOPOS", "BORROW004 is reported with no position (posn \"-\") for the Return of the recover block of a function with a defer:\n"+vetDump(noPos), len(noPos) > 0)
+	if len(noPos) > 0 {
+		t.Errorf("RB-NOPOS regression: diagnostics reported with no position:\n%s", vetDump(noPos))
+	}
 
-	// Multiplicity: standalone -json prints a package's findings once for the package and again for
-	// its test variant ("vetfacts/b" and "vetfacts/b [vetfacts/b.test]"); go vet prints them once. A
-	// consumer counting JSON findings counts them twice (text mode de-duplicates, TestVetCLIContract).
+	// Multiplicity: standalone -json and go vet -json must each report every finding once (de-duplicating
+	// a package against its in-package test variant). Regression lock for RB-JSONDUP.
 	aDup := vetFilter(aFind, func(f vetFinding) bool { return aFind[f] > 1 })
 	vDup := vetFilter(vFind, func(f vetFinding) bool { return vFind[f] > 1 })
 	if len(vDup) > 0 {
 		t.Errorf("go vet reports findings more than once:\n%s", vetDump(vDup))
 	}
-	vetKnownBug(t, "RB-JSONDUP", fmt.Sprintf("standalone -json reports %d findings twice (package and its test variant), go vet once:\n%s", len(aDup), vetDump(aDup)),
-		len(aDup) > 0)
+	if len(aDup) > 0 {
+		t.Errorf("RB-JSONDUP regression: standalone -json reports %d findings more than once:\n%s", len(aDup), vetDump(aDup))
+	}
 	t.Logf("standalone findings:\n%s", vetDump(aFind))
 }
 
@@ -687,9 +678,11 @@ func TestVetCLIContract(t *testing.T) {
 		t.Errorf("-test=false (%d findings) should drop the test files' findings (-test=true: %d)", a, b)
 	}
 
-	// The position-less BORROW004 prints as "-: ..." in both drivers.
+	// Regression lock for RB-NOPOS: neither driver may print a position-less "-: BORROW004" line.
 	for _, name := range []string{"gosree nopos text", "vet nopos text"} {
-		vetKnownBug(t, "RB-NOPOS", name+" prints a diagnostic with no file position", strings.Contains(got[name].stderr, "\n-: BORROW004") || strings.HasPrefix(got[name].stderr, "-: BORROW004"))
+		if strings.Contains(got[name].stderr, "\n-: BORROW004") || strings.HasPrefix(got[name].stderr, "-: BORROW004") {
+			t.Errorf("RB-NOPOS regression: %s prints a diagnostic with no file position:\n%s", name, got[name].stderr)
+		}
 	}
 }
 
@@ -769,9 +762,11 @@ func TestVetModuleGoVersion(t *testing.T) {
 	if has("1.27", 9, "SAFE003: variable i") || has("1.27", 20, "SAFE003: variable j") {
 		t.Errorf("go1.27 module: per-iteration loop variables reported as shared:\n%s", vetDump(findings["1.27"]))
 	}
-	// go1.27 FP: the go1.22 loop copies i into the next iteration's variable (a read of the captured
-	// one) before incrementing the copy; the read is reported as a use after the capture.
-	vetKnownBug(t, "RB-LOOPCOPY", "go1.22+ per-iteration copy of a 3-clause loop variable is reported as SAFE003 at the loop header", has("1.27", 9, "SAFE003: this value is used after it was captured by a goroutine"))
+	// Regression lock for RB-LOOPCOPY: the go1.22+ per-iteration copy of a 3-clause loop variable
+	// must not be reported as a use-after-capture at the loop header.
+	if has("1.27", 9, "SAFE003: this value is used after it was captured by a goroutine") {
+		t.Errorf("RB-LOOPCOPY regression: go1.22+ per-iteration copy of a 3-clause loop variable reported as SAFE003:\n%s", vetDump(findings["1.27"]))
+	}
 }
 
 func vetExpectCode(t *testing.T, got map[string]vetResult, name string, want int) {

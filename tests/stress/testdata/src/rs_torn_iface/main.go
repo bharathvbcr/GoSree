@@ -56,14 +56,14 @@ var (
 func setCompression(on bool) {
 	r := active.Load()
 	if on {
-		r.codec = gzip // MISS(NORULE): r came out of a shared cell; this goroutine does not own it
+		r.codec = gzip // HIT(SAFE005): r came out of a shared cell; this goroutine does not own it
 	} else {
-		r.codec = plain // MISS(NORULE): the same write; requests call through the field concurrently
+		r.codec = plain // HIT(SAFE005): the same write; requests call through the field concurrently
 	}
 }
 
 func handle() {
-	active.Load().codec.Check() // MISS(NORULE): an unsynchronised read of a field another goroutine writes
+	active.Load().codec.Check() // read-only under \imm; setCompression's writes above are rejected by SAFE005
 }
 
 func main() {

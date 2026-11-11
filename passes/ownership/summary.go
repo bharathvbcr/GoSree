@@ -2,6 +2,8 @@ package ownership
 
 import (
 	"cmp"
+	"encoding/binary"
+	"errors"
 	"go/types"
 	"slices"
 	"strings"
@@ -46,6 +48,158 @@ func (*FuncFact) AFact() {}
 
 func (f *FuncFact) String() string { return "ownership summary" }
 
+func appendBoolBits(buf []byte, xs []bool) []byte {
+	buf = binary.AppendUvarint(buf, uint64(len(xs)))
+	if len(xs) == 0 {
+		return buf
+	}
+	nBytes := (len(xs) + 7) / 8
+	start := len(buf)
+	buf = append(buf, make([]byte, nBytes)...)
+	for i, v := range xs {
+		if v {
+			buf[start+i/8] |= 1 << (uint(i) & 7)
+		}
+	}
+	return buf
+}
+
+func readBoolBits(data []byte) ([]bool, []byte, error) {
+	n, read := binary.Uvarint(data)
+	if read <= 0 || n > 1<<20 {
+		return nil, nil, errors.New("corrupt FuncFact bool slice length")
+	}
+	data = data[read:]
+	if n == 0 {
+		return nil, data, nil
+	}
+	nBytes := int((n + 7) / 8)
+	if len(data) < nBytes {
+		return nil, nil, errors.New("truncated FuncFact bool slice")
+	}
+	out := make([]bool, int(n))
+	for i := range out {
+		out[i] = (data[i/8] & (1 << (uint(i) & 7))) != 0
+	}
+	return out, data[nBytes:], nil
+}
+
+// GobEncode serialises FuncFact into a compact reflection-free binary payload.
+func (f *FuncFact) GobEncode() ([]byte, error) {
+	var flags byte
+	if f.Fresh {
+		flags |= 1 << 0
+	}
+	if f.Unknown {
+		flags |= 1 << 1
+	}
+	buf := make([]byte, 0, 16+len(f.Links)*8+len(f.Acquires)*12)
+	buf = append(buf, flags)
+	buf = appendBoolBits(buf, f.Leaks)
+	buf = appendBoolBits(buf, f.Iso)
+	buf = appendBoolBits(buf, f.Spawns)
+	buf = appendBoolBits(buf, f.FreshResult)
+	buf = appendBoolBits(buf, f.Writes)
+	buf = binary.AppendUvarint(buf, uint64(len(f.Links)))
+	for _, l := range f.Links {
+		buf = binary.AppendVarint(buf, int64(l.A))
+		buf = binary.AppendVarint(buf, int64(l.DepthA))
+		buf = binary.AppendVarint(buf, int64(l.B))
+		buf = binary.AppendVarint(buf, int64(l.DepthB))
+	}
+	buf = binary.AppendUvarint(buf, uint64(len(f.Acquires)))
+	for _, a := range f.Acquires {
+		buf = binary.AppendVarint(buf, int64(a.Param))
+		buf = binary.AppendVarint(buf, int64(a.Free))
+		buf = binary.AppendUvarint(buf, uint64(len(a.Steps)))
+		buf = append(buf, a.Steps...)
+		buf = append(buf, byte(a.Mode))
+	}
+	return buf, nil
+}
+
+// GobDecode deserialises a compact binary FuncFact payload.
+func (f *FuncFact) GobDecode(data []byte) error {
+	if len(data) < 1 {
+		return errors.New("empty FuncFact payload")
+	}
+	flags := data[0]
+	f.Fresh = (flags & (1 << 0)) != 0
+	f.Unknown = (flags & (1 << 1)) != 0
+	rest := data[1:]
+	var err error
+	if f.Leaks, rest, err = readBoolBits(rest); err != nil {
+		return err
+	}
+	if f.Iso, rest, err = readBoolBits(rest); err != nil {
+		return err
+	}
+	if f.Spawns, rest, err = readBoolBits(rest); err != nil {
+		return err
+	}
+	if f.FreshResult, rest, err = readBoolBits(rest); err != nil {
+		return err
+	}
+	if f.Writes, rest, err = readBoolBits(rest); err != nil {
+		return err
+	}
+	nLinks, r := binary.Uvarint(rest)
+	if r <= 0 || nLinks > 1<<20 {
+		return errors.New("corrupt FuncFact links length")
+	}
+	rest = rest[r:]
+	if nLinks > 0 {
+		f.Links = make([]Link, int(nLinks))
+		for i := range f.Links {
+			var vals [4]int64
+			for k := range 4 {
+				v, nr := binary.Varint(rest)
+				if nr <= 0 {
+					return errors.New("truncated FuncFact link")
+				}
+				vals[k] = v
+				rest = rest[nr:]
+			}
+			f.Links[i] = Link{A: int(vals[0]), DepthA: int(vals[1]), B: int(vals[2]), DepthB: int(vals[3])}
+		}
+	} else {
+		f.Links = nil
+	}
+	nAcq, r := binary.Uvarint(rest)
+	if r <= 0 || nAcq > 1<<20 {
+		return errors.New("corrupt FuncFact acquires length")
+	}
+	rest = rest[r:]
+	if nAcq > 0 {
+		f.Acquires = make([]acquire, int(nAcq))
+		for i := range f.Acquires {
+			param, nr := binary.Varint(rest)
+			if nr <= 0 {
+				return errors.New("truncated FuncFact acquire param")
+			}
+			rest = rest[nr:]
+			free, nr := binary.Varint(rest)
+			if nr <= 0 {
+				return errors.New("truncated FuncFact acquire free")
+			}
+			rest = rest[nr:]
+			sLen, nr := binary.Uvarint(rest)
+			if nr <= 0 || int(sLen) > len(rest)-nr-1 {
+				return errors.New("truncated FuncFact acquire steps")
+			}
+			rest = rest[nr:]
+			steps := string(rest[:sLen])
+			rest = rest[sLen:]
+			mode := lockMode(rest[0])
+			rest = rest[1:]
+			f.Acquires[i] = acquire{Param: int(param), Free: int(free), Steps: steps, Mode: mode}
+		}
+	} else {
+		f.Acquires = nil
+	}
+	return nil
+}
+
 // ImmFact marks a named type whose //gosree:imm annotation passed validation.
 type ImmFact struct{ Imm bool }
 
@@ -53,6 +207,21 @@ type ImmFact struct{ Imm bool }
 func (*ImmFact) AFact() {}
 
 func (f *ImmFact) String() string { return "imm" }
+
+func (f *ImmFact) GobEncode() ([]byte, error) {
+	if f.Imm {
+		return []byte{1}, nil
+	}
+	return []byte{0}, nil
+}
+
+func (f *ImmFact) GobDecode(data []byte) error {
+	if len(data) != 1 {
+		return errors.New("invalid ImmFact payload")
+	}
+	f.Imm = data[0] != 0
+	return nil
+}
 
 type summary struct {
 	leakParam  []bool
@@ -176,6 +345,15 @@ func (st *state) summary(fn *ssa.Function) *summary {
 	}
 	var f FuncFact
 	if !st.pass.ImportObjectFact(obj, &f) || f.Unknown {
+		if c, ok := capContracts[obj.FullName()]; ok && c.freshResult {
+			leaks := make([]bool, kinds.Params(obj))
+			writes := make([]bool, len(leaks))
+			for i := range leaks {
+				leaks[i] = true
+				writes[i] = true
+			}
+			return &summary{leakParam: leaks, writeParam: writes, fresh: true}
+		}
 		if obj.Pkg().Path() == atomicPkg {
 			return atomicSummary(kinds.Params(obj))
 		}
@@ -190,6 +368,14 @@ func (st *state) summary(fn *ssa.Function) *summary {
 		freshResult: f.FreshResult,
 		links:       f.Links,
 		acquires:    f.Acquires,
+	}
+	if c, ok := capContracts[obj.FullName()]; ok && c.freshResult {
+		s.fresh = true
+		freshResult := make([]bool, len(f.FreshResult))
+		for i := range freshResult {
+			freshResult[i] = true
+		}
+		s.freshResult = freshResult
 	}
 	if obj.Pkg().Path() == atomicPkg {
 		s.writeParam = make([]bool, len(f.Writes))
@@ -412,24 +598,98 @@ func andInto(prev, next []bool) []bool {
 }
 
 // computeSummaries iterates to the greatest fixpoint: every function starts optimistic and only
-// ever becomes more pessimistic, so the loop terminates.
+// ever becomes more pessimistic, so the loop terminates. Functions are evaluated in bottom-up
+// post-order and re-queued along intra-package caller edges when a summary changes.
 func (st *state) computeSummaries(fns []*ssa.Function) {
+	inPkg := make(map[*ssa.Function]bool, len(fns))
 	for _, fn := range fns {
-		st.sums[fn] = optimistic(fn, st)
+		inPkg[fn] = true
+		if len(fn.Blocks) == 0 {
+			st.sums[fn] = pessimistic
+		} else {
+			st.sums[fn] = optimistic(fn, st)
+		}
 	}
-	for changed := true; changed; {
-		changed = false
-		for _, fn := range fns {
-			if len(fn.Blocks) == 0 {
-				st.sums[fn] = pessimistic
-				continue
-			}
-			next := summarise(fn, st.buildGraph(fn), st)
-			if !sameSummary(st.sums[fn], next) {
-				merged := mergePessimistic(st.sums[fn], next)
-				if !sameSummary(st.sums[fn], merged) {
-					changed = true
+	callees := make(map[*ssa.Function][]*ssa.Function, len(fns))
+	callers := make(map[*ssa.Function][]*ssa.Function, len(fns))
+	var opBuf [8]*ssa.Value
+	for _, fn := range fns {
+		if len(fn.Blocks) == 0 {
+			continue
+		}
+		seen := map[*ssa.Function]bool{fn: true}
+		for _, b := range fn.Blocks {
+			for _, ins := range b.Instrs {
+				for _, op := range ins.Operands(opBuf[:0]) {
+					if op == nil {
+						continue
+					}
+					var target *ssa.Function
+					switch x := (*op).(type) {
+					case *ssa.Function:
+						target = x
+					case *ssa.MakeClosure:
+						target, _ = x.Fn.(*ssa.Function)
+					}
+					if target != nil && strings.HasPrefix(target.Synthetic, "bound method wrapper") {
+						if m, ok := target.Object().(*types.Func); ok && !types.IsInterface(m.Signature().Recv().Type()) {
+							target = target.Prog.FuncValue(m)
+						}
+					}
+					if target != nil && target.Origin() != nil {
+						target = target.Origin()
+					}
+					if target != nil && inPkg[target] && !seen[target] {
+						seen[target] = true
+						callees[fn] = append(callees[fn], target)
+						callers[target] = append(callers[target], fn)
+					}
 				}
+			}
+		}
+	}
+
+	order := make([]*ssa.Function, 0, len(fns))
+	visited := make(map[*ssa.Function]bool, len(fns))
+	var postOrder func(fn *ssa.Function)
+	postOrder = func(fn *ssa.Function) {
+		if visited[fn] {
+			return
+		}
+		visited[fn] = true
+		for _, callee := range callees[fn] {
+			postOrder(callee)
+		}
+		if len(fn.Blocks) > 0 {
+			order = append(order, fn)
+		}
+	}
+	for _, fn := range fns {
+		postOrder(fn)
+	}
+
+	inQueue := make(map[*ssa.Function]bool, len(order))
+	queue := make([]*ssa.Function, len(order))
+	copy(queue, order)
+	for _, fn := range queue {
+		inQueue[fn] = true
+	}
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		delete(inQueue, fn)
+		next := summarise(fn, st.buildGraph(fn), st)
+		if !sameSummary(st.sums[fn], next) {
+			merged := mergePessimistic(st.sums[fn], next)
+			if !sameSummary(st.sums[fn], merged) {
+				st.sums[fn] = merged
+				for _, caller := range callers[fn] {
+					if !inQueue[caller] {
+						inQueue[caller] = true
+						queue = append(queue, caller)
+					}
+				}
+			} else {
 				st.sums[fn] = merged
 			}
 		}

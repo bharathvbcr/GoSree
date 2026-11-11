@@ -22,6 +22,7 @@ flowchart TD
     Boundary --> OneShot["2. Asynchronous One-Shot Callbacks\n(time.AfterFunc, context.AfterFunc)"]
     Boundary --> Structured["3. Structured Concurrency Groups\n(sync.WaitGroup.Go, errgroup.Group.Go/TryGo)"]
     Boundary --> MultiInvoke["4. Concurrently-Executing Handlers\n(net/http Handle and HandleFunc)"]
+    Boundary --> Containers["5. Concurrent Stdlib Containers\n(atomic.Pointer, sync.Map, sync.Pool, context)"]
 
     GoStmt --> TransferRules["Enforce Transfer & Move Rules\n(SAFE002, SAFE003, SAFE004, CAP003)"]
     GoStmt --> ForkJoin["Eligible for Fork-Join Recovery\n(WaitGroup.Wait / channel receive)"]
@@ -29,6 +30,7 @@ flowchart TD
     OneShot -.->|Channel hand-back or Stop| ForkJoin
     Structured --> ForkJoin
     MultiInvoke --> SelfRace["Enforce Handler Self-Race Rules\n(SAFE008 - No shared writes without mutex)"]
+    Containers --> TransferRules
 ```
 
 ### 1.1 Direct Goroutine Statements (`go`)
@@ -45,6 +47,15 @@ Functions like `time.AfterFunc(d, fn)` and `context.AfterFunc(ctx, fn)` execute 
 
 ### 1.4 Concurrently-Executing Handlers (`net/http`)
 HTTP handlers registered with `http.HandleFunc` or `http.Handle`, or with the same methods on a `*http.ServeMux`, run concurrently with themselves on every incoming HTTP request. They never own what they capture, and writing shared state without a lock triggers `SAFE008`. The handler is found even when it is built indirectly: a registration whose argument is the result of a factory or middleware call is followed to the function that call returns, or to a handler passed through it (`handlerRoots` in [`passes/ownership/handlerwrite.go`](../passes/ownership/handlerwrite.go)). Closures the handler hands to a callee are followed too, so a write made inside such a closure to memory the handler shares is still reported (`checkHandlerWrites`). Routers outside `net/http` are not in the spawner table.
+
+### 1.5 Concurrent Standard-Library Containers (`capContracts`)
+Standard-library concurrent containers and publication boundaries ([`passes/ownership/contracts.go`](../passes/ownership/contracts.go)) are modelled as capability boundaries:
+- `(*sync/atomic.Pointer[T]).Store`, `Swap`, `CompareAndSwap`: Storing into an atomic pointer moves affine `\iso` ownership from the publisher. Post-store reuse triggers `SAFE003`.
+- `(*sync/atomic.Pointer[T]).Load`: Loading from an atomic pointer yields shared read-only `\imm` memory; subsequent in-place field or slice mutation without a mutex triggers `SAFE005`.
+- `(*sync/atomic.Value).Store`, `Swap`, `CompareAndSwap` / `Load`: Same affine-store and immutable-load contract as `atomic.Pointer`.
+- `(*sync.Map).Store`, `LoadOrStore`, `Swap`, `CompareAndSwap`: Storing moves non-shareable keys and values into the map.
+- `(*sync.Pool).Put` / `Get`: `Put` consumes ownership; `Get` yields fresh `\iso` unique ownership.
+- `context.WithValue`: Storing non-shareable pointers into a `Context` moves them into the shared context.
 
 ---
 

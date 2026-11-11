@@ -14,6 +14,7 @@ func TestPackageOf(t *testing.T) {
 		"(*bytes.Buffer).Write":                  "bytes",
 		"(time.Time).Add":                        "time",
 		"(*golang.org/x/sync/errgroup.Group).Go": "golang.org/x/sync/errgroup",
+		"(*sync/atomic.Pointer[T]).Store":        "sync/atomic",
 		"gopkg.in/yaml.v3.Marshal":               "gopkg.in/yaml.v3",
 	} {
 		if got := PackageOf(name); got != want {

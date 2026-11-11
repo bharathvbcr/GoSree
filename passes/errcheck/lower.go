@@ -936,8 +936,6 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 					})
 				} else if isErrorInterface(x.X.Type()) || len(fl.valErrVars[x.X]) > 0 {
 					fl.emitObserveErr(&ops, x.X)
-				} else {
-					fl.emitUseCompanion(&ops, x.Pos(), x.X)
 				}
 				ops = append(ops, gusseterr.OpIR{
 					Kind:    gusseterr.OpAssignSlot,
@@ -1478,6 +1476,9 @@ func (fl *funcLowerer) emitUseCompanion(ops *[]gusseterr.OpIR, pos token.Pos, v 
 	}
 	if alloc, ok := v.(*ssa.Alloc); ok && fl.localCells[alloc] {
 		return
+	}
+	if !pos.IsValid() && v.Pos().IsValid() {
+		pos = v.Pos()
 	}
 	s := fl.slot(v)
 	fl.emitUseCompanionSlot(ops, pos, s, describeSSAVal(v))

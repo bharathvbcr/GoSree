@@ -24,6 +24,6 @@ func main() {
 		defer wg.Done()
 		ctx.Value(sessionKey{}).(*Session).Hits++
 	}()
-	s.Hits++ // MISS(SAFE003): the goroutine reaches s through ctx and writes it
+	s.Hits++ // HIT(SAFE003): the goroutine reaches s through ctx and writes it
 	wg.Wait()
 }

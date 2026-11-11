@@ -41,6 +41,7 @@ Every finding makes the `gosree` driver exit with status 3 (`cmd/gosree/prefligh
 ### Semantics
 `SAFE001` flags any operation that bypasses Go's type or memory safety:
 - `unsafe.Pointer`, `unsafe.Add`, `unsafe.Slice`, `unsafe.SliceData`, `unsafe.String`, `unsafe.StringData`, including via dot-import (`. "unsafe"`). `unsafe.Sizeof`, `Alignof` and `Offsetof` are compile-time constants and stay allowed.
+- Cross-package `unsafe.Pointer` exposure: exported type aliases of `unsafe.Pointer`, defined types whose underlying type is `unsafe.Pointer`, function parameters or return values carrying `unsafe.Pointer`, package variables exposing `unsafe.Pointer`, and map keys/values or interface method signatures that embed `unsafe.Pointer`.
 - Cgo invocations (`import "C"`). When the package is loaded, cgo has already replaced the import with generated files, so in a run against a cgo package the findings (`//go:linkname`, `//go:noescape`, functions without a body, `unsafe.Pointer`) are reported at positions inside cgo's generated files in the Go build cache, not at the `import "C"` line. The `cgo (import "C") bypasses Go's memory safety` message exists in `passes/unsafeban` but was not observed in this run.
 - Compiler directives that alter linkage or escape analysis (`//go:linkname`, `//go:noescape`).
 - Assembly functions declared without a Go body (`func asmFunc()`).
@@ -113,7 +114,7 @@ func Forward(ch chan *Job, j *Job) {
 ## SAFE003: Use After Move
 
 ### Semantics
-An owned value transferred to another goroutine (via `go`, channel send, or `//gosree:iso` call) has moved. Any subsequent read, write, or call on that value in the sender is rejected as use-after-move.
+An owned value transferred to another goroutine (via `go`, channel send, or `//gosree:iso` call) or published into a concurrent standard-library container (`(*sync/atomic.Pointer[T]).Store`, `Swap`, `CompareAndSwap`, `(*sync/atomic.Value).Store`, `(*sync.Map).Store`, `LoadOrStore`, `Swap`, `(*sync.Pool).Put`, or `context.WithValue`) has moved. Any subsequent read, write, or call on that value in the sender/publisher is rejected as use-after-move.
 
 > [!NOTE]
 > **Diagnostic Category: `SAFE003-forkjoin`**
@@ -197,6 +198,7 @@ Types declared `//gosree:imm` must be deeply immutable:
 - Field types must be pointer-free primitives, strings, channels of shareable types, or pointers to other verified `//gosree:imm` types.
 - Slices, maps, and interface fields are disallowed unless guarded by `//gosree:guarded_by`.
 - Values of an `imm` type are only written by their composite literal; any other field write is reported as `SAFE005`.
+- Memory loaded from concurrent containers (`(*sync/atomic.Pointer[T]).Load`, `(*sync/atomic.Value).Load`, `(*sync.Map).Load`) carries an `\imm` read-only capability: attempting to modify loaded fields, slice elements, or map entries without synchronization is reported as `SAFE005`.
 
 ### Failing Example
 ```go
@@ -360,6 +362,7 @@ Memory marked with `//gosree:guarded_by <mu>` may only be accessed while `<mu>` 
 - Writes require `mu.Lock()`.
 - Functions marked `//gosree:holds <mu>` must be invoked with `<mu>` held.
 - Unlocked references to non-shareable guarded memory must not escape the critical section.
+- Forward dataflow lockset analysis implements path-prefix widening (`maxReleaseSteps = 8`, `maxReleasesPerFn = 32`) and post-order DAG worklist iteration (`maxAcquireRounds = 16`), preventing exponential path blowups or infinite loops during self-hosting.
 
 ### Failing Example
 ```go
@@ -403,7 +406,7 @@ func (s *SafeMap) Get(key string) int {
 ### Semantics
 Second-class borrows (`cap.Mut[T]`, `cap.Ref[T]` and their `Mub`/`Rob` aliases, `//gosree:mub`, `//gosree:rob`) are strictly activation-frame scoped. Verified to be rejected:
 - Struct fields declared with a `cap.Mut`/`cap.Ref` type.
-- Package-level global variables.
+- Package-level global variables (including assignments inside package-level anonymous function literals).
 - Channel sends (`channel send cannot store second-class borrow`, reported together with `CAP003`).
 - Map stores (`map cannot store second-class borrow`).
 - A borrow placed in a composite literal such as `[]*int{p}` or `H{p: p}` (`borrow stored in struct field 'p' escapes stack frame`: the wording says "struct field" even for a slice literal).
@@ -446,6 +449,7 @@ func Process(val *int /*gosree:rob*/) int {
 Enforces the fundamental Rust borrowing rule using Non-Lexical Lifetimes (NLL):
 - Multiple simultaneous mutable borrows of the same allocation are rejected.
 - A mutable borrow cannot coexist with an active read-only borrow of the same allocation.
+- Flow-sensitive reachability tracking resolves borrow active ranges across sequential statements, same-line statements, loop back-edges, and backward `goto` jumps.
 
 ### Failing Example
 ```go

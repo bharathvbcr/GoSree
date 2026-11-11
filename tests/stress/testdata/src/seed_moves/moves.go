@@ -118,7 +118,7 @@ var published atomic.Pointer[Job]
 func publish() {
 	j := &Job{}
 	published.Store(j)
-	j.ID = 1 // MISS(SAFE003): j was published through atomic.Pointer.Store; any goroutine may load and use it
+	j.ID = 1 // HIT(SAFE003): j was published through atomic.Pointer.Store; any goroutine may load and use it
 }
 
 // 14. sync.Pool put then use.
@@ -127,7 +127,7 @@ var pool = sync.Pool{New: func() any { return &Job{} }}
 func poolUse() {
 	j := pool.Get().(*Job)
 	pool.Put(j)
-	j.ID = 1 // MISS(SAFE003): j was returned to the pool; another goroutine may Get it
+	j.ID = 1 // HIT(SAFE003): j was returned to the pool; another goroutine may Get it
 }
 
 // 15. loop: send in one iteration, use in the next.

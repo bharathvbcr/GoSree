@@ -90,7 +90,13 @@ func run(pass *analysis.Pass) (any, error) {
 	ix := pass.ResultOf[annot.Analyzer].(*annot.Index)
 	ssaRes := pass.ResultOf[buildssa.Analyzer].(*buildssa.SSA)
 
-	funcs := collectPackageFuncs(ssaRes.SrcFuncs)
+	var extraRoots []*ssa.Function
+	if ssaRes.Pkg != nil {
+		if pkgInit := ssaRes.Pkg.Func("init"); pkgInit != nil {
+			extraRoots = pkgInit.AnonFuncs
+		}
+	}
+	funcs := collectPackageFuncs(ssaRes.SrcFuncs, extraRoots...)
 	summary := &Summary{
 		FunctionsAnalyzed: len(funcs),
 		UsedRustGusset:    gusseterr.NativeActive(),
@@ -191,9 +197,9 @@ func run(pass *analysis.Pass) (any, error) {
 	return summary, nil
 }
 
-func collectPackageFuncs(roots []*ssa.Function) []*ssa.Function {
+func collectPackageFuncs(roots []*ssa.Function, extras ...*ssa.Function) []*ssa.Function {
 	var out []*ssa.Function
-	seen := make(map[*ssa.Function]bool, len(roots)*2)
+	seen := make(map[*ssa.Function]bool, (len(roots)+len(extras))*2)
 	var visit func(fn *ssa.Function)
 	visit = func(fn *ssa.Function) {
 		if fn == nil || seen[fn] {
@@ -206,6 +212,9 @@ func collectPackageFuncs(roots []*ssa.Function) []*ssa.Function {
 		}
 	}
 	for _, r := range roots {
+		visit(r)
+	}
+	for _, r := range extras {
 		visit(r)
 	}
 	return out

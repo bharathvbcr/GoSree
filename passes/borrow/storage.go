@@ -51,12 +51,39 @@ func CheckStorage(pass *analysis.Pass, ix *annot.Index, ssaProg *buildssa.SSA) {
 	sc.checkGlobalDeclarations()
 
 	// Phase 2: Function-level AST and SSA flow/escape checks
-	for _, fn := range sc.ssa.SrcFuncs {
+	for _, fn := range allPackageFuncs(sc.ssa) {
 		if len(fn.Blocks) == 0 {
 			continue
 		}
 		sc.checkFunctionStorage(fn)
 	}
+}
+
+func allPackageFuncs(ssaProg *buildssa.SSA) []*ssa.Function {
+	out := make([]*ssa.Function, 0, len(ssaProg.SrcFuncs)+4)
+	seen := make(map[*ssa.Function]bool, len(ssaProg.SrcFuncs)+4)
+	var add func(fn *ssa.Function)
+	add = func(fn *ssa.Function) {
+		if fn == nil || seen[fn] {
+			return
+		}
+		seen[fn] = true
+		out = append(out, fn)
+		for _, anon := range fn.AnonFuncs {
+			add(anon)
+		}
+	}
+	for _, fn := range ssaProg.SrcFuncs {
+		add(fn)
+	}
+	if ssaProg.Pkg != nil {
+		if pkgInit := ssaProg.Pkg.Func("init"); pkgInit != nil {
+			for _, anon := range pkgInit.AnonFuncs {
+				add(anon)
+			}
+		}
+	}
+	return out
 }
 
 func (sc *storageChecker) report(pos token.Pos, cat, msg string) {

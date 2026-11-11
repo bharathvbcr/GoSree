@@ -18,9 +18,10 @@ import (
 //
 // Initialisation is init, package variable initialisers, and init-only helpers: functions every
 // caller of which is initialisation and whose value is never taken.
-func (st *state) checkGlobals(fns []*ssa.Function) {
+func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 	initOnly := st.initFuncs(fns)
 	writes := map[*ssa.Global][]token.Pos{}
+	mutated := map[*ssa.Global]bool{}
 	for _, fn := range fns {
 		if initOnly[fn] {
 			continue
@@ -35,6 +36,7 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 				if !ok || g.Pkg != st.ssa.Pkg {
 					return
 				}
+				mutated[g] = true
 				if _, guarded := st.slotOf(addr); guarded {
 					return // SAFE009 checks guarded variables and fields at every access
 				}
@@ -52,6 +54,7 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 			if cc.IsInvoke() {
 				for _, v := range append([]ssa.Value{cc.Value}, cc.Args...) {
 					if g, ok := st.globalMutArg(v); ok {
+						mutated[g] = true
 						writes[g] = append(writes[g], posOf(ins, ins))
 					}
 				}
@@ -61,6 +64,7 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 			if callee == nil {
 				for _, v := range cc.Args {
 					if g, ok := st.globalMutArg(v); ok {
+						mutated[g] = true
 						writes[g] = append(writes[g], posOf(ins, ins))
 					}
 				}
@@ -78,11 +82,18 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 					continue
 				}
 				if g, ok := st.globalMutArg(a); ok {
+					mutated[g] = true
 					writes[g] = append(writes[g], posOf(ins, ins))
 				}
 			}
 		})
 	}
+	st.globalWrites = writes
+	st.mutatedGlobals = mutated
+}
+
+func (st *state) checkGlobals() {
+	writes := st.globalWrites
 	globals := make([]*ssa.Global, 0, len(writes))
 	for g := range writes {
 		globals = append(globals, g)
@@ -101,6 +112,66 @@ func (st *state) checkGlobals(fns []*ssa.Function) {
 	}
 }
 
+// isInitOnlyImmutableGlobal reports whether g is a package variable of this package proven to be
+// written only during package initialisation and unreachable for external mutation.
+func (st *state) isInitOnlyImmutableGlobal(g *ssa.Global) bool {
+	if g == nil || st.ssa == nil || g.Pkg != st.ssa.Pkg {
+		return false
+	}
+	if st.mutatedGlobals[g] || len(st.globalWrites[g]) > 0 {
+		return false
+	}
+	if _, guarded := st.slotOf(g); guarded {
+		return false
+	}
+	if token.IsExported(g.Name()) && (g.Pkg.Pkg == nil || g.Pkg.Pkg.Name() != "main") {
+		return false
+	}
+	return true
+}
+
+// directInitOnlyGlobal reports whether v is a direct read/projection of an init-only immutable
+// package variable (never passing through a local Alloc cell).
+func (st *state) directInitOnlyGlobal(v ssa.Value) bool {
+	for range 32 {
+		if v == nil {
+			return false
+		}
+		switch x := v.(type) {
+		case *ssa.Global:
+			return st.isInitOnlyImmutableGlobal(x)
+		case *ssa.UnOp:
+			if x.Op != token.MUL {
+				return false
+			}
+			v = x.X
+		case *ssa.FieldAddr:
+			v = x.X
+		case *ssa.IndexAddr:
+			v = x.X
+		case *ssa.Field:
+			v = x.X
+		case *ssa.Index:
+			v = x.X
+		case *ssa.Slice:
+			v = x.X
+		case *ssa.ChangeType:
+			v = x.X
+		case *ssa.Convert:
+			v = x.X
+		case *ssa.MakeInterface:
+			v = x.X
+		case *ssa.ChangeInterface:
+			v = x.X
+		case *ssa.TypeAssert:
+			v = x.X
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 // initFuncs returns the functions that run only synchronously during initialisation: top-level init
 // functions, the package initialiser, and functions/closures whose every caller is a synchronous
 // call or defer from one of those and whose value is never spawned or stored.
@@ -111,12 +182,15 @@ func (st *state) initFuncs(fns []*ssa.Function) map[*ssa.Function]bool {
 			out[fn] = true
 		}
 	}
+	scanFns := fns
 	if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil {
 		out[pkgInit] = true
+		scanFns = append(append([]*ssa.Function(nil), fns...), pkgInit)
 	}
 	callers := map[*ssa.Function][]*ssa.Function{}
 	taken := map[*ssa.Function]bool{}
-	for _, fn := range fns {
+	var opBuf [8]*ssa.Value
+	for _, fn := range scanFns {
 		forEachInstr(fn, func(ins ssa.Instruction) {
 			var static *ssa.Function
 			switch c := ins.(type) {
@@ -158,7 +232,7 @@ func (st *state) initFuncs(fns []*ssa.Function) map[*ssa.Function]bool {
 					}
 				}
 			}
-			for _, op := range ins.Operands(nil) {
+			for _, op := range ins.Operands(opBuf[:0]) {
 				if op == nil {
 					continue
 				}

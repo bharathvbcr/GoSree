@@ -59,9 +59,9 @@ const TransferRelated = "the transfer that causes this finding"
 
 // Analyzer is the ownership checker.
 var Analyzer = &analysis.Analyzer{
-	Name: "safeownership",
-	Doc:  "check moves of memory between goroutines, package-variable mutation, //gosree:imm types, handler writes, and borrow escapes (SAFE002-SAFE006, SAFE008, SAFE009, CAP003)",
-	Run:  run,
+	Name:      "safeownership",
+	Doc:       "check moves of memory between goroutines, package-variable mutation, //gosree:imm types, handler writes, and borrow escapes (SAFE002-SAFE006, SAFE008, SAFE009, CAP003)",
+	Run:       run,
 	Requires:  []*analysis.Analyzer{annot.Analyzer, buildssa.Analyzer},
 	FactTypes: []analysis.Fact{new(FuncFact), new(ImmFact)},
 	// Stats is returned so harnesses can count escape hatches without parsing output.
@@ -125,7 +125,10 @@ type state struct {
 	joinCache map[ssa.Instruction]map[ssa.Instruction]bool
 	// localGuards maps the cells of guarded local variables (their Alloc, and the free variables of
 	// closures that capture them) to their guard.
-	localGuards map[ssa.Value]localGuard
+	localGuards    map[ssa.Value]localGuard
+	guardSums      *guardState
+	globalWrites   map[*ssa.Global][]token.Pos
+	mutatedGlobals map[*ssa.Global]bool
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the
@@ -174,10 +177,11 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 	st.cls = st.newClassifier()
 
-	fns := st.ssa.SrcFuncs
+	fns := sourceFuncs(st.ssa)
 	st.localGuards = st.guardedCells(fns)
 	st.computeSummaries(fns)
 	st.exportFacts(fns)
+	st.collectGlobalMutations(fns)
 
 	for _, fn := range fns {
 		if len(fn.Blocks) == 0 {
@@ -187,7 +191,8 @@ func run(pass *analysis.Pass) (any, error) {
 		st.checkTransfers(g)
 		st.checkImmStores(fn)
 	}
-	st.checkGlobals(fns)
+	st.checkSharedLoadWrites(fns)
+	st.checkGlobals()
 	st.checkGuarded(fns)
 	return st.stats, nil
 }
@@ -202,18 +207,60 @@ func (st *state) newClassifier() *kinds.Classifier {
 	})
 }
 
+func sourceFuncs(ssaRes *buildssa.SSA) []*ssa.Function {
+	out := make([]*ssa.Function, 0, len(ssaRes.SrcFuncs)+4)
+	seen := make(map[*ssa.Function]bool, len(ssaRes.SrcFuncs)+4)
+	var add func(fn *ssa.Function)
+	add = func(fn *ssa.Function) {
+		if fn == nil || seen[fn] {
+			return
+		}
+		seen[fn] = true
+		out = append(out, fn)
+		for _, anon := range fn.AnonFuncs {
+			add(anon)
+		}
+	}
+	for _, fn := range ssaRes.SrcFuncs {
+		add(fn)
+	}
+	if pkgInit := ssaRes.Pkg.Func("init"); pkgInit != nil {
+		for _, anon := range pkgInit.AnonFuncs {
+			add(anon)
+		}
+	}
+	return out
+}
+
+func (st *state) ensureGuardSummaries(fns []*ssa.Function) *guardState {
+	if st.guardSums != nil {
+		return st.guardSums
+	}
+	gs := &guardState{
+		releases: st.releaseSummaries(fns),
+		before:   map[*ssa.Function]map[ssa.Instruction]lockset{},
+		initOnly: st.initFuncs(fns),
+		visiting: map[*ssa.Function]bool{},
+	}
+	st.acquireSummaries(gs, fns)
+	st.guardSums = gs
+	return gs
+}
+
 func (st *state) exportFacts(fns []*ssa.Function) {
 	if len(st.pass.Analyzer.FactTypes) == 0 {
 		return
 	}
-	var acq map[*ssa.Function][]acquire
-	if st.hasLockOps(fns) {
-		gs := &guardState{
-			releases: st.releaseSummaries(fns),
-			before:   map[*ssa.Function]map[ssa.Instruction]lockset{},
-			visiting: map[*ssa.Function]bool{},
+	hasExported := false
+	for _, fn := range fns {
+		if obj, ok := fn.Object().(*types.Func); ok && fn.Synthetic == "" && obj.Pkg() == st.pass.Pkg && obj.Exported() {
+			hasExported = true
+			break
 		}
-		acq = st.acquireSummaries(gs, fns)
+	}
+	var acq map[*ssa.Function][]acquire
+	if hasExported && st.hasLockOps(fns) {
+		acq = st.ensureGuardSummaries(fns).acquires
 	}
 	for _, fn := range fns {
 		obj, ok := fn.Object().(*types.Func)

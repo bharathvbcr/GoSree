@@ -57,7 +57,7 @@ func ctxValue() {
 	j := &Job{}
 	ctx := context.WithValue(context.Background(), key{}, j)
 	go func() { ctx.Value(key{}).(*Job).ID++ }()
-	j.ID = 1 // MISS(SAFE003): the goroutine reaches j through ctx and writes it
+	j.ID = 1 // HIT(SAFE003): the goroutine reaches j through ctx and writes it
 }
 
 // control: the same pointer captured directly.

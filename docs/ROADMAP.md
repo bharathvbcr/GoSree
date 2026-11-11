@@ -1,16 +1,26 @@
 # Roadmap
 
+[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Error Discipline](ERROR_DISCIPLINE.md) | [Tooling](TOOLING_AND_ERASURE.md) | [Roadmap](ROADMAP.md)
+
+---
+
 The README and `docs/` are the design of record: GoSree checks memory where it crosses goroutines, and leaves
 aliasing within one goroutine alone. In build order:
 
 Done:
 - callback functions as goroutine boundaries;
-- SAFE001 for dot imports of `unsafe` and functions without a Go body;
+- SAFE001 for dot imports of `unsafe`, cross-package `unsafe.Pointer` laundering, and functions without a Go body;
 - SAFE008 for handlers that write shared memory;
 - the error-discipline pass: ERR001-ERR005 (`safeerr`), solved by a Rust solver hosted in-process over
   Gusset, with a pure-Go oracle that must return the same bytes ([Error Discipline](ERROR_DISCIPLINE.md));
 - one `cmd/gosree` driver, whose preflight sets the exit status (0 clean, 1 no verdict, 2 usage,
   3 findings), refuses `-fix` and `-diff`, and hands `-tags` to the go command;
+- standard-library concurrent container capability contracts (`capContracts`: `atomic.Pointer`, `atomic.Value`,
+  `sync.Map`, `sync.Pool`, `context.WithValue`), preventing publication races and torn-header corruption statically;
+- lockset fixpoint convergence with path-prefix widening and DAG post-order worklist, eliminating self-hosting CPU hangs;
+- alias graph union-by-size and deterministic SSA value tie-breaking (`compareSSAValOrder`), resolving `RB-ORDER`;
+- NLL same-line, loop-carried back-edge, and backward-`goto` borrow tracking;
+- translation validation via `cmd/gosree-erase -verify`, and Featherweight GoSree formalization (`specs/FeatherweightGoSree.lean`, `internal/formal`);
 - items 1, 2 and 3 below;
 - item 4, closed with the reference service failing the thesis at its pin.
 

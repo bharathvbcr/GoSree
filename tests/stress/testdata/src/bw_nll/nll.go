@@ -15,15 +15,13 @@ func straightConflict() {
 
 // 2. loop back-edge in a single basic block: b1 is used at the top of every iteration, b2 is
 // created after that use in the same block. b1 is used again on the next iteration, so it is live
-// across the whole loop and b2 overlaps it (Rust E0499). isBorrowActiveAt scans the rest of b2's
-// block and then BFSes successors with the start block pre-marked visited, so the use of b1 at
-// the top of the same block, reached only around the back edge, is never seen.
+// across the whole loop and b2 overlaps it (Rust E0499).
 func loopBackEdgeSameBlock(n int) {
 	x := 0
 	b1 := &x //gosree:mut
 	for i := 0; i < n; i++ {
 		*b1 = i
-		b2 := &x //gosree:mut // MISS(BORROW002): b1 is used on the next iteration, so it is live here; docs/BORROW_CHECKING_AND_NLL.md §3 defines Live(b) by any path to a use, back edges included
+		b2 := &x //gosree:mut // HIT(BORROW002)
 		*b2 = i
 	}
 }
@@ -99,15 +97,15 @@ func pointerToBorrow() {
 	**pb = 2
 }
 
-// 9. laundering the alias through a store: the borrow is copied into c by `*pc = b1`, which the
-// alias tracker (assignments with an identifier LHS only) never sees. c then outlives b2.
+// 9. laundering the alias through a store: the borrow is copied into c by `*pc = b1`, and c then
+// outlives b2.
 func storeLaunder() {
 	x := 0
 	b1 := &x //gosree:mut
 	var c *int
 	pc := &c
 	*pc = b1 // HIT(BORROW001)
-	b2 := &x //gosree:mut // MISS(BORROW002): c holds b1 (written through *pc) and is used below, so b1 is live; docs/BORROW_CHECKING_AND_NLL.md §3 counts "any value derived from it"
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = 1
 	*c = 2
 }
@@ -133,7 +131,7 @@ func gotoLoop(n int) {
 	i := 0
 again:
 	*b1 = i
-	b2 := &x //gosree:mut // MISS(BORROW002): the goto back edge reaches `*b1 = i` again, so b1 is live here (same same-block back-edge blind spot as loopBackEdgeSameBlock)
+	b2 := &x //gosree:mut // HIT(BORROW002)
 	*b2 = i
 	i++
 	if i < n {

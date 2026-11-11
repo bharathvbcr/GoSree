@@ -17,7 +17,7 @@ var sessions atomic.Pointer[map[string]int]
 
 func touch(id int) {
 	m := *sessions.Load()
-	m[strconv.Itoa(id%64)] = id // MISS(NORULE): a write to a map other goroutines write; Load hands it out as if owned
+	m[strconv.Itoa(id%64)] = id // HIT(SAFE005): a write to a map other goroutines write; Load yields read-only shared memory
 }
 
 func main() {
@@ -30,7 +30,7 @@ func main() {
 	}()
 	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
 		for i := 0; i < 1000; i++ {
-			m[strconv.Itoa(i%64)] = -i // MISS(SAFE003): m was published by Store and is written by the worker
+			m[strconv.Itoa(i%64)] = -i // HIT(SAFE003): m was published by Store and is written by the worker
 		}
 	}
 	// The runtime's map-write check is best effort: reaching the deadline means it never fired.

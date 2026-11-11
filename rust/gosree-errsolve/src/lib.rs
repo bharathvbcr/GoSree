@@ -679,18 +679,18 @@ impl ErrVar {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Writable {
+enum WriteMode {
     Bot,
     ReadOnly,
     Writable,
 }
 
-impl Writable {
+impl WriteMode {
     fn join(self, other: Self) -> Self {
         match (self, other) {
-            (Writable::Bot, x) | (x, Writable::Bot) => x,
-            (Writable::Writable, _) | (_, Writable::Writable) => Writable::Writable,
-            (Writable::ReadOnly, Writable::ReadOnly) => Writable::ReadOnly,
+            (WriteMode::Bot, x) | (x, WriteMode::Bot) => x,
+            (WriteMode::Writable, _) | (_, WriteMode::Writable) => WriteMode::Writable,
+            (WriteMode::ReadOnly, WriteMode::ReadOnly) => WriteMode::ReadOnly,
         }
     }
 }
@@ -719,7 +719,7 @@ struct SlotCell {
     origin: Origin,
     nil: NilVal,
     err_var: ErrVar,
-    writable: Writable,
+    writable: WriteMode,
     err_link: ErrLink,
 }
 
@@ -728,7 +728,7 @@ impl SlotCell {
         origin: Origin::Bot,
         nil: NilVal::Bot,
         err_var: ErrVar::Bot,
-        writable: Writable::Bot,
+        writable: WriteMode::Bot,
         err_link: ErrLink::Bot,
     };
 
@@ -766,9 +766,9 @@ impl State {
                 nil: NilVal::MayNil,
                 err_var: ErrVar::Clean,
                 writable: if sf & SLOT_INIT_WRITABLE != 0 {
-                    Writable::Writable
+                    WriteMode::Writable
                 } else {
-                    Writable::ReadOnly
+                    WriteMode::ReadOnly
                 },
                 err_link: ErrLink::None,
             });
@@ -829,9 +829,9 @@ where
 
     // Seed external / bodyless functions that may return nil concrete error pointers.
     for (idx, fn_ir) in funcs.iter().enumerate() {
-        if fn_ir.flags & FUNC_EXTERNAL_MAY_NIL != 0 {
-            may_return_nil[idx] = true;
-        } else if (fn_ir.flags & FUNC_RETURNS_CONCRETE_ERR_PTR != 0) && fn_ir.blocks.is_empty() {
+        if (fn_ir.flags & FUNC_EXTERNAL_MAY_NIL != 0)
+            || ((fn_ir.flags & FUNC_RETURNS_CONCRETE_ERR_PTR != 0) && fn_ir.blocks.is_empty())
+        {
             may_return_nil[idx] = true;
         }
     }
@@ -922,7 +922,7 @@ fn apply_phis_into(
         if joined.err_var != ErrVar::Bot {
             d.err_var = joined.err_var;
         }
-        if joined.writable != Writable::Bot {
+        if joined.writable != WriteMode::Bot {
             d.writable = joined.writable;
         }
         if joined.err_link != ErrLink::Bot {
@@ -931,21 +931,25 @@ fn apply_phis_into(
     }
 }
 
+struct DiagSink<'a> {
+    func_idx: u32,
+    bb: u32,
+    findings: &'a mut Vec<Finding>,
+    deferred_closes: &'a mut Vec<(u32, u32, u32, bool)>,
+}
+
 fn step_op(
     op: &OpIR,
     st: &mut State,
     fn_ir: &FuncIR,
     may_return_nil: &[bool],
-    func_idx: u32,
-    emit: Option<&mut Vec<Finding>>,
-    deferred_closes: Option<&mut Vec<(u32, u32, u32, bool)>>,
-    bb: u32,
+    sink: Option<&mut DiagSink<'_>>,
 ) {
     match op {
         OpIR::UnhandledErr { site_id } => {
-            if let Some(out) = emit {
-                out.push(Finding {
-                    func_idx,
+            if let Some(s) = sink {
+                s.findings.push(Finding {
+                    func_idx: s.func_idx,
                     site_id: *site_id,
                     rule_code: RULE_ERR001,
                     sub_kind: SUB_DEFAULT,
@@ -972,9 +976,9 @@ fn step_op(
             if *err_slot != NONE_U32 {
                 let ec = &mut st.cells[*err_slot as usize];
                 if matches!(ec.err_var, ErrVar::Unread(_)) {
-                    if let Some(out) = emit {
-                        out.push(Finding {
-                            func_idx,
+                    if let Some(s) = sink {
+                        s.findings.push(Finding {
+                            func_idx: s.func_idx,
                             site_id: *site_id,
                             rule_code: RULE_ERR003,
                             sub_kind: SUB_ERR003_OVERWRITTEN,
@@ -999,9 +1003,9 @@ fn step_op(
             st.relax_all_checked_nils();
             let ec = &mut st.cells[*err_slot as usize];
             if matches!(ec.err_var, ErrVar::Unread(_)) {
-                if let Some(out) = emit {
-                    out.push(Finding {
-                        func_idx,
+                if let Some(s) = sink {
+                    s.findings.push(Finding {
+                        func_idx: s.func_idx,
                         site_id: *site_id,
                         rule_code: RULE_ERR003,
                         sub_kind: SUB_ERR003_OVERWRITTEN,
@@ -1025,9 +1029,9 @@ fn step_op(
                 // Overwriting an unread error variable with a constant (e.g., err = nil) loses it.
                 let dc = &mut st.cells[d];
                 if matches!(dc.err_var, ErrVar::Unread(_)) {
-                    if let Some(out) = emit {
-                        out.push(Finding {
-                            func_idx,
+                    if let Some(s) = sink {
+                        s.findings.push(Finding {
+                            func_idx: s.func_idx,
                             site_id: *site_id,
                             rule_code: RULE_ERR003,
                             sub_kind: SUB_ERR003_OVERWRITTEN,
@@ -1043,26 +1047,26 @@ fn step_op(
                     _ => NilVal::MayNil,
                 };
                 dc.writable = if *writable_hint == 1 {
-                    Writable::Writable
+                    WriteMode::Writable
                 } else {
-                    Writable::ReadOnly
+                    WriteMode::ReadOnly
                 };
             } else {
-                let s = *src_slot as usize;
-                let src_cell = st.cells[s];
+                let s_idx = *src_slot as usize;
+                let src_cell = st.cells[s_idx];
 
-                if d != s && matches!(st.cells[d].err_var, ErrVar::Unread(_)) {
-                    if let Some(out) = emit {
-                        out.push(Finding {
-                            func_idx,
+                if d != s_idx && matches!(st.cells[d].err_var, ErrVar::Unread(_)) {
+                    if let Some(s) = sink {
+                        s.findings.push(Finding {
+                            func_idx: s.func_idx,
                             site_id: *site_id,
                             rule_code: RULE_ERR003,
                             sub_kind: SUB_ERR003_OVERWRITTEN,
                         });
                     }
                 }
-                if d != s {
-                    st.cells[s].err_var = ErrVar::Clean;
+                if d != s_idx {
+                    st.cells[s_idx].err_var = ErrVar::Clean;
                 }
                 let dc = &mut st.cells[d];
                 dc.origin = src_cell.origin;
@@ -1074,7 +1078,7 @@ fn step_op(
                 };
                 dc.err_var = src_cell.err_var;
                 dc.writable = if *writable_hint == 1 {
-                    Writable::Writable
+                    WriteMode::Writable
                 } else {
                     src_cell.writable
                 };
@@ -1090,7 +1094,7 @@ fn step_op(
             dc.origin = Origin::Safe;
             dc.err_var = ErrVar::Clean;
             dc.err_link = ErrLink::None;
-            dc.writable = Writable::ReadOnly;
+            dc.writable = WriteMode::ReadOnly;
             dc.nil = if may_return_nil[*callee_idx as usize] {
                 NilVal::MayNil
             } else {
@@ -1102,88 +1106,85 @@ fn step_op(
             c.err_var = ErrVar::Clean;
             c.nil = c.nil.relax_checked();
         }
-        OpIR::UseCompanion { site_id, slot } => {
-            match st.cells[*slot as usize].origin {
-                Origin::Blanked(_) => {
-                    if let Some(out) = emit {
-                        out.push(Finding {
-                            func_idx,
-                            site_id: *site_id,
-                            rule_code: RULE_ERR002,
-                            sub_kind: SUB_ERR002_BLANKED,
-                        });
-                    }
+        OpIR::UseCompanion { site_id, slot } => match st.cells[*slot as usize].origin {
+            Origin::Blanked(_) => {
+                if let Some(s) = sink {
+                    s.findings.push(Finding {
+                        func_idx: s.func_idx,
+                        site_id: *site_id,
+                        rule_code: RULE_ERR002,
+                        sub_kind: SUB_ERR002_BLANKED,
+                    });
                 }
-                Origin::Single(_) | Origin::UncheckedMix(_) => {
-                    if let Some(out) = emit {
-                        out.push(Finding {
-                            func_idx,
-                            site_id: *site_id,
-                            rule_code: RULE_ERR002,
-                            sub_kind: SUB_ERR002_UNCHECKED,
-                        });
-                    }
-                }
-                Origin::Bot | Origin::Safe => {}
             }
-        }
+            Origin::Single(_) | Origin::UncheckedMix(_) => {
+                if let Some(s) = sink {
+                    s.findings.push(Finding {
+                        func_idx: s.func_idx,
+                        site_id: *site_id,
+                        rule_code: RULE_ERR002,
+                        sub_kind: SUB_ERR002_UNCHECKED,
+                    });
+                }
+            }
+            Origin::Bot | Origin::Safe => {}
+        },
         OpIR::ShadowErr {
             site_id,
             inner_slot,
             ..
         } => {
             let _ = *inner_slot;
-            if let Some(out) = emit {
-                out.push(Finding {
-                    func_idx,
+            if let Some(s) = sink {
+                s.findings.push(Finding {
+                    func_idx: s.func_idx,
                     site_id: *site_id,
                     rule_code: RULE_ERR003,
                     sub_kind: SUB_ERR003_SHADOWED,
                 });
             }
         }
-        OpIR::BoxConcreteErr { site_id, ptr_slot } => {
-            match st.cells[*ptr_slot as usize].nil {
-                NilVal::MustNil => {
-                    if let Some(out) = emit {
-                        out.push(Finding {
-                            func_idx,
-                            site_id: *site_id,
-                            rule_code: RULE_ERR004,
-                            sub_kind: SUB_ERR004_MUST_NIL,
-                        });
-                    }
+        OpIR::BoxConcreteErr { site_id, ptr_slot } => match st.cells[*ptr_slot as usize].nil {
+            NilVal::MustNil => {
+                if let Some(s) = sink {
+                    s.findings.push(Finding {
+                        func_idx: s.func_idx,
+                        site_id: *site_id,
+                        rule_code: RULE_ERR004,
+                        sub_kind: SUB_ERR004_MUST_NIL,
+                    });
                 }
-                NilVal::MayNil => {
-                    if let Some(out) = emit {
-                        out.push(Finding {
-                            func_idx,
-                            site_id: *site_id,
-                            rule_code: RULE_ERR004,
-                            sub_kind: SUB_ERR004_MAY_NIL,
-                        });
-                    }
-                }
-                NilVal::Bot | NilVal::NonNil | NilVal::NonNilChecked => {}
             }
-        }
+            NilVal::MayNil => {
+                if let Some(s) = sink {
+                    s.findings.push(Finding {
+                        func_idx: s.func_idx,
+                        site_id: *site_id,
+                        rule_code: RULE_ERR004,
+                        sub_kind: SUB_ERR004_MAY_NIL,
+                    });
+                }
+            }
+            NilVal::Bot | NilVal::NonNil | NilVal::NonNilChecked => {}
+        },
         OpIR::MarkWritable { res_slot, .. } => {
-            st.cells[*res_slot as usize].writable = Writable::Writable;
+            st.cells[*res_slot as usize].writable = WriteMode::Writable;
         }
         OpIR::UnhandledClose {
             site_id,
             res_slot,
             is_defer,
         } => {
-            let now_writable = st.cells[*res_slot as usize].writable == Writable::Writable;
+            let now_writable = st.cells[*res_slot as usize].writable == WriteMode::Writable;
             if *is_defer {
-                if let Some(dc) = deferred_closes {
-                    dc.push((bb, *site_id, *res_slot, now_writable));
+                if let Some(s) = sink {
+                    s.deferred_closes
+                        .push((s.bb, *site_id, *res_slot, now_writable));
                 }
             } else if now_writable {
-                if let Some(out) = emit {
-                    out.push(Finding {
-                        func_idx,
+                if let Some(s) = sink {
+                    s.findings.push(Finding {
+                        func_idx: s.func_idx,
                         site_id: *site_id,
                         rule_code: RULE_ERR005,
                         sub_kind: SUB_ERR005_SYNC_CLOSE,
@@ -1195,7 +1196,7 @@ fn step_op(
 }
 
 fn write_outgoing_edges(
-    edges_slot: &mut Vec<(u32, State)>,
+    edges_slot: &mut [(u32, State)],
     block: &BlockIR,
     end_state: &State,
     fn_ir: &FuncIR,
@@ -1337,6 +1338,10 @@ where
 
     in_states[0] = State::entry(&fn_ir.slot_flags);
     let mut scratch = State::bottom(n_slots);
+    let mut edge_scratch = [
+        (0u32, State::bottom(n_slots)),
+        (0u32, State::bottom(n_slots)),
+    ];
 
     let mut in_queue = vec![false; n_blocks];
     let mut worklist = VecDeque::with_capacity(n_blocks);
@@ -1361,13 +1366,18 @@ where
             continue;
         }
         for op in &block.ops {
-            step_op(op, &mut scratch, fn_ir, may_return_nil, func_idx, None, None, bb);
+            step_op(op, &mut scratch, fn_ir, may_return_nil, None);
         }
-        write_outgoing_edges(&mut out_edges[bb_usize], block, &scratch, fn_ir);
+        let arity = out_edges[bb_usize].len();
+        write_outgoing_edges(&mut edge_scratch[..arity], block, &scratch, fn_ir);
         end_states[bb_usize].copy_from(&scratch);
 
-        for &(succ, ref edge_st) in &out_edges[bb_usize] {
-            if in_states[succ as usize].join_from(edge_st) && !in_queue[succ as usize] {
+        for k in 0..arity {
+            let succ = edge_scratch[k].0;
+            out_edges[bb_usize][k].0 = succ;
+            let edge_changed = out_edges[bb_usize][k].1.join_from(&edge_scratch[k].1);
+            let in_changed = in_states[succ as usize].join_from(&out_edges[bb_usize][k].1);
+            if (edge_changed || in_changed) && !in_queue[succ as usize] {
                 in_queue[succ as usize] = true;
                 worklist.push_back(succ);
             }
@@ -1420,17 +1430,14 @@ where
             continue;
         }
         apply_phis_into(&mut scratch, block, &in_states[bb_idx], &out_edges, bb);
+        let mut sink = DiagSink {
+            func_idx,
+            bb,
+            findings: &mut findings,
+            deferred_closes: &mut deferred_closes,
+        };
         for op in &block.ops {
-            step_op(
-                op,
-                &mut scratch,
-                fn_ir,
-                may_return_nil,
-                func_idx,
-                Some(&mut findings),
-                Some(&mut deferred_closes),
-                bb,
-            );
+            step_op(op, &mut scratch, fn_ir, may_return_nil, Some(&mut sink));
         }
 
         // Check Return-level nilerr (`if err != nil { return nil }`).
@@ -1473,7 +1480,7 @@ where
                     continue;
                 }
                 if matches!(fn_ir.blocks[bb_idx].term, Terminator::Return { .. })
-                    && end_states[bb_idx].cells[res_slot as usize].writable == Writable::Writable
+                    && end_states[bb_idx].cells[res_slot as usize].writable == WriteMode::Writable
                 {
                     writable_on_exit = true;
                     break;
@@ -1658,7 +1665,10 @@ mod tests {
     #[test]
     fn rejects_malformed_frames() {
         assert_eq!(solve_frame(b"", || true), Err(SolveError::Truncated));
-        assert_eq!(solve_frame(b"NOPE\x00\x00\x00\x00", || true), Err(SolveError::BadMagic));
+        assert_eq!(
+            solve_frame(b"NOPE\x00\x00\x00\x00", || true),
+            Err(SolveError::BadMagic)
+        );
         assert_eq!(
             solve_frame(b"GSE1\x00\x00\x00\x00extra", || true),
             Err(SolveError::TrailingBytes(5))
@@ -2040,5 +2050,117 @@ mod tests {
                 sub_kind: SUB_ERR005_DEFER_CLOSE,
             }]
         );
+    }
+
+    #[test]
+    fn semilattice_laws_and_height_bounds_hold_exhaustively() {
+        let origins = [
+            Origin::Bot,
+            Origin::Safe,
+            Origin::Single(0),
+            Origin::Single(1),
+            Origin::Single(2),
+            Origin::UncheckedMix(0),
+            Origin::UncheckedMix(1),
+            Origin::UncheckedMix(2),
+            Origin::Blanked(0),
+            Origin::Blanked(1),
+            Origin::Blanked(2),
+        ];
+        for &a in &origins {
+            assert_eq!(Origin::Bot.join(a), a);
+            assert_eq!(a.join(Origin::Bot), a);
+            assert_eq!(a.join(a), a);
+            for &b in &origins {
+                assert_eq!(a.join(b), b.join(a), "Origin commutativity: {a:?}, {b:?}");
+                for &c in &origins {
+                    assert_eq!(
+                        a.join(b).join(c),
+                        a.join(b.join(c)),
+                        "Origin associativity: {a:?}, {b:?}, {c:?}"
+                    );
+                }
+            }
+        }
+
+        let nils = [
+            NilVal::Bot,
+            NilVal::MustNil,
+            NilVal::NonNilChecked,
+            NilVal::NonNil,
+            NilVal::MayNil,
+        ];
+        for &a in &nils {
+            assert_eq!(NilVal::Bot.join(a), a);
+            assert_eq!(a.join(a), a);
+            for &b in &nils {
+                assert_eq!(a.join(b), b.join(a), "NilVal commutativity: {a:?}, {b:?}");
+                // `relax_checked` must be monotone: if a <= b (i.e. a.join(b) == b),
+                // then a.relax_checked() <= b.relax_checked().
+                if a.join(b) == b {
+                    let ra = a.relax_checked();
+                    let rb = b.relax_checked();
+                    assert_eq!(
+                        ra.join(rb),
+                        rb,
+                        "NilVal::relax_checked non-monotone on {a:?} <= {b:?}"
+                    );
+                }
+                for &c in &nils {
+                    assert_eq!(
+                        a.join(b).join(c),
+                        a.join(b.join(c)),
+                        "NilVal associativity: {a:?}, {b:?}, {c:?}"
+                    );
+                }
+            }
+        }
+
+        let err_vars = [
+            ErrVar::Bot,
+            ErrVar::Clean,
+            ErrVar::Unread(0),
+            ErrVar::Unread(1),
+            ErrVar::Unread(2),
+        ];
+        for &a in &err_vars {
+            assert_eq!(ErrVar::Bot.join(a), a);
+            assert_eq!(a.join(a), a);
+            for &b in &err_vars {
+                assert_eq!(a.join(b), b.join(a));
+                for &c in &err_vars {
+                    assert_eq!(a.join(b).join(c), a.join(b.join(c)));
+                }
+            }
+        }
+
+        let writables = [WriteMode::Bot, WriteMode::ReadOnly, WriteMode::Writable];
+        for &a in &writables {
+            assert_eq!(WriteMode::Bot.join(a), a);
+            assert_eq!(a.join(a), a);
+            for &b in &writables {
+                assert_eq!(a.join(b), b.join(a));
+                for &c in &writables {
+                    assert_eq!(a.join(b).join(c), a.join(b.join(c)));
+                }
+            }
+        }
+
+        let links = [
+            ErrLink::Bot,
+            ErrLink::Tuple(0),
+            ErrLink::Tuple(1),
+            ErrLink::None,
+        ];
+        for &a in &links {
+            assert_eq!(ErrLink::Bot.join(a), a);
+            assert_eq!(a.join(a), a);
+            for &b in &links {
+                assert_eq!(a.join(b), b.join(a));
+                for &c in &links {
+                    assert_eq!(a.join(b).join(c), a.join(b.join(c)));
+                }
+            }
+        }
     }
 }

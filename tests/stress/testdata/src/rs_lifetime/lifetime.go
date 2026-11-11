@@ -44,7 +44,7 @@ func Encode(s string) []byte {
 	b.Reset()
 	b.WriteString(s)
 	bufs.Put(b)
-	return b.Bytes() // MISS(SAFE003): b was given to the pool, which hands it to other goroutines (seed_moves 14 is the same hole)
+	return b.Bytes() // HIT(SAFE003): b was given to the pool, which hands it to other goroutines (seed_moves 14 is the same hole)
 }
 
 // 5. Scanner.Bytes kept across the next Scan: the slice is overwritten (rs_w_scanner runs it).
@@ -76,7 +76,7 @@ func Format(name string) []byte {
 	b = append(b, name...)
 	*bp = b
 	scratch.Put(bp)
-	return b[:len(b)] // MISS(SAFE003): the caller keeps memory the pool will hand to the next Get
+	return b[:len(b)] // HIT(SAFE003): the caller keeps memory the pool will hand to the next Get
 }
 
 // 8. closure capturing a variable reassigned later.

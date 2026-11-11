@@ -19,6 +19,6 @@ func main() {
 		}
 		close(done)
 	}()
-	j.ID = 1 // MISS(SAFE003): j was published by m.Store and is written by the goroutine that loads it
+	j.ID = 1 // HIT(SAFE003): j was published by m.Store and is written by the goroutine that loads it
 	<-done
 }

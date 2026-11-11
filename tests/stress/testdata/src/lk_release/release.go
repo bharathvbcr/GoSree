@@ -27,12 +27,11 @@ func (s *S) helperUnlocks() {
 	s.n = 1 // HIT(SAFE009)
 }
 
-// A closure called in place that unlocks a captured mutex: releaseSummaries records releases only
-// on parameters, so the free variable's unlock is lost and the lock stays "held".
+// A closure called in place that unlocks a captured mutex.
 func (s *S) closureUnlocks() {
 	s.mu.Lock()
 	func() { s.mu.Unlock() }()
-	s.n = 1 // MISS(SAFE009): the in-place closure released s.mu; releaseSummaries only records parameter paths, not free variables (RULES.md SAFE009: guarded memory may only be accessed while mu is held)
+	s.n = 1 // HIT(SAFE009): the in-place closure released s.mu
 }
 
 // Unlock through a method value.

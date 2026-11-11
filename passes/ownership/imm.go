@@ -1,10 +1,14 @@
 package ownership
 
 import (
+	"cmp"
 	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
+	"slices"
+	"strings"
 
 	"golang.org/x/tools/go/ssa"
 
@@ -43,9 +47,12 @@ func (st *state) validateImm() {
 			}
 		}
 	}
-	for tn, msg := range problems {
+	bad := slices.SortedFunc(maps.Keys(problems), func(a, b *types.TypeName) int {
+		return cmp.Or(cmp.Compare(st.ix.ImmTypes[a], st.ix.ImmTypes[b]), strings.Compare(a.Name(), b.Name()))
+	})
+	for _, tn := range bad {
 		prefix := annot.Prefix + "imm"
-		st.report(st.ix.ImmTypes[tn], Imm, fmt.Sprintf("%s type %s is not immutable: %s", prefix, tn.Name(), msg))
+		st.report(st.ix.ImmTypes[tn], Imm, fmt.Sprintf("%s type %s is not immutable: %s", prefix, tn.Name(), problems[tn]))
 	}
 }
 

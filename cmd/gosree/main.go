@@ -17,6 +17,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json/jsontext"
 	json "encoding/json/v2"
 	"fmt"
 	"os"
@@ -108,11 +109,86 @@ func runJSON(args []string) int {
 			return exitFailed
 		}
 	}
-	os.Stdout.Write(out.Bytes())
+	cleaned := dedupJSON(out.Bytes())
+	os.Stdout.Write(cleaned)
 	if code != exitClean {
 		return code
 	}
-	return jsonExit(out.Bytes())
+	return jsonExit(cleaned)
+}
+
+type jsonDiagKey struct {
+	Posn    string `json:"posn"`
+	Message string `json:"message"`
+}
+
+// dedupJSON removes findings from a package's in-package test variant ("P [P.test]") that were
+// already emitted for the base package ("P"), matching text mode and `go vet -json`. Test-only
+// findings and analyzer error objects are preserved untouched.
+func dedupJSON(data []byte) []byte {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return data
+	}
+	var tree map[string]map[string]jsontext.Value
+	if err := json.Unmarshal(data, &tree); err != nil {
+		return data
+	}
+	modified := false
+	for pkgKey, byAnalyzer := range tree {
+		basePkg, rest, ok := strings.Cut(pkgKey, " [")
+		if !ok || !strings.HasSuffix(rest, ".test]") {
+			continue
+		}
+		baseAnalyzers, ok := tree[basePkg]
+		if !ok {
+			continue
+		}
+		for analyzer, testRaw := range byAnalyzer {
+			baseRaw, ok := baseAnalyzers[analyzer]
+			if !ok {
+				continue
+			}
+			var baseDiags []jsonDiagKey
+			var testItems []jsontext.Value
+			if json.Unmarshal(baseRaw, &baseDiags) != nil || json.Unmarshal(testRaw, &testItems) != nil {
+				continue
+			}
+			if len(baseDiags) == 0 || len(testItems) == 0 {
+				continue
+			}
+			seen := make(map[jsonDiagKey]bool, len(baseDiags))
+			for _, d := range baseDiags {
+				seen[d] = true
+			}
+			kept := make([]jsontext.Value, 0, len(testItems))
+			for _, item := range testItems {
+				var d jsonDiagKey
+				if json.Unmarshal(item, &d) == nil && seen[d] {
+					modified = true
+					continue
+				}
+				kept = append(kept, item)
+			}
+			if len(kept) == len(testItems) {
+				continue
+			}
+			if len(kept) == 0 {
+				delete(byAnalyzer, analyzer)
+				continue
+			}
+			if encoded, err := json.Marshal(kept); err == nil {
+				byAnalyzer[analyzer] = jsontext.Value(encoded)
+			}
+		}
+	}
+	if !modified {
+		return data
+	}
+	rewritten, err := json.Marshal(tree, json.Deterministic(true), jsontext.WithIndent("\t"))
+	if err != nil {
+		return data
+	}
+	return append(rewritten, '\n')
 }
 
 // jsonExit derives the exit status from the driver's -json output: a map of package to analyzer to

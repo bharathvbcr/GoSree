@@ -80,3 +80,33 @@ func TestJSONExit(t *testing.T) {
 		}
 	}
 }
+
+func TestDedupJSONUnit(t *testing.T) {
+	in := `{
+	"m/b": {
+		"safeownership": [
+			{"posn": "b.go:3:5", "message": "SAFE006: global"}
+		]
+	},
+	"m/b [m/b.test]": {
+		"safeownership": [
+			{"posn": "b.go:3:5", "message": "SAFE006: global"},
+			{"posn": "b_test.go:9:2", "message": "SAFE003: test"}
+		],
+		"borrow": {"error": "boom"}
+	}
+}`
+	out := string(dedupJSON([]byte(in)))
+	if got := strings.Count(out, "SAFE006: global"); got != 1 {
+		t.Errorf("SAFE006 count = %d, want 1; out:\n%s", got, out)
+	}
+	if got := strings.Count(out, "SAFE003: test"); got != 1 {
+		t.Errorf("SAFE003 count = %d, want 1; out:\n%s", got, out)
+	}
+	if !strings.Contains(out, `"error": "boom"`) && !strings.Contains(out, `"error":"boom"`) {
+		t.Errorf("analyzer error object lost; out:\n%s", out)
+	}
+	if code := jsonExit([]byte(out)); code != exitFailed {
+		t.Errorf("jsonExit = %d, want %d", code, exitFailed)
+	}
+}

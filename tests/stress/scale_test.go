@@ -167,7 +167,7 @@ func scaleShapes() []scaleShape {
 			b.WriteString("}\n")
 			return scaleOne(b.String())
 		}},
-		{name: "one value sent and used N times", sizes: []int{100, 200, 400}, maxRatio: 10, knownBug: "RB-RESEND", knownExp: 2.5, gen: func(n int) map[string]string {
+		{name: "one value sent and used N times", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
 			var b strings.Builder
 			b.WriteString("func F(ch chan *Job) {\n\tj := &Job{}\n")
 			for i := range n {
@@ -215,7 +215,7 @@ func scaleShapes() []scaleShape {
 			b.WriteString("}\n")
 			return scaleOne(b.String())
 		}},
-		{name: "call chain, caller declared first", sizes: []int{100, 200, 400}, maxRatio: 10, knownBug: "RB-CHAIN", knownExp: 1.7, gen: func(n int) map[string]string {
+		{name: "call chain, caller declared first", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
 			return scaleOne(scaleChain(n, false))
 		}},
 		{name: "call chain, callee declared first", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
@@ -263,7 +263,7 @@ func scaleShapes() []scaleShape {
 			b.WriteString("}\n")
 			return scaleOne(b.String())
 		}},
-		{name: "N sequential if/else diamonds", sizes: []int{25, 50, 100}, maxRatio: 10, knownBug: "RB-DIAMOND", knownExp: 2.5, gen: func(n int) map[string]string {
+		{name: "N sequential if/else diamonds", sizes: []int{25, 50, 100}, maxRatio: 10, gen: func(n int) map[string]string {
 			var b strings.Builder
 			b.WriteString("func F(ch chan *Job, c []bool) {\n\tj := &Job{}\n\tk := &Job{}\n")
 			for i := range n {
@@ -315,7 +315,7 @@ func scaleShapes() []scaleShape {
 			}
 			return scaleOne(b.String())
 		}},
-		{name: "slice literal of N pointer elements", sizes: []int{500, 1000, 2000}, maxRatio: 10, knownBug: "RB-LITERAL", knownExp: 1.7, gen: func(n int) map[string]string {
+		{name: "slice literal of N pointer elements", sizes: []int{500, 1000, 2000}, maxRatio: 10, gen: func(n int) map[string]string {
 			return scaleOne("func Lit(ch chan []*Job) {\n\tjs := []*Job{" + strings.Repeat("{}, ", n) + "}\n\tch <- js\n\tjs[0].ID = 1\n}\n")
 		}},
 		{name: "N small functions (baseline)", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
@@ -663,23 +663,9 @@ func TestScaleDeterminism(t *testing.T) {
 			}
 		}
 	}
-	// SAFE005 findings are emitted by ranging a map (validateImm, passes/ownership/imm.go:46), so their
-	// order within the safeownership action changes from run to run. The set does not.
-	scaleKnownBug(t, "RB-ORDER", fmt.Sprintf("%d of %d runs emitted the findings in a different order from run 0", reordered, runs-1), reordered > 0)
-	// The reordering is confined to SAFE005: without those lines every run's order is identical.
-	stripImm := func(s string) string {
-		var keep []string
-		for l := range strings.SplitSeq(s, "\n") {
-			if !strings.Contains(l, "SAFE005") {
-				keep = append(keep, l)
-			}
-		}
-		return strings.Join(keep, "\n")
-	}
-	for i := 1; i < runs; i++ {
-		if stripImm(orders[i]) != stripImm(orders[0]) {
-			t.Errorf("run %d: findings other than SAFE005 are also reordered:\n%s", i, scaleLineDiff(stripImm(orders[0]), stripImm(orders[i])))
-		}
+	// Regression lock for RB-ORDER: every pass emits diagnostics in deterministic order across runs.
+	if reordered > 0 {
+		t.Errorf("RB-ORDER regression: %d of %d runs emitted the findings in a different order from run 0", reordered, runs-1)
 	}
 	sane := scaleAnalyze(t, cliAnalyzers(), pkgs, &checker.Options{SanityCheck: true})
 	if s, _ := scaleRender(sane.graph); s != sets[0] {
@@ -714,10 +700,10 @@ func TestScaleDeterminismProcesses(t *testing.T) {
 			reordered++
 		}
 	}
-	// The text driver prints each action's diagnostics in emission order, so the map-ordered SAFE005
-	// findings make the CLI's output differ byte for byte between runs: a CI step that diffs gosree's
-	// output against a baseline flakes even though the set is stable.
-	scaleKnownBug(t, "RB-ORDER", fmt.Sprintf("%d of 9 fresh processes printed the same findings in a different order from the first", reordered), reordered > 0)
+	// Regression lock for RB-ORDER: CLI stderr must be byte-identical across fresh processes.
+	if reordered > 0 {
+		t.Errorf("RB-ORDER regression: %d of 9 fresh processes printed the same findings in a different order from the first", reordered)
+	}
 }
 
 // scaleStaleBody declares three //gosree:unsafe scopes, each hiding one finding of a different pass

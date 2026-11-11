@@ -78,9 +78,12 @@ func run(pass *analysis.Pass) (any, error) {
 		ast.Inspect(file, func(n ast.Node) bool {
 			switch n := n.(type) {
 			case *ast.Ident:
-				// Matching the identifier, not a selector, also catches a dot import of unsafe or reflect.
+				// Matching the identifier, not a selector, also catches a dot import of unsafe or reflect,
+				// as well as cross-package aliases/wrappers exposing unsafe.Pointer without importing "unsafe".
 				if obj, ok := pass.TypesInfo.Uses[n]; ok && obj.Pkg() != nil && obj.Pkg().Path() == "unsafe" && unsafeMembers[obj.Name()] {
 					report(n, "unsafe."+obj.Name()+" bypasses Go's memory safety; wrap it in //gosree:unsafe <reason>")
+				} else if msg := unsafeExposure(pass, pass.TypesInfo.Uses[n]); msg != "" {
+					report(n, msg)
 				} else if !handledIdent[n] {
 					if name := reflectSymbol(pass.TypesInfo.Uses[n]); name != "" {
 						report(n, name+" writes or exposes memory through reflection")
@@ -154,6 +157,95 @@ func isReflectValueInterfaceMethod(name string) bool {
 		"SetPointer", "SetIterKey", "SetIterValue", "SetLen", "SetCap", "SetMapIndex", "SetZero",
 		"UnsafeAddr", "UnsafePointer", "Pointer", "Addr", "Clear", "Grow", "Send", "TrySend":
 		return true
+	}
+	return false
+}
+
+func unsafeExposure(pass *analysis.Pass, obj types.Object) string {
+	if obj == nil || obj.Pkg() == nil || obj.Pkg().Path() == "unsafe" || obj.Pkg() == pass.Pkg {
+		return ""
+	}
+	if reflectSymbol(obj) != "" {
+		return ""
+	}
+	switch x := obj.(type) {
+	case *types.TypeName:
+		if isDirectUnsafePointer(x.Type()) {
+			return x.Pkg().Name() + "." + x.Name() + " exposes unsafe.Pointer and bypasses Go's memory safety; wrap it in //gosree:unsafe <reason>"
+		}
+	case *types.Func:
+		sig := x.Signature()
+		if tupleHasDirectUnsafePointer(sig.Params()) || tupleHasDirectUnsafePointer(sig.Results()) {
+			return x.Pkg().Name() + "." + x.Name() + " passes or returns unsafe.Pointer and bypasses Go's memory safety; wrap it in //gosree:unsafe <reason>"
+		}
+	case *types.Var:
+		if isDirectUnsafePointer(x.Type()) {
+			return x.Pkg().Name() + "." + x.Name() + " exposes unsafe.Pointer and bypasses Go's memory safety; wrap it in //gosree:unsafe <reason>"
+		}
+	}
+	return ""
+}
+
+func tupleHasDirectUnsafePointer(tup *types.Tuple) bool {
+	if tup == nil {
+		return false
+	}
+	for i := 0; i < tup.Len(); i++ {
+		if isDirectUnsafePointer(tup.At(i).Type()) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDirectUnsafePointer(t types.Type) bool {
+	return isDirectUnsafePointerSeen(t, map[types.Type]bool{})
+}
+
+func isDirectUnsafePointerSeen(t types.Type, seen map[types.Type]bool) bool {
+	if t == nil {
+		return false
+	}
+	t = types.Unalias(t)
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
+	switch u := t.Underlying().(type) {
+	case *types.Basic:
+		return u.Kind() == types.UnsafePointer
+	case *types.Pointer:
+		return isDirectUnsafePointerSeen(u.Elem(), seen)
+	case *types.Slice:
+		return isDirectUnsafePointerSeen(u.Elem(), seen)
+	case *types.Array:
+		return isDirectUnsafePointerSeen(u.Elem(), seen)
+	case *types.Chan:
+		return isDirectUnsafePointerSeen(u.Elem(), seen)
+	case *types.Map:
+		return isDirectUnsafePointerSeen(u.Key(), seen) || isDirectUnsafePointerSeen(u.Elem(), seen)
+	case *types.Signature:
+		return tupleHasDirectUnsafePointerSeen(u.Params(), seen) || tupleHasDirectUnsafePointerSeen(u.Results(), seen)
+	case *types.Interface:
+		for i := 0; i < u.NumMethods(); i++ {
+			if sig, ok := u.Method(i).Type().(*types.Signature); ok {
+				if tupleHasDirectUnsafePointerSeen(sig.Params(), seen) || tupleHasDirectUnsafePointerSeen(sig.Results(), seen) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func tupleHasDirectUnsafePointerSeen(tup *types.Tuple, seen map[types.Type]bool) bool {
+	if tup == nil {
+		return false
+	}
+	for i := 0; i < tup.Len(); i++ {
+		if isDirectUnsafePointerSeen(tup.At(i).Type(), seen) {
+			return true
+		}
 	}
 	return false
 }

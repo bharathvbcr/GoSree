@@ -33,18 +33,20 @@ const (
 )
 
 type event struct {
-	kind  eventKind
-	instr ssa.Instruction // nil for parameters and free variables
-	pos   token.Pos
-	desc  string
-	param int // index of the parameter (or -1); the parameter's own foreign event is not a leak of itself
-	free  int // index of the free variable (or -1)
+	kind   eventKind
+	instr  ssa.Instruction // nil for parameters and free variables
+	pos    token.Pos
+	desc   string
+	param  int         // index of the parameter (or -1); the parameter's own foreign event is not a leak of itself
+	free   int         // index of the free variable (or -1)
+	global *ssa.Global // set when the event originates from a package variable
 }
 
 type node struct {
 	parent  *node
 	pointee *node
 	events  []event
+	size    uint32
 }
 
 func (n *node) find() *node {
@@ -58,27 +60,47 @@ func (n *node) find() *node {
 }
 
 type transfer struct {
-	instr     ssa.Instruction
-	caseBlock *ssa.BasicBlock
-	v         ssa.Value
-	pos       token.Pos
-	what      string
-	opPos     token.Pos
-	index     int
+	instr        ssa.Instruction
+	caseBlock    *ssa.BasicBlock
+	v            ssa.Value
+	pos          token.Pos
+	what         string
+	opPos        token.Pos
+	index        int
+	freezesToImm bool
 }
 
 type graph struct {
-	st        *state
-	fn        *ssa.Function
-	nodes     map[ssa.Value]*node
-	transfers []transfer
-	final     map[*ssa.Alloc]bool
-	ownedFree bool
-	rev       map[*node][]*node
+	st         *state
+	fn         *ssa.Function
+	nodes      map[ssa.Value]*node
+	transfers  []transfer
+	final      map[ssa.Value]bool
+	ownedFree  bool
+	rev        map[*node][]*node
+	defers     []*ssa.Defer
+	idx        map[ssa.Instruction]int
+	regions    map[*node]map[*node]bool
+	regionVals map[*node][]ssa.Value
 }
 
 func (st *state) buildGraph(fn *ssa.Function) *graph {
-	g := &graph{st: st, fn: fn, nodes: map[ssa.Value]*node{}}
+	g := &graph{
+		st:         st,
+		fn:         fn,
+		nodes:      map[ssa.Value]*node{},
+		idx:        map[ssa.Instruction]int{},
+		regions:    map[*node]map[*node]bool{},
+		regionVals: map[*node][]ssa.Value{},
+	}
+	for _, b := range fn.Blocks {
+		for i, ins := range b.Instrs {
+			g.idx[ins] = i
+			if d, ok := ins.(*ssa.Defer); ok {
+				g.defers = append(g.defers, d)
+			}
+		}
+	}
 	g.final = finalCells(st, fn)
 	g.ownedFree = closureIsGoroutineBody(fn)
 	for i, p := range fn.Params {
@@ -103,7 +125,23 @@ func (st *state) buildGraph(fn *ssa.Function) *graph {
 	return g
 }
 
-func (g *graph) newNode() *node { return &node{} }
+func (g *graph) idxOf(ins ssa.Instruction) int {
+	if g != nil {
+		if i, ok := g.idx[ins]; ok {
+			return i
+		}
+	}
+	return indexIn(ins)
+}
+
+func (g *graph) dominates(a, b ssa.Instruction) bool {
+	if a.Block() == b.Block() {
+		return g.idxOf(a) < g.idxOf(b)
+	}
+	return a.Block().Dominates(b.Block())
+}
+
+func (g *graph) newNode() *node { return &node{size: 1} }
 
 // val returns v's class, or nil when values of v's type cannot carry unchecked shared memory.
 func (g *graph) val(v ssa.Value) *node {
@@ -119,16 +157,20 @@ func (g *graph) val(v ssa.Value) *node {
 		g.nodes[v] = nil
 		return nil
 	}
+	if g.final[v] {
+		g.nodes[v] = nil
+		return nil
+	}
 	switch v := v.(type) {
 	case *ssa.Const, *ssa.Function, *ssa.Builtin:
 	case *ssa.Global:
 		n = g.newNode()
 		d := "package variable " + v.Name()
 		n.events = append(n.events,
-			event{kind: evForeign, pos: v.Pos(), desc: d, param: -1, free: -1},
-			event{kind: evEscape, pos: v.Pos(), desc: "stored in " + d, param: -1, free: -1})
+			event{kind: evForeign, pos: v.Pos(), desc: d, param: -1, free: -1, global: v},
+			event{kind: evEscape, pos: v.Pos(), desc: "stored in " + d, param: -1, free: -1, global: v})
 	case *ssa.Alloc:
-		if !g.final[v] && !g.st.cls.Shareable(v.Type()) {
+		if !g.st.cls.Shareable(v.Type()) {
 			n = g.newNode()
 		}
 	default:
@@ -145,7 +187,11 @@ func (g *graph) union(a, b *node) {
 	if a == b {
 		return
 	}
+	if a.size < b.size {
+		a, b = b, a
+	}
 	b.parent = a
+	a.size += b.size
 	a.events = append(a.events, b.events...)
 	b.events = nil
 	pa, pb := a.pointee, b.pointee
@@ -354,27 +400,32 @@ func (g *graph) deriveOrForeign(v, x ssa.Value, desc string) {
 	g.add(vn, ev(evForeign, v.(ssa.Instruction), desc))
 }
 
+func (g *graph) transferWithCase(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Value, opPos token.Pos, index int, what string) {
+	g.transferFull(ins, cb, v, opPos, index, what, false)
+}
+
 func (g *graph) transfer(ins ssa.Instruction, v ssa.Value, what string) {
-	g.transferFull(ins, nil, v, token.NoPos, -1, what)
+	g.transferFull(ins, nil, v, token.NoPos, -1, what, false)
 }
 
 func (g *graph) transferWithOp(ins ssa.Instruction, v ssa.Value, opPos token.Pos, index int, what string) {
-	g.transferFull(ins, nil, v, opPos, index, what)
+	g.transferFull(ins, nil, v, opPos, index, what, false)
 }
 
-func (g *graph) transferWithCase(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Value, opPos token.Pos, index int, what string) {
-	g.transferFull(ins, cb, v, opPos, index, what)
+func (g *graph) transferPublish(ins ssa.Instruction, v ssa.Value, index int, what string, freezesToImm bool) {
+	g.transferFull(ins, nil, v, token.NoPos, index, what, freezesToImm)
 }
 
-func (g *graph) transferFull(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Value, opPos token.Pos, index int, what string) {
+func (g *graph) transferFull(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Value, opPos token.Pos, index int, what string, freezesToImm bool) {
 	g.transfers = append(g.transfers, transfer{
-		instr:     ins,
-		caseBlock: cb,
-		v:         v,
-		pos:       ins.Pos(),
-		what:      what,
-		opPos:     opPos,
-		index:     index,
+		instr:        ins,
+		caseBlock:    cb,
+		v:            v,
+		pos:          ins.Pos(),
+		what:         what,
+		opPos:        opPos,
+		index:        index,
+		freezesToImm: freezesToImm,
 	})
 	g.add(g.val(v), ev(evTransfer, ins, what))
 }
@@ -415,21 +466,26 @@ func selectCaseBlock(sel *ssa.Select, stateIdx int) *ssa.BasicBlock {
 }
 
 func resolveClosureVal(v ssa.Value, depth int) *ssa.MakeClosure {
-	if depth > 10 || v == nil {
+	return resolveClosureValSeen(v, depth, map[ssa.Value]bool{})
+}
+
+func resolveClosureValSeen(v ssa.Value, depth int, seen map[ssa.Value]bool) *ssa.MakeClosure {
+	if depth > 10 || v == nil || seen[v] || len(seen) >= 32 {
 		return nil
 	}
+	seen[v] = true
 	switch val := v.(type) {
 	case *ssa.MakeClosure:
 		return val
 	case *ssa.ChangeType:
-		return resolveClosureVal(val.X, depth+1)
+		return resolveClosureValSeen(val.X, depth+1, seen)
 	case *ssa.UnOp:
 		if val.Op == token.MUL {
 			if alloc, ok := val.X.(*ssa.Alloc); ok {
 				var lastClosure *ssa.MakeClosure
 				for _, ref := range *alloc.Referrers() {
 					if store, ok := ref.(*ssa.Store); ok && store.Addr == alloc {
-						if mc := resolveClosureVal(store.Val, depth+1); mc != nil {
+						if mc := resolveClosureValSeen(store.Val, depth+1, seen); mc != nil {
 							lastClosure = mc
 						}
 					}
@@ -439,7 +495,7 @@ func resolveClosureVal(v ssa.Value, depth int) *ssa.MakeClosure {
 		}
 	case *ssa.Phi:
 		for _, edge := range val.Edges {
-			if mc := resolveClosureVal(edge, depth+1); mc != nil {
+			if mc := resolveClosureValSeen(edge, depth+1, seen); mc != nil {
 				return mc
 			}
 		}
@@ -632,6 +688,25 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		g.transfer(ins, sp.fn, sp.what(sp.fn))
 		g.writtenCaptures(ins, sp.fn, "captured by a callback started by "+sp.via+", which may write it")
 	}
+	var published map[int]bool
+	if contract, ok := capContractFor(fn); ok && len(contract.publishArgs) > 0 {
+		published = make(map[int]bool, len(contract.publishArgs))
+		for _, idx := range contract.publishArgs {
+			if idx < 0 || idx >= len(cc.Args) {
+				continue
+			}
+			published[idx] = true
+			payload := unwrapPublishedArg(cc.Args[idx])
+			if payload == nil {
+				continue
+			}
+			if _, isConst := payload.(*ssa.Const); isConst || g.st.cls.Shareable(payload.Type()) {
+				continue
+			}
+			g.transferPublish(ins, payload, idx, contract.what, contract.freezesToImm)
+			g.writtenCaptures(ins, payload, "captured by a closure "+contract.what+", which may write it")
+		}
+	}
 	sum := g.st.summary(fn)
 	name := calleeName(fn)
 	note := sum.unavailable()
@@ -642,6 +717,7 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 			continue
 		}
 		switch {
+		case published[i]:
 		case sum.isIso(i):
 			g.transferWithOp(ins, a, token.NoPos, i, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
 			g.writtenCaptures(ins, a, "captured by a closure passed to "+name+", which may write it")
@@ -863,6 +939,12 @@ func (g *graph) pointsTo(n *node) []*node {
 // region returns every class reachable from n through pointees, plus every class that can reach one
 // of those (a container holding a pointer into the region).
 func (g *graph) region(n *node) map[*node]bool {
+	n = n.find()
+	if g.regions != nil {
+		if cached, ok := g.regions[n]; ok {
+			return cached
+		}
+	}
 	g.buildRev()
 	out := map[*node]bool{}
 	stack := g.pointsTo(n)
@@ -874,6 +956,9 @@ func (g *graph) region(n *node) map[*node]bool {
 		}
 		out[c] = true
 		stack = append(stack, g.rev[c]...)
+	}
+	if g.regions != nil {
+		g.regions[n] = out
 	}
 	return out
 }

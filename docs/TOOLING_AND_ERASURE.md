@@ -168,12 +168,14 @@ Flags:
   -l	list files whose formatting differs from gosree-erase
   -o string
     	write result to named file (single input only)
+  -verify
+    	verify exported API type equivalence and compiled .text instruction equivalence without executing target code
   -w	write result to (source) file instead of stdout
 ```
 
-`-l` lists the files that erasure would change; a file that needs no erasure is neither listed nor written. `-d` prints, per file, `--- path`, `+++ path (erased)` and the removed and added lines. A path is a Go file, a directory (walked recursively) or `dir/...` (the same walk).
+`-l` lists the files that erasure would change; a file that needs no erasure is neither listed nor written. `-d` prints, per file, `--- path`, `+++ path (erased)` and the removed and added lines. `-verify` performs translation validation without rewriting: it type-checks original and erased packages with `go/types` to ensure exported API signatures match, and compiles them to machine code comparing `.text` disassembly instructions via `go tool objdump` (`VerifyCompiledTextEquivalence` in `cmd/gosree-erase/verify_equiv.go`). A path is a Go file, a directory (walked recursively) or `dir/...` (the same walk).
 
-Exit status, each observed with a real run: 0 everything requested was done (a file needing no erasure counts; `-d` exits 0 even when it prints a diff); 1 a file could not be erased or written (`gosree-erase bad.go` on an embedded marker field), a path was unusable (`gosree-erase nosuchfile.go`), or options conflict (`-w -o x`, `-o x a.go b.go`, `-w -`); 2 invalid flags (`gosree-erase -zzz a.go`). With `-w` the run is all-or-nothing: nothing is written unless every file erased, and a refused file leaves the others unchanged (`cmd/gosree-erase/main.go`). Walks skip hidden directories, `vendor`, `testdata` and symbolic links (a skipped link is reported on stderr; a link named directly on the command line is followed if it resolves inside the current directory, and is an error, exit 1, if it resolves outside it).
+Exit status, each observed with a real run: 0 everything requested was done (a file needing no erasure counts; `-d` exits 0 even when it prints a diff; `-verify` exits 0 when equivalence is proven); 1 a file could not be erased, equivalence verification failed, a path was unusable (`gosree-erase nosuchfile.go`), or options conflict (`-w -o x`, `-o x a.go b.go`, `-w -`); 2 invalid flags (`gosree-erase -zzz a.go`). With `-w` the run is all-or-nothing: nothing is written unless every file erased, and a refused file leaves the others unchanged (`cmd/gosree-erase/main.go`). Walks skip hidden directories, `vendor`, `testdata` and symbolic links (a skipped link is reported on stderr; a link named directly on the command line is followed if it resolves inside the current directory, and is an error, exit 1, if it resolves outside it).
 
 **Error-discipline constructs are not handled by erasure, and do not need to be.** `safeerr` (`ERR001`-`ERR005`) checks ordinary Go error handling and has no marker types or helper calls of its own. `gosree-erase` contains no errcheck-specific logic (verified: no `ERR00*` or errcheck references in `cmd/gosree-erase`), so an unhandled error, a lost `err`, or a typed-nil error survives erasure unchanged. Erasure only removes the capability markers and directives; run the analyzers before erasing.
 
@@ -181,6 +183,9 @@ Exit status, each observed with a real run: 0 everything requested was done (a f
 ```bash
 # Preview diffs before applying
 gosree-erase -d ./...
+
+# Formally verify type and compiled instruction equivalence without executing target code
+gosree-erase -verify ./...
 
 # Rewrite files in-place
 gosree-erase -w ./...

@@ -16,52 +16,81 @@ func indexIn(ins ssa.Instruction) int {
 	return -1
 }
 
+func reachableBlockMask(fn *ssa.Function, roots []*ssa.BasicBlock) []bool {
+	if fn == nil {
+		return nil
+	}
+	seen := make([]bool, len(fn.Blocks))
+	var stackBuf [16]*ssa.BasicBlock
+	stack := stackBuf[:0]
+	for _, r := range roots {
+		if r != nil && r.Index >= 0 && r.Index < len(seen) && !seen[r.Index] {
+			seen[r.Index] = true
+			stack = append(stack, r)
+		}
+	}
+	for len(stack) > 0 {
+		b := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, succ := range b.Succs {
+			if succ.Index >= 0 && succ.Index < len(seen) && !seen[succ.Index] {
+				seen[succ.Index] = true
+				stack = append(stack, succ)
+			}
+		}
+	}
+	return seen
+}
+
+func blockInMask(seen []bool, b *ssa.BasicBlock) bool {
+	return b != nil && b.Index >= 0 && b.Index < len(seen) && seen[b.Index]
+}
+
 // reachableAfter returns a predicate reporting whether an instruction can execute after s on some
 // path (including later iterations of a loop that contains s).
 func reachableAfter(s ssa.Instruction) func(ssa.Instruction) bool {
 	start := s.Block()
 	sIdx := indexIn(s)
-	seen := map[*ssa.BasicBlock]bool{}
-	stack := append([]*ssa.BasicBlock(nil), start.Succs...)
-	for len(stack) > 0 {
-		b := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if seen[b] {
-			continue
-		}
-		seen[b] = true
-		stack = append(stack, b.Succs...)
-	}
+	seen := reachableBlockMask(start.Parent(), start.Succs)
 	return func(t ssa.Instruction) bool {
-		if seen[t.Block()] {
+		if blockInMask(seen, t.Block()) {
 			return true
 		}
 		return t.Block() == start && indexIn(t) > sIdx
 	}
 }
 
-func reachableAfterTransfer(t transfer) func(ssa.Instruction) bool {
+func reachableBlocksForTransfer(t transfer) []bool {
 	if t.caseBlock != nil {
-		seen := map[*ssa.BasicBlock]bool{t.caseBlock: true}
-		stack := append([]*ssa.BasicBlock(nil), t.caseBlock.Succs...)
-		for len(stack) > 0 {
-			b := stack[len(stack)-1]
-			stack = stack[:len(stack)-1]
-			if seen[b] {
-				continue
-			}
-			seen[b] = true
-			stack = append(stack, b.Succs...)
-		}
+		return reachableBlockMask(t.caseBlock.Parent(), []*ssa.BasicBlock{t.caseBlock})
+	}
+	start := t.instr.Block()
+	return reachableBlockMask(start.Parent(), start.Succs)
+}
+
+func reachableAfterTransferWithMask(g *graph, t transfer, seen []bool) func(ssa.Instruction) bool {
+	if t.caseBlock != nil {
 		return func(target ssa.Instruction) bool {
-			return seen[target.Block()]
+			return blockInMask(seen, target.Block())
 		}
 	}
-	return reachableAfter(t.instr)
+	start := t.instr.Block()
+	sIdx := g.idxOf(t.instr)
+	return func(target ssa.Instruction) bool {
+		if blockInMask(seen, target.Block()) {
+			return true
+		}
+		return target.Block() == start && g.idxOf(target) > sIdx
+	}
+}
+
+func reachableAfterTransfer(t transfer) func(ssa.Instruction) bool {
+	return reachableAfterTransferWithMask(nil, t, reachableBlocksForTransfer(t))
 }
 
 func usesValue(ins ssa.Instruction, w ssa.Value) bool {
-	for _, op := range ins.Operands(nil) {
+	var buf [8]*ssa.Value
+	for _, op := range ins.Operands(buf[:0]) {
 		if op != nil && *op == w {
 			return true
 		}
@@ -105,23 +134,113 @@ type use struct {
 // if every such use is preceded by synchronisation, the returned use has synced set. A join (see
 // forkjoin.go) hands the moved memory back, so paths stop there like at a redefinition.
 func useAfter(s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Value, joins map[ssa.Instruction]bool) (use, bool) {
-	def, _ := w.(ssa.Instruction)
-	type state struct {
-		b      *ssa.BasicBlock
-		synced bool
+	return useAfterForGraph(nil, s, cb, w, joins, nil)
+}
+
+func hasReachableReferrer(g *graph, s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Value, reachMask []bool) bool {
+	refs := w.Referrers()
+	if refs == nil {
+		return true
 	}
+	if len(*refs) == 0 {
+		return false
+	}
+	sBlock := s.Block()
+	sIdx := g.idxOf(s)
+	for _, ref := range *refs {
+		if _, dbg := ref.(*ssa.DebugRef); dbg {
+			continue
+		}
+		if phi, ok := ref.(*ssa.Phi); ok {
+			preds := phi.Block().Preds
+			for pi, edge := range phi.Edges {
+				if edge != w || pi >= len(preds) {
+					continue
+				}
+				pred := preds[pi]
+				if cb != nil {
+					if blockInMask(reachMask, pred) {
+						return true
+					}
+				} else if pred == sBlock || blockInMask(reachMask, pred) {
+					return true
+				}
+			}
+			continue
+		}
+		rb := ref.Block()
+		if cb != nil {
+			if blockInMask(reachMask, rb) {
+				return true
+			}
+		} else if blockInMask(reachMask, rb) || (rb == sBlock && g.idxOf(ref) > sIdx) {
+			return true
+		}
+	}
+	return false
+}
+
+func useAfterForGraph(g *graph, s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Value, joins map[ssa.Instruction]bool, reachMask []bool) (use, bool) {
+	def, _ := w.(ssa.Instruction)
+	fn := s.Parent()
+	startBlock := s.Block()
+	if cb != nil {
+		startBlock = cb
+	}
+	// By SSA dominance, every use of an instruction w is dominated by def; if def has not yet
+	// executed on all paths reaching the search start, any forward path to a use must hit def first.
+	if def != nil && def.Block() != nil && fn != nil && startBlock != fn.Recover {
+		if cb != nil {
+			if def.Block() == cb || !def.Block().Dominates(cb) {
+				return use{}, false
+			}
+		} else if def != s && !g.dominates(def, s) {
+			return use{}, false
+		}
+	}
+	if reachMask != nil && !hasReachableReferrer(g, s, cb, w, reachMask) {
+		return use{}, false
+	}
+
 	var found *use
-	visited := map[state]bool{}
+	var visited []uint8
+	var visitedFallback map[*ssa.BasicBlock]uint8
+	if fn != nil {
+		visited = make([]uint8, len(fn.Blocks))
+	}
+	markVisited := func(b *ssa.BasicBlock, synced bool) bool {
+		bit := uint8(1)
+		if synced {
+			bit = 2
+		}
+		if b.Index >= 0 && b.Index < len(visited) {
+			if visited[b.Index]&bit != 0 {
+				return false
+			}
+			visited[b.Index] |= bit
+			return true
+		}
+		if visitedFallback == nil {
+			visitedFallback = map[*ssa.BasicBlock]uint8{}
+		}
+		if visitedFallback[b]&bit != 0 {
+			return false
+		}
+		visitedFallback[b] |= bit
+		return true
+	}
+
 	type item struct {
 		b      *ssa.BasicBlock
 		from   int
 		synced bool
 	}
-	var queue []item
+	var qBuf [16]item
+	queue := qBuf[:0]
 	if cb != nil {
-		queue = []item{{cb, 0, false}}
+		queue = append(queue, item{cb, 0, false})
 	} else {
-		queue = []item{{s.Block(), indexIn(s) + 1, false}}
+		queue = append(queue, item{s.Block(), g.idxOf(s) + 1, false})
 	}
 	for len(queue) > 0 {
 		it := queue[0]
@@ -136,7 +255,7 @@ func useAfter(s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Value, joins map[ssa.
 			}
 			if _, isPhi := ins.(*ssa.Phi); !isPhi {
 				if _, dbg := ins.(*ssa.DebugRef); !dbg && usesValue(ins, w) {
-					u := use{at: ins, pos: posOf(ins, s), synced: synced}
+					u := use{at: ins, pos: posOfWithGraph(g, ins, s), synced: synced}
 					if !synced {
 						return u, true
 					}
@@ -178,7 +297,7 @@ func useAfter(s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Value, joins map[ssa.
 						break
 					}
 					if phi.Edges[pi] == w {
-						u := use{at: phi, pos: posOf(lastInstr(it.b), s), synced: synced}
+						u := use{at: phi, pos: posOfWithGraph(g, lastInstr(it.b), s), synced: synced}
 						if !synced {
 							return u, true
 						}
@@ -188,9 +307,7 @@ func useAfter(s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Value, joins map[ssa.
 					}
 				}
 			}
-			st := state{succ, synced}
-			if !visited[st] {
-				visited[st] = true
+			if markVisited(succ, synced) {
 				queue = append(queue, item{succ, 0, synced})
 			}
 		}
@@ -203,14 +320,12 @@ func useAfter(s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Value, joins map[ssa.
 
 func lastInstr(b *ssa.BasicBlock) ssa.Instruction { return b.Instrs[len(b.Instrs)-1] }
 
-// posOf finds a source position for ins: its own, else the next positioned instruction in its block,
-// else fallback's.
-func posOf(ins ssa.Instruction, fallback ssa.Instruction) token.Pos {
+func posOfWithGraph(g *graph, ins ssa.Instruction, fallback ssa.Instruction) token.Pos {
 	if p := ins.Pos(); p.IsValid() {
 		return p
 	}
 	if b := ins.Block(); b != nil {
-		for _, x := range b.Instrs[indexIn(ins)+1:] {
+		for _, x := range b.Instrs[g.idxOf(ins)+1:] {
 			if p := x.Pos(); p.IsValid() {
 				return p
 			}
@@ -219,63 +334,209 @@ func posOf(ins ssa.Instruction, fallback ssa.Instruction) token.Pos {
 	return fallback.Pos()
 }
 
-// finalCells returns the captured variables that hold a shareable value and are never written after
-// a closure captures them: sharing such a variable is sharing an immutable value.
-func finalCells(st *state, fn *ssa.Function) map[*ssa.Alloc]bool {
-	out := map[*ssa.Alloc]bool{}
+// posOf finds a source position for ins: its own, else the next positioned instruction in its block,
+// else fallback's.
+func posOf(ins ssa.Instruction, fallback ssa.Instruction) token.Pos {
+	return posOfWithGraph(nil, ins, fallback)
+}
+
+// reachableWithoutKill reports whether target can execute after start along some CFG path that
+// does not execute kill first. When kill is a heap *ssa.Alloc, executing kill allocates a fresh
+// cell, so subsequent stores to kill do not mutate the earlier cell instance.
+func reachableWithoutKill(start, target, kill ssa.Instruction) bool {
+	sb := start.Block()
+	sIdx := indexIn(start)
+	for i := sIdx + 1; i < len(sb.Instrs); i++ {
+		ins := sb.Instrs[i]
+		if ins == kill {
+			return false
+		}
+		if ins == target {
+			return true
+		}
+	}
+	fn := sb.Parent()
+	var visited []bool
+	if fn != nil {
+		visited = make([]bool, len(fn.Blocks))
+	}
+	var stackBuf [16]*ssa.BasicBlock
+	stack := stackBuf[:0]
+	for _, succ := range sb.Succs {
+		if succ.Index >= 0 && succ.Index < len(visited) && !visited[succ.Index] {
+			visited[succ.Index] = true
+			stack = append(stack, succ)
+		}
+	}
+	for len(stack) > 0 {
+		b := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		killed := false
+		for _, ins := range b.Instrs {
+			if ins == kill {
+				killed = true
+				break
+			}
+			if ins == target {
+				return true
+			}
+		}
+		if killed {
+			continue
+		}
+		for _, succ := range b.Succs {
+			if succ.Index >= 0 && succ.Index < len(visited) && !visited[succ.Index] {
+				visited[succ.Index] = true
+				stack = append(stack, succ)
+			}
+		}
+	}
+	return false
+}
+
+// finalCells returns the captured variable cells (heap Allocs, and Phis selecting exclusively
+// among such heap Allocs, such as Go 1.22+ 3-clause per-iteration loop cells) that hold a
+// shareable value and are never written on the same cell instance after a closure captures them.
+func finalCells(st *state, fn *ssa.Function) map[ssa.Value]bool {
+	out := map[ssa.Value]bool{}
+	cand := map[ssa.Value]bool{}
+	var phis []*ssa.Phi
 	for _, b := range fn.Blocks {
 		for _, ins := range b.Instrs {
-			a, ok := ins.(*ssa.Alloc)
-			if !ok || !a.Heap {
+			switch x := ins.(type) {
+			case *ssa.Alloc:
+				if !x.Heap {
+					continue
+				}
+				if ptr, ok := x.Type().Underlying().(*types.Pointer); ok && st.cls.Shareable(ptr.Elem()) {
+					cand[x] = true
+				}
+			case *ssa.Phi:
+				if ptr, ok := x.Type().Underlying().(*types.Pointer); ok && len(x.Edges) > 0 && st.cls.Shareable(ptr.Elem()) {
+					cand[x] = true
+					phis = append(phis, x)
+				}
+			}
+		}
+	}
+	if len(cand) == 0 {
+		return out
+	}
+	for changed := true; changed; {
+		changed = false
+		for _, phi := range phis {
+			if !cand[phi] {
 				continue
 			}
-			elem := a.Type().(*types.Pointer).Elem()
-			if !st.cls.Shareable(elem) {
+			for _, e := range phi.Edges {
+				if !cand[e] {
+					delete(cand, phi)
+					changed = true
+					break
+				}
+			}
+		}
+	}
+
+	adj := map[ssa.Value][]ssa.Value{}
+	var members []ssa.Value
+	for _, b := range fn.Blocks {
+		for _, ins := range b.Instrs {
+			v, ok := ins.(ssa.Value)
+			if !ok || !cand[v] {
 				continue
 			}
-			if cellIsFinal(a) {
-				out[a] = true
+			members = append(members, v)
+			if phi, isPhi := v.(*ssa.Phi); isPhi {
+				for _, e := range phi.Edges {
+					adj[phi] = append(adj[phi], e)
+					adj[e] = append(adj[e], phi)
+				}
+			}
+		}
+	}
+
+	seen := map[ssa.Value]bool{}
+	for _, root := range members {
+		if seen[root] {
+			continue
+		}
+		comp := []ssa.Value{root}
+		inComp := map[ssa.Value]bool{root: true}
+		seen[root] = true
+		for head := 0; head < len(comp); head++ {
+			cur := comp[head]
+			for _, nb := range adj[cur] {
+				if !seen[nb] {
+					seen[nb] = true
+					inComp[nb] = true
+					comp = append(comp, nb)
+				}
+			}
+		}
+		if cellGroupIsFinal(comp, inComp) {
+			for _, v := range comp {
+				out[v] = true
 			}
 		}
 	}
 	return out
 }
 
-func cellIsFinal(a *ssa.Alloc) bool {
+func cellGroupIsFinal(comp []ssa.Value, inComp map[ssa.Value]bool) bool {
 	var captures []*ssa.MakeClosure
 	var stores []*ssa.Store
-	for _, r := range *a.Referrers() {
-		switch r := r.(type) {
-		case *ssa.MakeClosure:
-			captures = append(captures, r)
-			for j, bnd := range r.Bindings {
-				if bnd == a && freeVarWritten(r.Fn.(*ssa.Function).FreeVars[j]) {
+	for _, v := range comp {
+		refs := v.Referrers()
+		if refs == nil {
+			return false
+		}
+		for _, r := range *refs {
+			switch r := r.(type) {
+			case *ssa.MakeClosure:
+				captures = append(captures, r)
+				for j, bnd := range r.Bindings {
+					if bnd == v && freeVarWritten(r.Fn.(*ssa.Function).FreeVars[j]) {
+						return false
+					}
+				}
+			case *ssa.Store:
+				if r.Addr != v {
 					return false
 				}
-			}
-		case *ssa.Store:
-			if r.Addr != a {
+				stores = append(stores, r)
+			case *ssa.UnOp:
+				if r.Op != token.MUL {
+					return false
+				}
+			case *ssa.Phi:
+				if !inComp[r] {
+					return false
+				}
+			case *ssa.DebugRef:
+			default:
+				// The variable's address goes somewhere that may write through it.
 				return false
 			}
-			stores = append(stores, r)
-		case *ssa.UnOp:
-			if r.Op != token.MUL {
-				return false
-			}
-		case *ssa.DebugRef:
-		default:
-			// The variable's address goes somewhere that may write through it.
-			return false
 		}
 	}
 	if len(captures) == 0 {
 		return false
 	}
 	for _, mc := range captures {
-		after := reachableAfter(mc)
+		var after func(ssa.Instruction) bool
 		for _, s := range stores {
-			if after(s) {
-				return false
+			if alloc, isAlloc := s.Addr.(*ssa.Alloc); isAlloc {
+				if reachableWithoutKill(mc, s, alloc) {
+					return false
+				}
+			} else {
+				if after == nil {
+					after = reachableAfter(mc)
+				}
+				if after(s) {
+					return false
+				}
 			}
 		}
 	}

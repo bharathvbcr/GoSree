@@ -45,6 +45,7 @@ type options struct {
 	write   bool
 	list    bool
 	diff    bool
+	verify  bool
 	outPath string
 	stdin   io.Reader
 	stdout  io.Writer
@@ -68,6 +69,7 @@ func runWith(args []string, stdin io.Reader, stdout, stderr io.Writer, erase era
 	flags.StringVar(&o.outPath, "o", "", "write result to named file (single input only)")
 	flags.BoolVar(&o.list, "l", false, "list files whose formatting differs from gosree-erase")
 	flags.BoolVar(&o.diff, "d", false, "display diffs instead of rewriting files")
+	flags.BoolVar(&o.verify, "verify", false, "verify exported API type equivalence and compiled .text instruction equivalence without executing target code")
 	flags.Usage = func() {
 		fmt.Fprintf(stderr, "Usage: gosree-erase [flags] [path ...]\n\nFlags:\n")
 		flags.PrintDefaults()
@@ -117,6 +119,12 @@ was written); 2 invalid flags.
 	}
 
 	targets, ok := o.collect(rest)
+	if o.verify {
+		if err := o.verifyTargets(targets); err != nil {
+			o.errorf("gosree-erase: equivalence verification failed: %v", err)
+			return 1
+		}
+	}
 	if o.write && !o.list && !o.diff {
 		return o.writeAll(targets, ok)
 	}
@@ -346,7 +354,58 @@ func (o *options) processStream() error {
 	if err != nil {
 		return err
 	}
+	if o.verify {
+		if _, verr := VerifyCompiledTextEquivalence(map[string][]byte{"stdin.go": src}, o.erase); verr != nil {
+			return fmt.Errorf("equivalence verification failed: %w", verr)
+		}
+	}
 	return o.emit("<stdin>", src, out)
+}
+
+func (o *options) verifyTargets(targets []target) error {
+	byDir := map[string]map[string][]byte{}
+	var dirs []string
+	for _, t := range targets {
+		base := filepath.Base(t.real)
+		if strings.HasSuffix(base, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(t.real)
+		if err != nil {
+			return fmt.Errorf("%s: %w", t.display, err)
+		}
+		dir := filepath.Dir(t.real)
+		if byDir[dir] == nil {
+			byDir[dir] = map[string][]byte{}
+			dirs = append(dirs, dir)
+		}
+		byDir[dir][base] = src
+	}
+	sort.Strings(dirs)
+	for _, dir := range dirs {
+		files := byDir[dir]
+		// Include any unselected sibling regular non-test .go files in the same
+		// package directory so `gosree-erase -verify pkg/one.go` resolves package-local
+		// declarations across sibling files of `pkg`.
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, ent := range entries {
+				name := ent.Name()
+				if !ent.Type().IsRegular() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+					continue
+				}
+				if _, exists := files[name]; exists {
+					continue
+				}
+				if sibSrc, rerr := os.ReadFile(filepath.Join(dir, name)); rerr == nil {
+					files[name] = sibSrc
+				}
+			}
+		}
+		if _, err := VerifyDirectoryEquivalence(dir, files, o.erase); err != nil {
+			return fmt.Errorf("%s: %w", dir, err)
+		}
+	}
+	return nil
 }
 
 // processFile erases one file, delivering the result as the options would for

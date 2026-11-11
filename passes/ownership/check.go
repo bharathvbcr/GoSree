@@ -1,10 +1,12 @@
 package ownership
 
 import (
+	"cmp"
 	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 	"sort"
 	"strings"
 
@@ -49,11 +51,15 @@ func (st *state) checkTransfer(g *graph, t transfer) {
 		return
 	}
 	reg := g.region(n)
-	after := reachableAfterTransfer(t)
+	reachMask := reachableBlocksForTransfer(t)
+	after := reachableAfterTransferWithMask(g, t, reachMask)
 
 	var foreign, escape []event
 	for c := range reg {
 		for _, e := range c.events {
+			if t.freezesToImm && e.global != nil && st.isInitOnlyImmutableGlobal(e.global) {
+				continue
+			}
 			switch e.kind {
 			case evForeign:
 				foreign = append(foreign, e)
@@ -91,25 +97,34 @@ func (st *state) checkTransfer(g *graph, t transfer) {
 		st.report(t.pos, Escapes, fmt.Sprintf("%s is %s but also escapes: %s%s",
 			what, t.what, e.desc, st.at(e.pos)))
 	}
-	st.checkUseAfter(g, t, reg)
+	st.checkUseAfter(g, t, n, reg, reachMask, after)
 }
 
-func (st *state) checkUseAfter(g *graph, t transfer, reg map[*node]bool) {
-	var vals []ssa.Value
-	for v, n := range g.nodes {
-		if n == nil || !reg[n.find()] {
-			continue
+func (st *state) checkUseAfter(g *graph, t transfer, root *node, reg map[*node]bool, reachMask []bool, after func(ssa.Instruction) bool) {
+	root = root.find()
+	vals, cached := g.regionVals[root]
+	if !cached {
+		for v, n := range g.nodes {
+			if n == nil || !reg[n.find()] {
+				continue
+			}
+			switch v.(type) {
+			case *ssa.Global, *ssa.Const, *ssa.Function:
+				continue
+			}
+			vals = append(vals, v)
 		}
-		switch v.(type) {
-		case *ssa.Global, *ssa.Const, *ssa.Function:
-			continue
+		sort.Slice(vals, func(i, j int) bool { return compareSSAValOrder(g, vals[i], vals[j]) < 0 })
+		if g.regionVals != nil {
+			g.regionVals[root] = vals
 		}
-		vals = append(vals, v)
 	}
-	sort.Slice(vals, func(i, j int) bool { return vals[i].Pos() < vals[j].Pos() })
 	joins := st.joins(g, t)
 	for _, w := range vals {
-		u, ok := useAfter(t.instr, t.caseBlock, w, joins)
+		if t.freezesToImm && st.directInitOnlyGlobal(w) {
+			continue
+		}
+		u, ok := useAfterForGraph(g, t.instr, t.caseBlock, w, joins, reachMask)
 		if !ok {
 			continue
 		}
@@ -122,30 +137,66 @@ func (st *state) checkUseAfter(g *graph, t transfer, reg map[*node]bool) {
 		st.report(u.pos, cat, fmt.Sprintf("%s is used after it was %s%s%s",
 			describe(w), t.what, st.at(t.pos), note))
 	}
-	st.checkDeferredUse(g, t, reg)
+	st.checkDeferredUse(g, t, reg, after)
+}
+
+func compareSSAValOrder(g *graph, a, b ssa.Value) int {
+	if a == b {
+		return 0
+	}
+	if c := cmp.Compare(a.Pos(), b.Pos()); c != 0 {
+		return c
+	}
+	kindRank := func(v ssa.Value) (int, int, int) {
+		switch x := v.(type) {
+		case *ssa.Parameter:
+			if g != nil && g.fn != nil {
+				return 0, slices.Index(g.fn.Params, x), 0
+			}
+			return 0, 0, 0
+		case *ssa.FreeVar:
+			if g != nil && g.fn != nil {
+				return 1, slices.Index(g.fn.FreeVars, x), 0
+			}
+			return 1, 0, 0
+		case ssa.Instruction:
+			blkIdx := -1
+			if x.Block() != nil {
+				blkIdx = x.Block().Index
+			}
+			return 2, blkIdx, g.idxOf(x)
+		default:
+			return 3, 0, 0
+		}
+	}
+	ka, b1, i1 := kindRank(a)
+	kb, b2, i2 := kindRank(b)
+	return cmp.Or(cmp.Compare(ka, kb), cmp.Compare(b1, b2), cmp.Compare(i1, i2), cmp.Compare(a.Name(), b.Name()))
 }
 
 // checkDeferredUse reports deferred calls registered before a move that touch the moved memory: they
 // run when the function returns, which is after the move. (A defer registered after the move is an
 // ordinary use and checkUseAfter reports it.)
-func (st *state) checkDeferredUse(g *graph, t transfer, reg map[*node]bool) {
-	after := reachableAfterTransfer(t)
-	forEachInstr(g.fn, func(ins ssa.Instruction) {
-		d, ok := ins.(*ssa.Defer)
-		if !ok || after(d) {
-			return
+func (st *state) checkDeferredUse(g *graph, t transfer, reg map[*node]bool, after func(ssa.Instruction) bool) {
+	if len(g.defers) == 0 {
+		return
+	}
+	var opBuf [8]*ssa.Value
+	for _, d := range g.defers {
+		if after(d) {
+			continue
 		}
-		for _, op := range d.Operands(nil) {
+		for _, op := range d.Operands(opBuf[:0]) {
 			if op == nil || *op == nil {
 				continue
 			}
 			if n := g.nodes[*op]; n != nil && reg[n.find()] {
 				st.report(d.Pos(), UseAfter, fmt.Sprintf("this deferred call uses %s, which runs when the function returns, after it was %s%s",
 					describe(*op), t.what, st.at(t.pos)))
-				return
+				break
 			}
 		}
-	})
+	}
 }
 
 func earliest(es []event) event {
@@ -266,9 +317,9 @@ func (st *state) checkBorrowEscape(g *graph, t transfer) bool {
 		}
 	}
 
-	// 4. Moving a local borrow via cap.Move or passing a local borrow to an owned (iso) parameter
+	// 4. Moving a local borrow via cap.Move, passing to an owned (iso) parameter, or publishing via a capability contract
 	if _, isParam := t.v.(*ssa.Parameter); !isParam {
-		if t.what == "moved by cap.Move" || strings.HasPrefix(t.what, "passed to owned parameter ") {
+		if t.what == "moved by cap.Move" || strings.HasPrefix(t.what, "passed to owned parameter ") || isCapContractTransferWhat(t.what) {
 			if vr, name, kindStr := st.identifyBorrow(g, t); vr != nil {
 				msg := fmt.Sprintf("stack-scoped borrow '%s' (%s) cannot cross goroutine boundary: cannot be %s", name, kindStr, t.what)
 				st.report(t.pos, BorrowEscape, msg)

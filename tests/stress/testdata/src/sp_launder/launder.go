@@ -67,7 +67,7 @@ func viaWithValue(ctx context.Context) {
 	j := &Job{}
 	ctx = context.WithValue(ctx, key{}, j)
 	go func() { ctx.Value(key{}).(*Job).ID = 2 }()
-	j.ID = 1 // MISS(SAFE003): context.WithValue stores j in a Context, an override; the goroutine reads it back and writes it. Witness sp_w_ctxvalue
+	j.ID = 1 // HIT(SAFE003): context.WithValue stores j in a Context, an override; the goroutine reads it back and writes it. Witness sp_w_ctxvalue
 }
 
 // a user type implementing context.Context with a mutable field is shareable once boxed.
@@ -109,5 +109,5 @@ func viaSyncMap(m *sync.Map) {
 		v, _ := m.Load("k")
 		v.(*Job).ID = 2
 	}()
-	j.ID = 1 // MISS(SAFE003): Store into a *sync.Map (pointer override) publishes j to every goroutine holding the map. Witness sp_w_syncmap
+	j.ID = 1 // HIT(SAFE003): Store into a *sync.Map (pointer override) publishes j to every goroutine holding the map. Witness sp_w_syncmap
 }

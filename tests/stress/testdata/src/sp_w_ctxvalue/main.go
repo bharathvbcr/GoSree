@@ -19,6 +19,6 @@ func main() {
 		ctx.Value(key{}).(*Job).ID = 2
 		close(done)
 	}()
-	j.ID = 1 // MISS(SAFE003): j crossed inside a Context, which the checker treats as shareable
+	j.ID = 1 // HIT(SAFE003): j crossed inside a Context, which the checker treats as shareable
 	<-done
 }

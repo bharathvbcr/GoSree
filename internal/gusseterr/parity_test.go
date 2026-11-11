@@ -338,3 +338,87 @@ func buildRandomPackage(rng *rand.Rand, nFuncs, maxBlocks int) []gusseterr.FuncI
 	}
 	return funcs
 }
+
+func TestLatePhiActivationAndCyclicErrLinkOracleParity(t *testing.T) {
+	ctx := context.Background()
+	pkg := []gusseterr.FuncIR{
+		// Function 0: Diamond CFG where bb0 -> bb2 runs before bb1 -> bb2 without
+		// changing inStates[2], requiring edgeChanged to activate PhiIR incoming (1, 1).
+		{
+			SlotFlags: []uint8{0, 0, gusseterr.SlotIsError, 0},
+			Tuples:    []gusseterr.TupleMeta{{ErrSlot: 2, CallSiteID: 10}},
+			Blocks: []gusseterr.BlockIR{
+				{
+					Ops: []gusseterr.OpIR{
+						{Kind: gusseterr.OpBindTuple, SiteID: 10, TupleID: 0, SlotA: 2, Companions: []uint32{1}},
+						{Kind: gusseterr.OpObserveErr, SiteID: 11, SlotA: 2},
+					},
+					Term: gusseterr.Terminator{Kind: gusseterr.TermCond, Target: 2, FalseBB: 1, CondKind: gusseterr.CondOpaque, CondSlot: gusseterr.NoneU32},
+				},
+				{
+					Term: gusseterr.Terminator{Kind: gusseterr.TermJump, Target: 2},
+				},
+				{
+					Phis: []gusseterr.PhiIR{{DstSlot: 3, Incoming: []gusseterr.PhiEdge{{PredBB: 0, SrcSlot: 0}, {PredBB: 1, SrcSlot: 1}}}},
+					Term: gusseterr.Terminator{Kind: gusseterr.TermJump, Target: 3},
+				},
+				{
+					Ops:  []gusseterr.OpIR{{Kind: gusseterr.OpUseCompanion, SiteID: 77, SlotA: 3}},
+					Term: gusseterr.Terminator{Kind: gusseterr.TermStop},
+				},
+			},
+		},
+		// Function 1: Cyclic back-edge invalidating ErrLink(Tuple(0)) -> ErrLink(None).
+		{
+			SlotFlags: []uint8{gusseterr.SlotIsError, 0, 0},
+			Tuples:    []gusseterr.TupleMeta{{ErrSlot: 0, CallSiteID: 1}},
+			Blocks: []gusseterr.BlockIR{
+				{
+					Ops:  []gusseterr.OpIR{{Kind: gusseterr.OpBindTuple, SiteID: 1, TupleID: 0, SlotA: 0, Companions: []uint32{1}}},
+					Term: gusseterr.Terminator{Kind: gusseterr.TermJump, Target: 1},
+				},
+				{
+					Term: gusseterr.Terminator{Kind: gusseterr.TermCond, Target: 2, FalseBB: 3, CondKind: gusseterr.CondIsNil, CondSlot: 0},
+				},
+				{
+					Phis: []gusseterr.PhiIR{{DstSlot: 2, Incoming: []gusseterr.PhiEdge{{PredBB: 1, SrcSlot: 1}}}},
+					Ops:  []gusseterr.OpIR{{Kind: gusseterr.OpAssignSlot, SiteID: 2, SlotA: 0, SlotB: gusseterr.NoneU32, NilHint: gusseterr.AssignNilMustNil}},
+					Term: gusseterr.Terminator{Kind: gusseterr.TermCond, Target: 1, FalseBB: 4, CondKind: gusseterr.CondOpaque, CondSlot: gusseterr.NoneU32},
+				},
+				{
+					Term: gusseterr.Terminator{Kind: gusseterr.TermStop},
+				},
+				{
+					Ops:  []gusseterr.OpIR{{Kind: gusseterr.OpUseCompanion, SiteID: 99, SlotA: 2}},
+					Term: gusseterr.Terminator{Kind: gusseterr.TermStop},
+				},
+			},
+		},
+	}
+
+	req, err := gusseterr.EncodePackage(pkg)
+	if err != nil {
+		t.Fatalf("EncodePackage: %v", err)
+	}
+	wantBytes, err := gusseterr.SolveFrameOracle(ctx, req)
+	if err != nil {
+		t.Fatalf("SolveFrameOracle: %v", err)
+	}
+	wantRes, err := gusseterr.DecodeResult(wantBytes)
+	if err != nil {
+		t.Fatalf("DecodeResult: %v", err)
+	}
+	if len(wantRes.Findings) != 2 {
+		t.Fatalf("expected both ERR002 findings (sites 77 and 99), got %+v", wantRes.Findings)
+	}
+	if gusseterr.NativeActive() {
+		gotBytes, err := gusseterr.SolveFrame(ctx, req)
+		if err != nil {
+			t.Fatalf("SolveFrame: %v", err)
+		}
+		if !bytes.Equal(gotBytes, wantBytes) {
+			gotRes, _ := gusseterr.DecodeResult(gotBytes)
+			t.Fatalf("Rust vs Oracle mismatch:\nRust:   %+v\nOracle: %+v", gotRes, wantRes)
+		}
+	}
+}

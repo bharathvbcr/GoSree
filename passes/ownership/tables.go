@@ -27,6 +27,7 @@ func callTableNames() []string {
 	for name := range lockOps {
 		out = append(out, name)
 	}
+	out = append(out, capContractNames()...)
 	sort.Strings(out)
 	return out
 }

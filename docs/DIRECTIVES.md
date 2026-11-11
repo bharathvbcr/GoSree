@@ -1,6 +1,6 @@
 # GoSree (`gosree`) Directives & Capability Markers Reference
 
-[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Error Discipline](ERROR_DISCIPLINE.md) | [Tooling](TOOLING_AND_ERASURE.md)
+[← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Error Discipline](ERROR_DISCIPLINE.md) | [Tooling](TOOLING_AND_ERASURE.md) | [Roadmap](ROADMAP.md)
 
 ---
 
@@ -60,6 +60,15 @@ func Worker(job *Job) {
 - **Caller Effect:** The caller's argument binding is moved; subsequent caller access triggers `SAFE003`.
 - **Callee Effect:** The callee can move the value onto a channel or into a spawned goroutine without triggering `SAFE002`.
 
+#### 2.1.1 Standard-Library Concurrent Container Contracts (`capContracts`)
+In addition to function parameter directives, GoSree automatically treats publication into standard-library concurrent containers ([`passes/ownership/contracts.go`](../passes/ownership/contracts.go)) as capability boundaries:
+- `(*sync/atomic.Pointer[T]).Store(p)`, `Swap`, `CompareAndSwap`: Storing into an atomic pointer moves affine `\iso` ownership from the publisher. Post-store reuse triggers `SAFE003`.
+- `(*sync/atomic.Pointer[T]).Load()`: Loading yields shared read-only `\imm` memory; subsequent in-place field or slice mutation without a mutex triggers `SAFE005`.
+- `(*sync/atomic.Value).Store(x)`, `Swap`, `CompareAndSwap` / `Load()`: Follows the same affine-store and immutable-load capability contract as `atomic.Pointer`.
+- `(*sync.Map).Store(k, v)`, `LoadOrStore`, `Swap`, `CompareAndSwap`: Storing non-shareable keys or values moves ownership into the map (`SAFE003`).
+- `(*sync.Pool).Put(x)` / `Get()`: `Put` moves ownership into the pool (`SAFE003`); `Get` yields fresh, uniquely-owned `\iso` memory.
+- `context.WithValue(ctx, k, v)`: Storing non-shareable pointers into a `Context` moves them into the shared context.
+
 ---
 
 ### 2.2 `//gosree:imm` (Deep Immutability)
@@ -109,8 +118,8 @@ b := &x //gosree:mut
 ```
 
 - **Invariants:**
-  - Cannot be stored in struct fields or globals (`BORROW001`).
-  - Cannot coexist with active mutable or read-only borrows of the same memory (`BORROW002`).
+  - Cannot be stored in struct fields or globals (`BORROW001`). Storage checks also inspect package-level anonymous function literals (`allPackageFuncs`), preventing borrows from escaping into globals.
+  - Cannot coexist with active mutable or read-only borrows of the same memory (`BORROW002`). Non-Lexical Lifetime (NLL) flow-sensitive reachability tracking resolves borrow active ranges across sequential statements, same-line statements, loop back-edges, and backward-`goto` jumps.
   - Cannot escape across channels or goroutines (`CAP003`).
 - **Where it attaches:** A function declaration (named parameters), a parameter's type in the parameter list, or an assignment or `var` statement in a function body. Anywhere else, including a struct field or a package variable, is `SAFE007`. A binding takes one borrow directive: two on one statement, or a conflicting `//gosree:rob`, are `SAFE007`.
 
@@ -196,7 +205,7 @@ externalLibrary.UnsafeCall(ptr)
 
 - **Requirement:** A reason with at least one letter or digit. A missing or invisible-only reason, an unattached hatch, a hatch on the line of a multi-line block's opening brace, or an exact duplicate scope is `SAFE007`.
 - **Coverage:** On its own line above a statement, or in a declaration's doc comment, it covers the whole statement or declaration. At the end of a code line it covers that line's statement except the bodies of multi-line blocks in it.
-- **Which passes honor it:** `unsafeban`, `ownership`, `borrow` (`passes/borrow/check.go`, `passes/borrow/storage.go`) and `errcheck` (mutes `ERR001`-`ERR005`, `passes/errcheck/errcheck.go`). Each pass reports a muted finding through `Index.Mute`, which is what marks the hatch as used.
+- **Which passes honor it:** `unsafeban`, `ownership`, `borrow` (`passes/borrow/check.go`, `passes/borrow/storage.go`) and `errcheck` (mutes `ERR001`-`ERR005`, `passes/errcheck/errcheck.go`). Each pass reports a muted finding through `Index.Mute`, which is what marks the hatch as used. An escape hatch that mutes only a `BORROW004` or `ERR001` finding is properly recorded as used and is never falsely flagged as stale (`RB-STALE`).
 - **Auditability:** `cmd/gosree-corpus` reports a hatch ratio (suppressed transfers over all transfers, `hatch_ratio` in its JSON).
 - **Stale Detection:** The `safestale` analyzer (`internal/annot/stale`) reports a hatch that mutes nothing as `SAFE007` (`stale escape hatch: this //gosree:unsafe mutes no finding of any rule; remove it`), but `cmd/gosree` does not register it, so the shipped binary does not emit that diagnostic. The ownership pass still counts such scopes in its stats (`UnsafeStale`).
 
@@ -273,9 +282,16 @@ func main() {
 }
 ```
 
-### 3.4 Automatic Erasure
-To produce plain Go with no marker types and no directives, `cmd/gosree-erase` rewrites `cap.Mut[Item]` to `*Item`, replaces `cap.BorrowMut(&x)` with `&x`, strips the `github.com/bharathvbcr/gosree/cap` import, and removes `//gosree:` and `/*gosree:` comments. Without flags it prints the result to stdout; `-w` writes the files in place, all or nothing:
+### 3.4 Automatic Erasure & Translation Validation
+To produce plain Go with no marker types and no directives, `cmd/gosree-erase` rewrites `cap.Mut[Item]` to `*Item`, replaces `cap.BorrowMut(&x)` with `&x`, strips the `github.com/bharathvbcr/gosree/cap` import, and removes `//gosree:` and `/*gosree:` comments. Without flags it prints the result to stdout; `-d` previews diffs; `-w` writes the files in place, all or nothing; and `-verify` performs formal translation validation against unannotated Go:
 
 ```bash
+# Preview diffs before rewriting
+gosree-erase -d ./...
+
+# Formally verify exported API type signatures and compiled .text instructions
+gosree-erase -verify ./...
+
+# Rewrite files in-place atomically
 gosree-erase -w ./...
 ```

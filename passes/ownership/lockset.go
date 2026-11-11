@@ -377,11 +377,13 @@ func lockOp(cc *ssa.CallCommon) (lockOpKind, ssa.Value) {
 }
 
 // release is a mutex a function unlocks, as a path from a parameter, free variable, or global.
+// When prefix is true, any held lock whose path starts with steps on the same root may be unlocked.
 type release struct {
 	param  int
 	free   int
 	global *ssa.Global
 	steps  string
+	prefix bool
 }
 
 // guardState holds the per-package results the lock analysis shares between functions.
@@ -398,13 +400,7 @@ func (st *state) checkGuarded(fns []*ssa.Function) {
 	if len(st.ix.Guarded) == 0 && len(st.ix.Holds) == 0 {
 		return
 	}
-	gs := &guardState{
-		releases: st.releaseSummaries(fns),
-		before:   map[*ssa.Function]map[ssa.Instruction]lockset{},
-		initOnly: st.initFuncs(fns),
-		visiting: map[*ssa.Function]bool{},
-	}
-	st.acquireSummaries(gs, fns)
+	gs := st.ensureGuardSummaries(fns)
 	for _, fn := range fns {
 		if len(fn.Blocks) > 0 {
 			st.locksOf(gs, fn)
@@ -418,6 +414,9 @@ func (st *state) checkGuarded(fns []*ssa.Function) {
 }
 
 func (st *state) hasLockOps(fns []*ssa.Function) bool {
+	if len(st.ix.Holds) > 0 {
+		return true
+	}
 	found := false
 	for _, fn := range fns {
 		forEachInstr(fn, func(ins ssa.Instruction) {
@@ -428,8 +427,15 @@ func (st *state) hasLockOps(fns []*ssa.Function) bool {
 			if !ok {
 				return
 			}
-			if k, _ := lockOp(c.Common()); k == opLock || k == opRLock || k == opTryLock || k == opTryRLock {
+			cc := c.Common()
+			if k, _ := lockOp(cc); k == opLock || k == opRLock || k == opTryLock || k == opTryRLock {
 				found = true
+				return
+			}
+			if !cc.IsInvoke() {
+				if callee := cc.StaticCallee(); callee != nil && callee.Pkg != st.ssa.Pkg && len(st.summary(callee).acquires) > 0 {
+					found = true
+				}
 			}
 		})
 		if found {
@@ -439,11 +445,93 @@ func (st *state) hasLockOps(fns []*ssa.Function) bool {
 	return false
 }
 
+func stepCount(steps string) int {
+	n := 0
+	for i := 0; i < len(steps); i++ {
+		if steps[i] == '.' || steps[i] == '*' {
+			n++
+		}
+	}
+	return n
+}
+
+func truncateSteps(steps string, maxSteps int) string {
+	n := 0
+	for i := 0; i < len(steps); i++ {
+		if steps[i] == '.' || steps[i] == '*' {
+			if n == maxSteps {
+				return steps[:i]
+			}
+			n++
+		}
+	}
+	return steps
+}
+
+func singleStoredParam(fn *ssa.Function, cell *ssa.Alloc) int {
+	if fn == nil || cell == nil || cell.Parent() != fn {
+		return -1
+	}
+	refs := cell.Referrers()
+	if refs == nil {
+		return -1
+	}
+	var store *ssa.Store
+	for _, r := range *refs {
+		switch r := r.(type) {
+		case *ssa.Store:
+			if r.Addr == cell {
+				if store != nil {
+					return -1
+				}
+				store = r
+			}
+		case *ssa.MakeClosure:
+			for j, b := range r.Bindings {
+				if b == cell && freeVarWritten(r.Fn.(*ssa.Function).FreeVars[j]) {
+					return -1
+				}
+			}
+		}
+	}
+	if store == nil {
+		return -1
+	}
+	for i, p := range fn.Params {
+		if store.Val == p {
+			return i
+		}
+	}
+	return -1
+}
+
+func hasStepPrefix(steps, prefix string) bool {
+	if prefix == "" || steps == prefix {
+		return true
+	}
+	if !strings.HasPrefix(steps, prefix) {
+		return false
+	}
+	next := steps[len(prefix)]
+	return next == '.' || next == '*'
+}
+
 // releaseSummaries computes, for each function of the package, the mutexes it may leave
 // unlocked: Unlock or RUnlock (deferred or not) on a parameter, free-var, or global path,
-// directly or through calls.
+// directly or through calls. Recursive path growth is soundly widened to a prefix after a
+// bounded step depth so recursive tree/graph walkers terminate in linear time.
 func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]release {
+	const (
+		maxReleaseSteps  = 8
+		maxReleasesPerFn = 32
+	)
 	out := map[*ssa.Function][]release{}
+	seen := map[*ssa.Function]map[release]bool{}
+	inPkg := make(map[*ssa.Function]bool, len(fns))
+	for _, fn := range fns {
+		inPkg[fn] = true
+	}
+
 	paramIndex := func(fn *ssa.Function, v ssa.Value) int {
 		for i, p := range fn.Params {
 			if p == v {
@@ -452,78 +540,179 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 		}
 		return -1
 	}
-	toRelease := func(fn *ssa.Function, p guardPath) (release, bool) {
+	toRelease := func(fn *ssa.Function, p guardPath, prefix bool) (release, bool) {
 		if i := paramIndex(fn, p.root); i >= 0 {
-			return release{param: i, free: -1, steps: p.steps}, true
+			return release{param: i, free: -1, steps: p.steps, prefix: prefix}, true
+		}
+		if alloc, ok := p.root.(*ssa.Alloc); ok && strings.HasPrefix(p.steps, "*") {
+			if i := singleStoredParam(fn, alloc); i >= 0 {
+				return release{param: i, free: -1, steps: p.steps[1:], prefix: prefix}, true
+			}
 		}
 		if fv, ok := p.root.(*ssa.FreeVar); ok {
 			if i := slices.Index(fn.FreeVars, fv); i >= 0 {
-				return release{param: -1, free: i, steps: p.steps}, true
+				return release{param: -1, free: i, steps: p.steps, prefix: prefix}, true
 			}
 		}
 		if g, ok := p.root.(*ssa.Global); ok {
-			return release{param: -1, free: -1, global: g, steps: p.steps}, true
+			return release{param: -1, free: -1, global: g, steps: p.steps, prefix: prefix}, true
 		}
 		return release{}, false
 	}
 	add := func(fn *ssa.Function, r release) bool {
-		if slices.Contains(out[fn], r) {
+		if stepCount(r.steps) > maxReleaseSteps {
+			r.steps = truncateSteps(r.steps, maxReleaseSteps)
+			r.prefix = true
+		}
+		if len(out[fn]) >= maxReleasesPerFn {
+			r.steps = ""
+			r.prefix = true
+		}
+		s := seen[fn]
+		if s == nil {
+			s = map[release]bool{}
+			seen[fn] = s
+		}
+		if s[r] {
 			return false
 		}
+		for _, cur := range out[fn] {
+			if cur.prefix && cur.param == r.param && cur.free == r.free && cur.global == r.global && hasStepPrefix(r.steps, cur.steps) {
+				return false
+			}
+		}
+		s[r] = true
 		out[fn] = append(out[fn], r)
 		return true
 	}
-	for changed, rounds := true, 0; changed && rounds < 16; rounds++ {
-		changed = false
-		for _, fn := range fns {
-			if st.holdsOf(fn) != nil {
-				continue // a //gosree:holds function must not release (SAFE007 checks it)
+
+	type callEdge struct {
+		callee *ssa.Function
+		args   []ssa.Value
+		mc     *ssa.MakeClosure
+	}
+	edgesOf := make(map[*ssa.Function][]callEdge, len(fns))
+	callers := make(map[*ssa.Function][]*ssa.Function, len(fns))
+	inQueue := make(map[*ssa.Function]bool, len(fns))
+	var queue []*ssa.Function
+	enqueue := func(fn *ssa.Function) {
+		if !inQueue[fn] && st.holdsOf(fn) == nil {
+			inQueue[fn] = true
+			queue = append(queue, fn)
+		}
+	}
+
+	for _, fn := range fns {
+		if st.holdsOf(fn) != nil {
+			continue // a //gosree:holds function must not release (SAFE007 checks it)
+		}
+		callerSeen := map[*ssa.Function]bool{}
+		forEachInstr(fn, func(ins ssa.Instruction) {
+			c, ok := ins.(ssa.CallInstruction)
+			if !ok {
+				return
 			}
-			forEachInstr(fn, func(ins ssa.Instruction) {
-				c, ok := ins.(ssa.CallInstruction)
-				if !ok {
-					return
-				}
-				cc := c.Common()
-				if k, recv := lockOp(cc); k == opUnlock {
-					if p, ok := pathOf(recv); ok {
-						if rel, ok := toRelease(fn, p); ok && add(fn, rel) {
-							changed = true
-						}
+			cc := c.Common()
+			if k, recv := lockOp(cc); k == opUnlock {
+				if p, ok := pathOf(recv); ok {
+					if rel, ok := toRelease(fn, p, false); ok {
+						add(fn, rel)
 					}
-					return
 				}
-				callee := cc.StaticCallee()
-				mc := resolveClosureVal(cc.Value, 0)
+				return
+			}
+			if cc.IsInvoke() {
+				return
+			}
+			callee := cc.StaticCallee()
+			var mc *ssa.MakeClosure
+			if callee == nil || len(callee.FreeVars) > 0 {
+				mc = resolveClosureVal(cc.Value, 0)
 				if callee == nil && mc != nil {
 					callee, _ = mc.Fn.(*ssa.Function)
 				}
-				if callee == nil || callee.Pkg != st.ssa.Pkg {
-					return
+			}
+			if callee != nil && callee.Origin() != nil {
+				callee = callee.Origin()
+			}
+			if callee == nil || !inPkg[callee] {
+				return
+			}
+			edgesOf[fn] = append(edgesOf[fn], callEdge{callee: callee, args: cc.Args, mc: mc})
+			if !callerSeen[callee] {
+				callerSeen[callee] = true
+				callers[callee] = append(callers[callee], fn)
+			}
+		})
+	}
+
+	propagate := func(fn *ssa.Function) bool {
+		changed := false
+		for _, e := range edgesOf[fn] {
+			for _, r := range out[e.callee] {
+				if r.global != nil {
+					if add(fn, r) {
+						changed = true
+					}
+					continue
 				}
-				for _, r := range out[callee] {
-					if r.global != nil {
-						if add(fn, r) {
-							changed = true
-						}
-						continue
-					}
-					var base ssa.Value
-					switch {
-					case r.param >= 0 && r.param < len(cc.Args):
-						base = cc.Args[r.param]
-					case r.free >= 0 && mc != nil && r.free < len(mc.Bindings):
-						base = mc.Bindings[r.free]
-					default:
-						continue
-					}
-					if p, ok := pathOf(base); ok {
-						if rel, ok := toRelease(fn, guardPath{p.root, p.steps + r.steps}); ok && add(fn, rel) {
-							changed = true
-						}
+				var base ssa.Value
+				switch {
+				case r.param >= 0 && r.param < len(e.args):
+					base = e.args[r.param]
+				case r.free >= 0 && e.mc != nil && r.free < len(e.mc.Bindings):
+					base = e.mc.Bindings[r.free]
+				default:
+					continue
+				}
+				if p, ok := pathOf(base); ok {
+					if rel, ok := toRelease(fn, guardPath{p.root, p.steps + r.steps}, r.prefix); ok && add(fn, rel) {
+						changed = true
 					}
 				}
-			})
+			}
+		}
+		return changed
+	}
+
+	// Evaluate in bottom-up post-order first so arbitrarily deep non-recursive call DAGs
+	// converge in a single pass, then run the monotone worklist to exact fixpoint on SCC cycles
+	// (guaranteed finite because maxReleaseSteps and maxReleasesPerFn cap out[fn]).
+	visited := make(map[*ssa.Function]bool, len(fns))
+	postOrder := make([]*ssa.Function, 0, len(fns))
+	var dfs func(fn *ssa.Function)
+	dfs = func(fn *ssa.Function) {
+		if visited[fn] {
+			return
+		}
+		visited[fn] = true
+		for _, e := range edgesOf[fn] {
+			dfs(e.callee)
+		}
+		if st.holdsOf(fn) == nil {
+			postOrder = append(postOrder, fn)
+		}
+	}
+	for _, fn := range fns {
+		dfs(fn)
+	}
+	for _, fn := range postOrder {
+		propagate(fn)
+		if len(out[fn]) > 0 {
+			for _, caller := range callers[fn] {
+				enqueue(caller)
+			}
+		}
+	}
+
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		delete(inQueue, fn)
+		if propagate(fn) {
+			for _, caller := range callers[fn] {
+				enqueue(caller)
+			}
 		}
 	}
 	return out
@@ -719,17 +908,125 @@ type acquire struct {
 // empty and grow, so every intermediate answer under-approximates what a call acquires, which can
 // only over-report.
 func (st *state) acquireSummaries(gs *guardState, fns []*ssa.Function) map[*ssa.Function][]acquire {
+	const maxAcquireRounds = 16
 	gs.acquires = map[*ssa.Function][]acquire{}
-	for changed, rounds := true, 0; changed && rounds < 16; rounds++ {
-		changed = false
-		for _, fn := range fns {
-			if len(fn.Blocks) == 0 {
-				continue
+	inPkg := make(map[*ssa.Function]bool, len(fns))
+	for _, fn := range fns {
+		inPkg[fn] = true
+	}
+
+	calleesOf := make(map[*ssa.Function][]*ssa.Function, len(fns))
+	callers := make(map[*ssa.Function][]*ssa.Function, len(fns))
+	directSeed := make(map[*ssa.Function]bool, len(fns))
+	inQueue := make(map[*ssa.Function]bool, len(fns))
+	var queue []*ssa.Function
+	enqueue := func(fn *ssa.Function) {
+		if len(fn.Blocks) > 0 && !inQueue[fn] {
+			inQueue[fn] = true
+			queue = append(queue, fn)
+		}
+	}
+
+	for _, fn := range fns {
+		if len(fn.Blocks) == 0 {
+			continue
+		}
+		if st.holdsOf(fn) != nil {
+			directSeed[fn] = true
+		}
+		callerSeen := map[*ssa.Function]bool{}
+		forEachInstr(fn, func(ins ssa.Instruction) {
+			c, ok := ins.(ssa.CallInstruction)
+			if !ok {
+				return
 			}
-			next := st.acquiresOf(gs, fn)
-			if !slices.Equal(next, gs.acquires[fn]) {
-				gs.acquires[fn] = next
-				changed = true
+			cc := c.Common()
+			if k, _ := lockOp(cc); k == opLock || k == opRLock || k == opTryLock || k == opTryRLock {
+				directSeed[fn] = true
+				return
+			}
+			if cc.IsInvoke() {
+				return
+			}
+			callee := cc.StaticCallee()
+			if callee == nil {
+				if mc := resolveClosureVal(cc.Value, 0); mc != nil {
+					callee, _ = mc.Fn.(*ssa.Function)
+				}
+			}
+			if callee != nil && callee.Origin() != nil {
+				callee = callee.Origin()
+			}
+			if callee == nil {
+				return
+			}
+			if inPkg[callee] {
+				if !callerSeen[callee] {
+					callerSeen[callee] = true
+					calleesOf[fn] = append(calleesOf[fn], callee)
+					callers[callee] = append(callers[callee], fn)
+				}
+			} else if len(st.summary(callee).acquires) > 0 {
+				directSeed[fn] = true
+			}
+		})
+	}
+
+	// Evaluate in bottom-up post-order first so arbitrarily deep non-recursive lock-helper DAGs
+	// converge in 1 pass, then run bounded worklist rounds for recursive SCC cycles.
+	visited := make(map[*ssa.Function]bool, len(fns))
+	needsEval := make(map[*ssa.Function]bool, len(fns))
+	var postOrder []*ssa.Function
+	var dfs func(fn *ssa.Function)
+	dfs = func(fn *ssa.Function) {
+		if visited[fn] {
+			return
+		}
+		visited[fn] = true
+		for _, c := range calleesOf[fn] {
+			dfs(c)
+			if needsEval[c] {
+				needsEval[fn] = true
+			}
+		}
+		if directSeed[fn] {
+			needsEval[fn] = true
+		}
+		if len(fn.Blocks) > 0 {
+			postOrder = append(postOrder, fn)
+		}
+	}
+	for _, fn := range fns {
+		dfs(fn)
+	}
+	for _, fn := range postOrder {
+		if !needsEval[fn] && len(gs.acquires[fn]) == 0 {
+			continue
+		}
+		next := st.acquiresOf(gs, fn)
+		if !slices.Equal(next, gs.acquires[fn]) {
+			gs.acquires[fn] = next
+			for _, caller := range callers[fn] {
+				needsEval[caller] = true
+				enqueue(caller)
+			}
+		}
+	}
+
+	visits := map[*ssa.Function]int{}
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		delete(inQueue, fn)
+		if visits[fn] >= maxAcquireRounds {
+			continue
+		}
+		visits[fn]++
+		next := st.acquiresOf(gs, fn)
+		if !slices.Equal(next, gs.acquires[fn]) {
+			gs.acquires[fn] = next
+			for _, caller := range callers[fn] {
+				enqueue(caller)
 			}
 		}
 	}
@@ -908,17 +1205,34 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 		return
 	}
 	callee := cc.StaticCallee()
-	mc := resolveClosureVal(cc.Value, 0)
-	if callee == nil && mc != nil {
-		callee, _ = mc.Fn.(*ssa.Function)
+	var mc *ssa.MakeClosure
+	if callee == nil || len(callee.FreeVars) > 0 {
+		mc = resolveClosureVal(cc.Value, 0)
+		if callee == nil && mc != nil {
+			callee, _ = mc.Fn.(*ssa.Function)
+		}
+	}
+	if callee != nil && callee.Origin() != nil {
+		callee = callee.Origin()
 	}
 	if callee != nil && !cc.IsInvoke() && callee.Pkg == st.ssa.Pkg {
 		if st.holdsOf(callee) != nil {
 			return
 		}
+		dropRelease := func(target guardPath, prefix bool) {
+			if !prefix {
+				delete(s, target)
+				return
+			}
+			for k := range s {
+				if k.root == target.root && hasStepPrefix(k.steps, target.steps) {
+					delete(s, k)
+				}
+			}
+		}
 		for _, r := range gs.releases[callee] {
 			if r.global != nil {
-				delete(s, guardPath{r.global, r.steps})
+				dropRelease(guardPath{r.global, r.steps}, r.prefix)
 				continue
 			}
 			var base ssa.Value
@@ -931,7 +1245,7 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 				continue
 			}
 			if p, ok := pathOf(base); ok {
-				delete(s, guardPath{p.root, p.steps + r.steps})
+				dropRelease(guardPath{p.root, p.steps + r.steps}, r.prefix)
 			}
 		}
 		if !take {
@@ -986,7 +1300,7 @@ func killFor(s lockset, v ssa.Value) {
 			continue
 		}
 		for k := range s {
-			if k.root == p.root && strings.HasPrefix(k.steps, p.steps) {
+			if k.root == p.root && hasStepPrefix(k.steps, p.steps) {
 				delete(s, k)
 			}
 		}
@@ -1086,9 +1400,26 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 					} else if rel.global != nil {
 						p, ok = guardPath{root: rel.global, steps: rel.steps}, true
 					}
-					if ok && slices.Contains(holdsOwn, p) {
+					if !ok {
+						continue
+					}
+					matched := guardPath{}
+					hit := false
+					if !rel.prefix {
+						if slices.Contains(holdsOwn, p) {
+							matched, hit = p, true
+						}
+					} else {
+						for _, hp := range holdsOwn {
+							if hp.root == p.root && hasStepPrefix(hp.steps, p.steps) {
+								matched, hit = hp, true
+								break
+							}
+						}
+					}
+					if hit {
 						st.report(ci.Pos(), annot.CategoryMalformed, fmt.Sprintf(
-							"%s is //gosree:holds %s but unlocks it here", fn.Name(), muName(st.holdsOf(fn), holdsOwn, p)))
+							"%s is //gosree:holds %s but unlocks it here", fn.Name(), muName(st.holdsOf(fn), holdsOwn, matched)))
 						break
 					}
 				}
@@ -1233,7 +1564,22 @@ func (st *state) guardExempt(gs *guardState, fn *ssa.Function, ins ssa.Instructi
 	if n == nil {
 		return false
 	}
-	for c := range g.region(n) {
+	cur := n
+	for i := 0; i < len(s.base.steps); i++ {
+		if s.base.steps[i] != '*' {
+			continue
+		}
+		if cur.pointee == nil {
+			return false
+		}
+		cur = cur.pointee.find()
+		for _, e := range cur.events {
+			if e.kind == evForeign {
+				return false
+			}
+		}
+	}
+	for c := range g.region(cur) {
 		for _, e := range c.events {
 			switch e.kind {
 			case evEscape, evTransfer, evReturn:

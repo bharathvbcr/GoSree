@@ -51,14 +51,13 @@ func inFunc() {
 	_, _ = f, g
 }
 
-// The borrow pass does not look into a package-level function literal, whichever spelling marks
-// the parameter: annot records both borrows, the store is not checked.
+// Package-level function literals are checked with both parameter borrow spellings.
 var lit = func(b *int /*gosree:mub*/) {
-	global = b // MISS(BORROW001): the borrow pass skips package-level function literals; annot applied the directive
+	global = b // HIT(BORROW001)
 }
 
 var litTyped = func(b cap.Mut[int]) {
-	global = b // MISS(BORROW001): the same hole with the cap.Mut spelling, so it is not the directive's
+	global = b // HIT(BORROW001)
 }
 
 // Accepted: iso after the type moves the caller's argument.

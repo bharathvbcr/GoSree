@@ -111,6 +111,11 @@ Every feature is listed with the milestone it belongs to and the command that ch
 | 33 | Error-Discipline Pass `safeerr` | `passes/errcheck` reports discarded errors, unchecked `(T, error)` unwraps, lost or shadowed errors, typed-nil errors and dropped writable `Close` errors (`ERR001`–`ERR005`) | M5 | `go test ./passes/errcheck` |
 | 34 | Rust Error Solver over Gusset | `rust/gosree-errsolve` solves the lowered wire frame in-process (unix and cgo); `internal/gusseterr` holds the wire format and a pure-Go oracle used otherwise | M5 | `go test ./internal/gusseterr`; `(cd rust && cargo test --release)` |
 | 35 | `cmd/gosree` Preflight | Exit codes 0 clean, 1 failed, 2 usage, 3 findings; refuses `-fix` and `-diff`; forwards `-tags`; warns when a flag switches passes off | M5 | `go test ./cmd/gosree` |
+| 36 | Stdlib Concurrent Container Contracts (`capContracts`) | `passes/ownership/contracts.go` models `atomic.Pointer`, `atomic.Value`, `sync.Map`, `sync.Pool`, and `context.WithValue` as capability transfers (`Store`/`Put` consumes ownership, `Load`/`Get` yields `\imm`) | M2 | `go test ./passes/ownership` |
+| 37 | AST Erasure Equivalence Verification (`-verify`) | `cmd/gosree-erase -verify` validates exported API type equivalence and disassembled `.text` instruction equivalence against unannotated Go (`verify_equiv.go`) | M3 | `go test ./cmd/gosree-erase` |
+| 38 | Featherweight GoSree Formal Calculus | Executable small-step concurrent operational semantics and model checker (`internal/formal`) with Lean 4 formal capability specification (`specs/FeatherweightGoSree.lean`) | M2 | `go test ./internal/formal` |
+| 39 | Cross-Package Unsafe Ban Detection | `passes/unsafeban` detects cross-package `unsafe.Pointer` exposure via type aliases, function signatures, variables, maps, and interface methods (`SAFE001`) | M1 | `go test ./passes/unsafeban` |
+| 40 | Lockset Fixpoint Convergence & Alias Union-by-Size | `passes/ownership` implements path-prefix widening, DAG post-order worklist, and union-by-size in alias graphs, preventing self-hosting CPU hangs and nondeterminism | M2 | `go test ./passes/ownership` |
 
 ---
 
@@ -118,9 +123,9 @@ Every feature is listed with the milestone it belongs to and the command that ch
 
 | # | Name | Scope | Check |
 |---|------|-------|-------|
-| **M1** | Second-Class Borrows & Local Borrow Checker | Directive parsing for `mub`/`rob`/`mut`/`ref` in `internal/annot/`; storage checks (`BORROW001`); SSA flow-sensitive borrow checking (`BORROW002`, `BORROW003`, `BORROW004`); NLL analysis | `go test ./internal/annot ./passes/borrow` |
-| **M2** | Reference Capabilities Across Concurrency Boundaries | `\iso` move invalidation across channel sends and `go` closures (`SAFE003`); fork-join recovery; `\imm` transitive deep immutability (`SAFE005`); stack-scoped borrow escape ban (`CAP003`) | `go test ./passes/ownership` |
-| **M3** | Toolchain Compatibility & Zero-Cost Erasure | Directives as comments; `cap/` generic marker types and aliases; `cmd/gosree-erase` AST tool; CLI multi-checker wiring | `go test ./cap ./cmd/gosree-erase`; `bash tests/run_acceptance_tests.sh --tier 1` (assembly parity) |
+| **M1** | Second-Class Borrows & Local Borrow Checker | Directive parsing for `mub`/`rob`/`mut`/`ref` in `internal/annot/`; storage checks (`BORROW001`); SSA flow-sensitive borrow checking (`BORROW002`, `BORROW003`, `BORROW004`); NLL analysis across same-line statements, loop back-edges, and backward-goto loops; cross-package `unsafe.Pointer` detection (`SAFE001`) | `go test ./internal/annot ./passes/borrow ./passes/unsafeban` |
+| **M2** | Reference Capabilities Across Concurrency Boundaries | `\iso` move invalidation across channel sends, `go` closures, and stdlib concurrent containers (`atomic.Pointer`, `atomic.Value`, `sync.Map`, `sync.Pool`, `context.WithValue`) (`SAFE003`); fork-join recovery; `\imm` transitive deep immutability (`SAFE005`); stack-scoped borrow escape ban (`CAP003`); lockset fixpoint convergence with path-prefix widening; Featherweight GoSree formal semantics | `go test ./passes/ownership ./internal/formal` |
+| **M3** | Toolchain Compatibility & Zero-Cost Erasure | Directives as comments; `cap/` generic marker types and aliases; `cmd/gosree-erase` AST tool with `-verify` translation validation; CLI multi-checker wiring | `go test ./cap ./cmd/gosree-erase`; `bash tests/run_acceptance_tests.sh --tier 1` (assembly parity) |
 | **M4** | Dual-Track E2E Acceptance & Hardening | Dual-track 4-tier E2E acceptance test suite (`tests/e2e`, 12 top-level Go tests across Tiers 1-4); adversarial hardening (`tests/stress`) | `bash tests/run_acceptance_tests.sh`; `go test -timeout 30m ./tests/stress` |
 | **M5** | Error Discipline & Driver Preflight | `passes/errcheck` (`ERR001`–`ERR005`), the Rust solver and pure-Go oracle, `cmd/gosree` preflight | `go test ./passes/errcheck ./internal/gusseterr ./cmd/gosree`; `(cd rust && cargo test --release)` |
 
@@ -139,6 +144,7 @@ A milestone is complete when its check command exits 0. The stress suite takes m
 ├── cap/                    # Zero-cost generic type aliases (type Mut[T] = *T)
 ├── internal/
 │   ├── annot/              # Directive parser (//gosree: prefix); stale/ reports unused escape hatches
+│   ├── formal/             # Executable Featherweight GoSree operational semantics & model checker
 │   ├── gusseterr/          # Error-solver wire format, Gusset engine (unix and cgo), pure-Go oracle
 │   └── kinds/              # Type classification & immutability helpers
 ├── passes/
@@ -147,6 +153,7 @@ A milestone is complete when its check command exits 0. The stress suite takes m
 │   ├── ownership/          # Reference capabilities & concurrency pass (SAFE002-009, CAP003)
 │   └── errcheck/           # Error-discipline pass safeerr (ERR001-005)
 ├── rust/                   # Cargo workspace: gosree-errsolve (solver), gusset-engine (libgusset.a for Gusset)
+├── specs/                  # Formal Lean 4 specifications (FeatherweightGoSree.lean)
 ├── tests/
 │   ├── e2e/                # Dual-track 4-tier acceptance test suite (12 top-level Go tests)
 │   ├── stress/             # Adversarial stress & runtime witness suite

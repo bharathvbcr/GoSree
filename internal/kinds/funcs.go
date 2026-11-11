@@ -59,11 +59,17 @@ func FuncOverrideFor(fullName string) (FuncOverride, bool) {
 }
 
 // PackageOf returns the import path of the package a FullName ("pkg/path.F", "(*pkg/path.T).M",
-// "(pkg/path.T).M") belongs to.
+// "(pkg/path.T).M", "(*pkg/path.T[P]).M") belongs to.
 func PackageOf(fullName string) string {
 	_, typeName, _ := splitFullName(fullName)
 	if typeName != "" {
+		if br := strings.IndexByte(typeName, '['); br >= 0 {
+			typeName = typeName[:br]
+		}
 		return typeName[:strings.LastIndex(typeName, ".")]
+	}
+	if br := strings.IndexByte(fullName, '['); br >= 0 {
+		fullName = fullName[:br]
 	}
 	// A function name has no dots; a package path's last element may ("gopkg.in/yaml.v3").
 	return fullName[:strings.LastIndex(fullName, ".")]
@@ -95,9 +101,13 @@ func Resolve(pkg *types.Package, name string) (*types.Func, error) {
 	}
 	var obj types.Object
 	if pointer, typeName, method := splitFullName(name); typeName != "" {
-		tn, ok := pkg.Scope().Lookup(typeName[strings.LastIndex(typeName, ".")+1:]).(*types.TypeName)
+		bareType := typeName
+		if br := strings.IndexByte(bareType, '['); br >= 0 {
+			bareType = bareType[:br]
+		}
+		tn, ok := pkg.Scope().Lookup(bareType[strings.LastIndex(bareType, ".")+1:]).(*types.TypeName)
 		if !ok {
-			return nil, fmt.Errorf("%s: package %s has no type %s", name, pkg.Path(), typeName)
+			return nil, fmt.Errorf("%s: package %s has no type %s", name, pkg.Path(), bareType)
 		}
 		t := tn.Type()
 		if pointer {
@@ -105,7 +115,11 @@ func Resolve(pkg *types.Package, name string) (*types.Func, error) {
 		}
 		obj, _, _ = types.LookupFieldOrMethod(t, false, pkg, method)
 	} else {
-		obj = pkg.Scope().Lookup(name[strings.LastIndex(name, ".")+1:])
+		bareFn := name
+		if br := strings.IndexByte(bareFn, '['); br >= 0 {
+			bareFn = bareFn[:br]
+		}
+		obj = pkg.Scope().Lookup(bareFn[strings.LastIndex(bareFn, ".")+1:])
 	}
 	fn, ok := obj.(*types.Func)
 	if !ok || fn.FullName() != name {

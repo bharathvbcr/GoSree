@@ -8,15 +8,15 @@ import "dx_unsafe_spell/lib"
 
 // In package lib the same conversions are flagged (lib.go: Q's declaration; P and Addr are hatched).
 func viaAlias(p *int) *float64 {
-	return (*float64)(lib.P(p)) // MISS(SAFE001): type pun *int -> *float64 through an exported alias of unsafe.Pointer; package user never names unsafe
+	return (*float64)(lib.P(p)) // HIT(SAFE001): type pun *int -> *float64 through an exported alias of unsafe.Pointer; package user never names unsafe
 }
 
 func viaDefined(p *int) *float64 {
-	return (*float64)(lib.Q(p)) // MISS(SAFE001): type pun through an exported defined type whose underlying type is unsafe.Pointer
+	return (*float64)(lib.Q(p)) // HIT(SAFE001): type pun through an exported defined type whose underlying type is unsafe.Pointer
 }
 
 func viaValue(p *int) *[4]int {
-	return (*[4]int)(lib.Addr(p)) // MISS(SAFE001): unsafe.Pointer value converted to a 4x larger array pointer; no identifier names unsafe, so nothing matches
+	return (*[4]int)(lib.Addr(p)) // HIT(SAFE001): unsafe.Pointer value converted to a 4x larger array pointer; no identifier names unsafe
 }
 
 // Control: the same package without the conversion is plain Go.

@@ -17,3 +17,9 @@ func TestUnsafeBan(t *testing.T) {
 func TestDotImportAndAssembly(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), unsafeban.Analyzer, "dot")
 }
+
+// TestCrossPackageUnsafePointerAliasAndReturn checks that re-exported unsafe.Pointer aliases,
+// defined types, and helper functions cannot smuggle pointer reinterpretation without importing "unsafe".
+func TestCrossPackageUnsafePointerAliasAndReturn(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), unsafeban.Analyzer, "bridge", "crosspkg")
+}

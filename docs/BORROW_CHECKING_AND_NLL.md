@@ -90,7 +90,8 @@ Beyond direct stores, the checker follows a borrow through calls, so these are a
 - passing a borrow to an unannotated helper whose body stores that parameter in a package variable (`calleeStoresParamInGlobal` in `storage.go`);
 - laundering a borrow through a helper that returns its parameter: `globalIntPtr = idIntPtr(b)` still reports `package variable 'globalIntPtr' cannot store second-class borrow` (`calleeReturnsParam` in `storage.go`);
 - sending a borrow, or a value derived from one through a phi, on a channel inside a `select` case, which reports `channel send cannot store second-class borrow` (the ownership pass also reports the send as `CAP003`, a goroutine-boundary crossing);
-- calling the generic `cap.Borrow*` helpers: instantiated names such as `BorrowMut[int]` are matched by their base name.
+- calling the generic `cap.Borrow*` helpers: instantiated names such as `BorrowMut[int]` are matched by their base name;
+- storing a borrow into a package variable inside a package-level anonymous function literal (`var lit = func(b *int /*gosree:mub*/) { global = b }`), which `allPackageFuncs` discovers and checks.
 
 A callee parameter that is itself annotated `mub`/`rob` is exempt from the callee-body checks at the call site, since the callee is bound by the same rules: a store of that parameter is reported inside the callee, not at each caller.
 
@@ -119,9 +120,14 @@ sequenceDiagram
     Code->>B2: *b2 = 100 (b2 used)
 ```
 
-A borrow's live range is the set of SSA instructions from which a later use of the borrow (or of a variable aliasing it) is reachable along the control-flow graph (`isBorrowActiveAt` in `check.go`). Uses are collected by source identifier, then mapped to SSA instructions by source line (`collectUses`), so the granularity is the line:
+A borrow's live range is the set of SSA instructions from which a later use of the borrow (or of a variable aliasing it) is reachable along the control-flow graph (`isBorrowActiveAt` in `check.go`). Uses are collected by source identifier, mapped to SSA instructions by source position and instruction index, and propagated across control-flow edges:
 
 $$\mathcal{Live}(b) = \{ i \in \text{SSA Instructions} \mid \exists \text{ path from } i \text{ to a use of } b \}$$
+
+NLL analysis handles three critical flow patterns:
+1. **Same-Line Precision:** In multi-statement lines, SSA instruction order distinguishes dead loans from live ones without over-reporting false conflicts.
+2. **Loop-Carried Borrows:** Active borrows carried across loop iterations and back-edges (`for` loop bodies and cyclic CFG edges) are preserved until their true last use.
+3. **Backward-`goto` Jumps:** Control-flow reachability properly tracks live loans across backward label jumps without leaking state outside the jump domain.
 
 Once execution passes the last use of $b$, $b$ is dead, and the underlying allocation may be borrowed again immediately.
 

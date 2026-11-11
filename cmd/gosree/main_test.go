@@ -305,3 +305,85 @@ func TestGoSreeCLI(t *testing.T) {
 		}
 	}
 }
+
+func TestGosreeJSONDedupTestVariant(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "gosree")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("failed to build gosree: %v\n%s", err, string(out))
+	}
+
+	modDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(modDir, "go.mod"), []byte("module testdedup\n\ngo 1.27\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkgSrc := `package b
+
+var G *int
+
+func Set(p *int) { G = p }
+`
+	testSrc := `package b
+
+import "testing"
+
+func TestInVariant(t *testing.T) {
+	Set(new(int))
+	x := new(int)
+	ch := make(chan *int, 1)
+	ch <- x
+	*x = 1
+}
+`
+	if err := os.WriteFile(filepath.Join(modDir, "b.go"), []byte(pkgSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "b_test.go"), []byte(testSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(bin, "-json", "./...")
+	cmd.Dir = modDir
+	out, err := cmd.Output()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 3 {
+		t.Fatalf("expected exit status 3, got err=%v\noutput:\n%s", err, string(out))
+	}
+
+	var tree map[string]map[string][]struct {
+		Posn    string `json:"posn"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(out, &tree); err != nil {
+		t.Fatalf("unmarshal -json output: %v\n%s", err, string(out))
+	}
+
+	counts := map[string]int{}
+	hasBGo := false
+	hasBTest := false
+	for _, byAnalyzer := range tree {
+		for _, diags := range byAnalyzer {
+			for _, d := range diags {
+				key := d.Posn + "|" + d.Message
+				counts[key]++
+				if strings.Contains(d.Posn, "b.go:") && strings.HasPrefix(d.Message, "SAFE006:") {
+					hasBGo = true
+				}
+				if strings.Contains(d.Posn, "b_test.go:") && strings.HasPrefix(d.Message, "SAFE003:") {
+					hasBTest = true
+				}
+			}
+		}
+	}
+	if !hasBGo {
+		t.Errorf("missing b.go SAFE006 finding in -json output:\n%s", string(out))
+	}
+	if !hasBTest {
+		t.Errorf("missing b_test.go SAFE003 finding in -json output:\n%s", string(out))
+	}
+	for k, n := range counts {
+		if n > 1 {
+			t.Errorf("duplicate finding emitted %d times in -json output: %s", n, k)
+		}
+	}
+}

@@ -32,7 +32,7 @@ func main() {
 	current.Store(c)
 	close(started)
 	for i := 0; i < 1000; i++ {
-		c.Limit = i // MISS(SAFE003): c was published by current.Store and is read by the other goroutine
+		c.Limit = i // HIT(SAFE003): c was published by current.Store and is read by the other goroutine
 	}
 	wg.Wait()
 }

@@ -36,12 +36,14 @@ static INIT_STATUS: OnceLock<i32> = OnceLock::new();
 #[no_mangle]
 pub unsafe extern "C" fn gosree_gusset_init() -> i32 {
     *INIT_STATUS.get_or_init(|| {
-        set_engine_handler(|ctx: &JobContext, input: &[u8]| -> Result<Vec<u8>, String> {
-            ctx.check()
-                .map_err(|reason| format!("cancelled: {reason:?}"))?;
-            gosree_errsolve::solve_frame(input, || ctx.check().is_ok())
-                .map_err(|err| err.to_string())
-        });
+        set_engine_handler(
+            |ctx: &JobContext, input: &[u8]| -> Result<Vec<u8>, String> {
+                ctx.check()
+                    .map_err(|reason| format!("cancelled: {reason:?}"))?;
+                gosree_errsolve::solve_frame(input, || ctx.check().is_ok())
+                    .map_err(|err| err.to_string())
+            },
+        );
 
         let results = [register_engine(
             OPCODE_SELF_TEST_PANIC,

@@ -1096,6 +1096,17 @@ func solveFuncOracle(
 		endStates[i] = bottomState(nSlots)
 	}
 	outEdges := make([][]edgePair, nBlocks)
+	for i := range nBlocks {
+		switch fn.Blocks[i].Term.Kind {
+		case TermJump:
+			outEdges[i] = []edgePair{{target: fn.Blocks[i].Term.Target, state: bottomState(nSlots)}}
+		case TermCond:
+			outEdges[i] = []edgePair{
+				{target: fn.Blocks[i].Term.Target, state: bottomState(nSlots)},
+				{target: fn.Blocks[i].Term.FalseBB, state: bottomState(nSlots)},
+			}
+		}
+	}
 
 	inStates[0] = entryState(fn.SlotFlags)
 	inQueue := make([]bool, nBlocks)
@@ -1127,10 +1138,12 @@ func solveFuncOracle(
 		}
 		edges := outgoingEdgesOracle(block, &st, fn)
 		endStates[bb] = st
-		outEdges[bb] = edges
 		for i := range edges {
 			succ := edges[i].target
-			if inStates[succ].joinFrom(&edges[i].state) && !inQueue[succ] {
+			outEdges[bb][i].target = succ
+			edgeChanged := outEdges[bb][i].state.joinFrom(&edges[i].state)
+			inChanged := inStates[succ].joinFrom(&outEdges[bb][i].state)
+			if (edgeChanged || inChanged) && !inQueue[succ] {
 				inQueue[succ] = true
 				worklist = append(worklist, succ)
 			}

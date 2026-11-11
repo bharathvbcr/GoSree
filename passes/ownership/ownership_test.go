@@ -82,7 +82,7 @@ func TestSuppression(t *testing.T) {
 		// suppressedHandler: SAFE008; writeLineHatch: SAFE008 for a; suppressedGo: SAFE002 +
 		// SAFE003; suppressedSend: deferred SAFE003 + SAFE003; otherTransfer: SAFE002; useSite:
 		// SAFE003.
-		Suppressed:  8,
+		Suppressed: 8,
 		// Which scopes muted nothing is the stale analyzer's result (internal/annot/stale), not a Stats
 		// field: it is only known after every pass that mutes has run.
 		UnsafeScope: 8,

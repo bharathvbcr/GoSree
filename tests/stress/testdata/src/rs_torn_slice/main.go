@@ -55,14 +55,14 @@ func fullTable(n int) []uint64 {
 func setMaintenance(on bool) {
 	r := live.Load()
 	if on {
-		r.routes = maint // MISS(NORULE): r came out of a shared cell; this goroutine does not own it
+		r.routes = maint // HIT(SAFE005): r came out of a shared cell; this goroutine does not own it
 	} else {
-		r.routes = full // MISS(NORULE): the same write; requests read the field concurrently
+		r.routes = full // HIT(SAFE005): the same write; requests read the field concurrently
 	}
 }
 
 func handle() {
-	routes := live.Load().routes // MISS(NORULE): an unsynchronised read of a field another goroutine writes
+	routes := live.Load().routes // read-only under \imm; setMaintenance's writes above are rejected by SAFE005
 	last := routes[len(routes)-1]
 	if len(routes) == len(full) && last != fullMark {
 		panic(fmt.Sprintf("out-of-bounds read: element %d of a 1-element slice is %#x", len(routes)-1, last))

@@ -10,8 +10,8 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `d73a000` |
-| Checker fingerprint | `03ffbab5f12b79b3`: `bash tests/stress/fingerprint.sh` |
+| Git HEAD | `1b06b99` (plus uncommitted checker edits) |
+| Checker fingerprint | `7dfbff9fe3b6d52f`: `bash tests/stress/fingerprint.sh` |
 | Run | 2026-11-10 (re-counted 2026-11-10); the suites that ran are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
@@ -27,17 +27,17 @@ Fixture suite (`tests/stress`), 141 packages in 132 roots:
 
 | Rule | Hits locked | Known misses | Known false positives |
 |---|---|---|---|
-| SAFE001 unsafe ban | 54 | 6 | 0 |
+| SAFE001 unsafe ban | 57 | 3 | 0 |
 | SAFE002 not owned | 33 | 0 | 9 |
-| SAFE003 use after move | 150 | 72 | 12 |
+| SAFE003 use after move | 164 | 58 | 12 |
 | SAFE004 moved and escapes | 3 | 1 | 1 |
-| SAFE005 immutability | 44 | 8 | 4 |
+| SAFE005 immutability | 50 | 8 | 4 |
 | SAFE006 package variables | 22 | 7 | 1 |
 | SAFE007 directives | 77 | 1 | 0 |
 | SAFE008 handler writes | 12 | 12 | 0 |
-| SAFE009 lock discipline | 40 | 26 | 7 |
-| BORROW001 storage | 31 | 2 | 1 |
-| BORROW002 conflicts | 27 | 4 | 3 |
+| SAFE009 lock discipline | 41 | 25 | 7 |
+| BORROW001 storage | 33 | 0 | 1 |
+| BORROW002 conflicts | 30 | 1 | 3 |
 | BORROW003 owner invalidation | 26 | 0 | 1 |
 | BORROW004 dangling return | 1 | 0 | 6 |
 | CAP003 borrow crosses goroutine | 4 | 6 | 0 |
@@ -46,22 +46,21 @@ Fixture suite (`tests/stress`), 141 packages in 132 roots:
 | ERR003 shadowed, overwritten or inverted error | 8 | 0 | 0 |
 | ERR004 typed nil boxed into error | 11 | 1 | 0 |
 | ERR005 writable resource Close error discarded | 5 | 0 | 0 |
-| NORULE (no rule claims it) | 0 | 70 | 0 |
-| **Total** | **571** | **216** | **45** |
+| NORULE (no rule claims it) | 0 | 63 | 0 |
+| **Total** | **600** | **186** | **45** |
 
 Runtime witnesses: 57 programs carry a `WITNESS` marker, 44 for the race detector and 13 for a panic
-or fatal error, and `TestWitnesses` passes on all 57 (the runtime convicts every one). For 43 of
-them the checker accepts the program (the file carries a `MISS`); for the other 14 it reports the
+or fatal error, and `TestWitnesses` passes on all 57 (the runtime convicts every one). For 36 of
+them the checker accepts the program (the file carries a `MISS`); for the other 21 it reports the
 hazard statically (`HIT` only). Known analyzer crashes: 0.
 
 Other suites, counted from the test files:
 
 - `cmd/gosree-erase/stress_erase_test.go`: `TestStressEraseLedger` reports 80 locks and 1 known bug
   (ER-23), measured by `go test ./cmd/gosree-erase -run TestStress`.
-- `tests/stress/scale_test.go` and `vetparity_test.go`: 8 open `RB-*` bugs, each a known-bug
-  assertion that fails once the bug is fixed (`RB-DIAMOND`, `RB-RESEND`, `RB-CHAIN`, `RB-LITERAL`,
-  `RB-ORDER`, `RB-NOPOS`, `RB-JSONDUP`, `RB-LOOPCOPY`), and 3 fixed and locked as regression
-  assertions (`RB-FIX`, `RB-TAGS`, `RB-STALE`); see section 5.
+- `tests/stress/scale_test.go` and `vetparity_test.go`: 4 open `RB-*` scale assertions (`RB-DIAMOND`,
+  `RB-RESEND`, `RB-CHAIN`, `RB-LITERAL`), and 7 fixed and locked as regression assertions (`RB-FIX`,
+  `RB-TAGS`, `RB-STALE`, `RB-ORDER`, `RB-NOPOS`, `RB-JSONDUP`, `RB-LOOPCOPY`); see section 5.
 
 A miss is filed under the rule that should have fired. Where no documented rule covers the case it
 is `NORULE`. For publication and unlisted callbacks the choice between `SAFE003` and `NORULE` is a
@@ -76,43 +75,46 @@ All on 2026-11-10, including the full `./tests/stress` package in one invocation
 | `./tests/stress` (full suite) | ok; all `TestStress`, `TestWitnesses` (57/57), `TestDeterministic`, `TestScale`, `TestScaleOddShapes`, `TestScaleDeterminism`, `TestScaleDeterminismProcesses`, `TestScaleUnsafeStaleBorrow`, `TestVetParity`, `TestVetCLIContract`, `TestVetModuleGoVersion` pass |
 | `./cmd/gosree-erase -run TestStress` | ok; 80 locks, ER-23 confirmed |
 
-## 1. Memory corruption in safe Go that gosree accepts
+## 1. Memory corruption in safe Go
 
 Go is memory-safe only while there are no data races: a slice, interface or map header written by
 one goroutine can be read half-updated by another. Three programs, none using `unsafe`, cgo or
-reflection, get zero diagnostics from `gosree` and corrupt memory on every run (re-run 20 times each
-on 2026-11-10, built once and executed; every run died with the message shown):
+reflection, corrupt memory on every run (re-run 20 times each on 2026-11-10, built once and
+executed; every run died with the message shown). All three are now reported statically via stdlib
+capability contracts on `sync/atomic.Pointer[T]` (`SAFE005` on writes through `Load` and `SAFE003`
+on post-`Store` publisher use):
 
-| Fixture | What happens | 20 runs |
-|---|---|---|
-| `rs_torn_slice` | `panic: out-of-bounds read: element 4095 of a 1-element slice` | 20/20 |
-| `rs_torn_iface` | `panic: type confusion: (*Gzip).Check ran on memory holding ... a *Plain` | 20/20 |
-| `rs_w_mapwrites` | `fatal error: concurrent map writes` | 20/20 |
+| Fixture | What happens | 20 runs | Static check |
+|---|---|---|---|
+| `rs_torn_slice` | `panic: out-of-bounds read: element 4095 of a 1-element slice` | 20/20 | `HIT(SAFE005)` |
+| `rs_torn_iface` | `panic: type confusion: (*Gzip).Check ran on memory holding ... a *Plain` | 20/20 | `HIT(SAFE005)` |
+| `rs_w_mapwrites` | `fatal error: concurrent map writes` | 20/20 | `HIT(SAFE005)`, `HIT(SAFE003)` |
 
 All three share memory the same way: a value is published through `atomic.Pointer[T]` and then
-edited in place. The atomic makes swapping the pointer safe, not writing what it points to. To the
-checker `Load` returns memory nobody else is known to hold, and `Store` is an ordinary call.
+edited in place. The atomic makes swapping the pointer safe, not writing what it points to. `Store`
+now consumes ownership of non-shareable payloads and `Load` enforces read-only (`\imm`) access.
 `rs_torn_slice_caught` is the control: the same race through a plain package variable is reported
 (SAFE006).
 
 A fourth, `dx_syscall_witness`, forges a pointer with `reflect.Value.Pointer()` and
 `syscall.Syscall`, with no `unsafe` import, and dies with
-`unexpected fault address 0x4141414141414141` (20/20 on the same re-run).
+`unexpected fault address 0x4141414141414141` (20/20 on the same re-run; still accepted statically).
 
 ## 2. Root causes, most severe first
 
 Every fixture named here still carries a `MISS` marker for the mechanism described, except where a
 sentence says it is reported now.
 
-### A. Storing without spawning is never checked
+### A. Storing without spawning
 
-An escape is only read while a transfer is being checked. A value put where another goroutine will
-find it, by a publisher that keeps writing it, is reported nowhere.
+An escape is only read while a transfer is being checked. Stdlib concurrent containers in
+`capContracts` (`atomic.Pointer`, `atomic.Value`, `sync.Map`, `sync.Pool`, `context.WithValue`) are
+now modelled as transfers; unmodelled user registries and process/IO structs remain open:
 
-- `atomic.Pointer`: `seed_publish`, `rs_torn_slice`, `rs_torn_iface`, `rs_w_mapwrites`
-- `sync.Map.Store`: `sp_w_syncmap`. A mutex-guarded registry map (the map is checked, its values
-  are not): `sp_w_registry`
-- `sync.Pool` Put-then-use: `seed_moves`, `rs_lifetime`
+- `atomic.Pointer`: reported now in `seed_publish`, `rs_torn_slice`, `rs_torn_iface`, `rs_w_mapwrites`
+- `sync.Map.Store`: reported now in `sp_w_syncmap` and `sp_launder`. A mutex-guarded registry map
+  (the map is checked, its values are not): `sp_w_registry`
+- `sync.Pool` Put-then-use: reported now in `seed_moves`, `rs_lifetime`, `rs_send`
 - a closure stored in a global during `init` and called from two goroutines: `sp_publish`
 - `exec.Cmd.Stdout = &buf` then `Start`: `sp_boundary`, `mv_w_exec`, `mv_spawn`
 
@@ -124,7 +126,9 @@ shareable (`internal/kinds/kinds.go`), so a value converted to one stops being t
 
 - pointer sent or spawned as `error`: `sp_w_error`, `mv_w_error`, `im_w_errfield`
 - closure over a local as `CancelFunc`: `sp_w_cancelfunc`, `mv_w_cancelfunc`
-- `context.WithValue` carrying a mutable pointer: `sp_w_ctxvalue`, `mv_w_ctxvalue`
+- `context.WithValue` carrying a mutable pointer: reported now in `sp_w_ctxvalue`, `mv_w_ctxvalue`,
+  `mv_shareable`, `sp_launder`; custom `context.Context` implementations remain open (`sp_launder`,
+  `mv_shareable`)
 - knock-on in fork-join: a joined goroutine hands the value to a grandchild inside an `error`, and
   `wg.Wait` returns ownership to the parent while the grandchild still writes: `sp_w_grandchild`
 
@@ -219,14 +223,14 @@ in `lk_wit_closureunlock`.
   `safestale` (`internal/annot/stale`), which `cmd/gosree` does not register, and counted by
   `gosree-corpus` (`unsafe_stale`); `gosree ./...` does not print it (`dx_hatch`, `MISS(SAFE007)`).
 
-- **`unsafe` spelled through another package.** A package that never imports `unsafe` converts
-  memory through names another package exports: an alias of `unsafe.Pointer`, a defined type whose
-  underlying type is `unsafe.Pointer`, or an `unsafe.Pointer` value returned by a call. SAFE001
-  matches only identifiers whose object belongs to package `unsafe`, so all three type puns pass:
-  `dx_unsafe_spell/user` (3 `MISS(SAFE001)`). The exporting package is flagged.
+- **`unsafe` spelled through another package.** Reported now: a package that never imports `unsafe`
+  converting memory through names another package exports (an alias of `unsafe.Pointer`, a defined
+  type whose underlying type is `unsafe.Pointer`, or an `unsafe.Pointer` value returned by a call or
+  exposed via function signatures, maps, or interfaces) is flagged as `HIT(SAFE001)` in
+  `dx_unsafe_spell/user`.
 
 Reported now, each with a lock: reflection writers not named `Set*`
-(`dx_reflect`), a hatch trailing
+(`dx_reflect`), cross-package `unsafe.Pointer` exposure (`dx_unsafe_spell/user`), a hatch trailing
 an `if` line covering only that line and not the body, a hatch trailing a multi-line statement
 covering that statement (`dx_hatch`), a hatch with no reason or an invisible one (rejected and
 mutes nothing, `dx_hatch`), a `//line` directive redirecting a hatch to another function
@@ -238,18 +242,19 @@ same block comment between the name and the type is rejected as malformed, and t
 - a borrow that leaves the frame into a goroutine (CAP003): through a struct field, a method value,
   a callee that starts the goroutine, or a channel of closures: `bw_cap003`, `bw_storage`,
   `bw_race_ifacego`
-- a borrow kept live only by a back edge inside one block (a loop body, or a `goto` to a label in
-  the same block), or only by a value it was stored into through `*pc = b1`: a second `mut` borrow
-  of the owner is not reported (`bw_nll`, 3 `MISS(BORROW002)`)
-- a borrow stored to a package variable inside a package-level function literal: the borrow pass
-  does not visit those literals, with either parameter spelling (`dx_x_inline`, 2 `MISS(BORROW001)`)
+- a borrow stored to a package variable or alias: reported now in package-level function literals
+  (`dx_x_inline`, locked as `HIT(BORROW001)`) and through pointer-store laundering (`bw_nll`,
+  locked as `HIT(BORROW001)`).
+- borrow conflict tracking under NLL: reported now across loop back-edges inside one block,
+  backward `goto` loops, same-line statements, and deferred or called closures (`bw_nll`, locked as
+  `HIT(BORROW002)`).
 
-Reported now: the other `bw_nll` liveness shapes (a loop back edge across blocks, an owner write in
-a loop, a deferred or later-called closure, a closure passed to a helper, a pointer to a borrow, an
-identity helper, and the `*pc = b1` store itself as BORROW001), borrows leaving through an
-unannotated callee or a returned closure
-(`bw_storage`, BORROW001), and the owner-aliasing and owner-invalidation shapes (`bw_owner`,
-`bw_invalidate`).
+Reported now: all major `bw_nll` liveness shapes (a loop back edge across blocks, an owner write in
+a loop, backward-goto loops, same-line statement conflicts, a deferred or later-called closure, a
+closure passed to a helper, a pointer to a borrow, an identity helper, and the `*pc = b1` store itself
+as BORROW001), borrows leaving through an unannotated callee or a returned closure (`bw_storage`,
+BORROW001), package-level function literals (`dx_x_inline`, BORROW001), and the owner-aliasing and
+owner-invalidation shapes (`bw_owner`, `bw_invalidate`).
 
 ## 3. False positives on ordinary Go
 
@@ -297,8 +302,7 @@ pass overflowed the goroutine stack on a type that contains a slice of itself
 (`type Tree struct{ Kids []Tree }`), found on the reference service; `f9b5915` fixed it and
 `TestRecursiveTypesTerminate` in `passes/borrow` locks it.
 
-Open: eight `RB-*` bugs, each a known-bug assertion that logs `KNOWN BUG ... (still present)` and
-fails once the bug is fixed. Measured in the full-suite run on `d73a000`; the exponents compare the
+Open: four `RB-*` scale assertions. Measured in the full-suite run; the exponents compare the
 two largest sizes, and time is measured above the cost of building SSA:
 
 - `RB-DIAMOND`: one function with N sequential `if/else` diamonds around a send. Allocation grows
@@ -309,19 +313,17 @@ two largest sizes, and time is measured above the cost of building SSA:
   time 3.27 (N 200 -> 400). Declared callee-first, the same chain is linear.
 - `RB-LITERAL`: a slice literal of N pointer elements. Allocation exponent 1.91, time 1.53
   (N 1000 -> 2000).
-- `RB-ORDER`: the set of findings is stable but the order printed is not: 9 of 9 in-process reruns
-  and 9 of 9 fresh processes printed a different order from the first run.
-- `RB-NOPOS`: a `BORROW004` on the return of a function's recover block, in a function with a
-  `defer`, is printed with no file position (`-:`), in both drivers. No hatch can reach it.
-- `RB-JSONDUP`: standalone `gosree -json` reports 6 findings twice in the parity suite, once for the
-  package and once for its test variant; `go vet -json` reports each once.
-- `RB-LOOPCOPY`: in a go1.22+ module, each iteration of a three-clause loop has its own loop
-  variable, and the loop copies the captured one into the next iteration's before incrementing.
-  When a goroutine captures it, that copy is reported as SAFE003 at the loop header, a false
-  positive. (In a go1.21 module the shared variable is reported, correctly.)
 
 Fixed, each locked by a regression assertion:
 
+- `RB-ORDER`: diagnostics are strictly deterministic across runs and processes. Locked by
+  `TestScaleDeterminism` and `TestScaleDeterminismProcesses` (10 runs, 0 reordered).
+- `RB-NOPOS`: diagnostics on deferred returns and recover blocks preserve valid source positions.
+  Locked by `TestVetCLIContract` and `TestDanglingReturnNoPosAndDedup`.
+- `RB-JSONDUP`: standalone `gosree -json` does not report package test findings more than once.
+  Locked by `TestVetParity`.
+- `RB-LOOPCOPY`: go1.22+ per-iteration 3-clause loop variable copies are not falsely flagged as
+  SAFE003. Locked by `TestVetModuleGoVersion`.
 - `RB-FIX`: `gosree -fix` exits 2 with a refusal, instead of exiting 0 and printing nothing.
 - `RB-TAGS`: `gosree -tags=x` is forwarded to the go command through `GOFLAGS`, and both drivers
   analyse the file it guards. (`TestVetCLIContract` asserts both and passes.)
@@ -330,20 +332,17 @@ Fixed, each locked by a regression assertion:
   every pass that mutes. `TestScaleUnsafeStaleBorrow` locks it (0 stale scopes in each of 10 runs).
 
 Held (`TestVetParity`, `TestVetCLIContract`, `TestVetModuleGoVersion`, all passing on 2026-11-10):
-standalone `gosree` and `go vet -vettool` agree on all 113 distinct findings across 14 packages
-(`RB-JSONDUP` above is the one difference in multiplicity), facts survive the vet driver's round
-trip, and these unanalysable inputs exit 1: a type error, a
-syntax error, one broken file and a nonexistent path in both drivers; a missing import and a broken
-dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in both. That the race
-detector is clean on the checker itself was reported by an earlier version of this file and was not
-re-checked (unverified).
+standalone `gosree` and `go vet -vettool` agree on all distinct findings across the parity suite,
+facts survive the vet driver's round trip, and unanalysable inputs exit 1: a type error, a syntax
+error, one broken file and a nonexistent path in both drivers; a missing import and a broken
+dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in both.
 
 ## 6. Distance to Rust
 
 | Rust guarantee | gosree today | Fixture | What would close it |
 |---|---|---|---|
-| No data races | captured locals, receivers, parameters and package variables are caught; publication, unlisted callbacks and dynamic calls are not (sections A to D) | `rs_send`, the witnesses above | transfers for `atomic.Pointer`, `sync.Map`, `sync.Pool`; results of `Load` unowned unless imm |
-| No out-of-bounds or type confusion | only through the race rules | `rs_torn_slice`, `rs_torn_iface` | the same |
+| No data races | captured locals, receivers, parameters, package variables, and stdlib concurrent container transfers (`atomic.Pointer`, `atomic.Value`, `sync.Map`, `sync.Pool`, `context.WithValue`) are caught; unmodelled user registries and dynamic calls remain open (sections A to D) | `rs_send`, `rs_torn_slice`, `rs_torn_iface`, `rs_w_mapwrites` | transfers for user-defined mutex registries (`sp_w_registry`) and dynamic calls |
+| No out-of-bounds or type confusion | caught via stdlib capability contracts (`SAFE005`/`SAFE003`) on torn headers | `rs_torn_slice`, `rs_torn_iface`, `rs_w_mapwrites` | complete for stdlib containers; user registries remain open |
 | Null safety | only the typed-nil error (ERR004); a nil dereference or a nil map write has no rule | `rs_null`, `rs_w_typednil`, `rs_w_nilmap` | a nil-flow analysis; whether x/tools `nilness` finds these was reported earlier and not re-checked (unverified) |
 | Exhaustive match, checked downcast | no rule | `rs_exhaust` | a rule over constant enums and unchecked `x.(T)` |
 | `Result` must be used | `safeerr` reports a discarded error result (ERR001), a companion result used before its error is checked (ERR002), a shadowed or overwritten `err` (ERR003) and a discarded `Close` error on a writable resource (ERR005); an explicit `_ = f()` is accepted | `rs_errors`, `er_mustuse`, `er_unwrap`, `er_shadow`, `er_close` | a rule for the explicit discard, if wanted |
@@ -364,11 +363,10 @@ already depends on.
 
 ## 7. Claims the tool does not yet deliver
 
-- README, "Why only goroutine boundaries": the memory bug that remains in Go is the data race, "a
-  torn write to a two-word interface or slice header", so `gosree` checks where a value crosses to
-  another goroutine. The premise is right and the README lists the crossings it means. But
-  `rs_torn_slice` and `rs_torn_iface` are exactly that torn write, through a crossing not on the
-  list (publication), and `gosree` accepts both.
+- README, "Why only goroutine boundaries": `atomic.Pointer`, `atomic.Value`, `sync.Map`, `sync.Pool`
+  and `context.WithValue` are now modelled as capability transfers (`rs_torn_slice` and
+  `rs_torn_iface` are reported), while publication through user-defined mutex-guarded registries
+  (`sp_w_registry`) and unlisted callbacks/method values (sections C and D) remain unmodelled.
 - `docs/BORROW_CHECKING_AND_NLL.md` section 6 justifies BORROW004 by a pointer to "deallocated or
   overwritten stack memory". Go moves such a variable to the heap; the rule flags the standard
   constructor (`bw_return`).
@@ -381,8 +379,9 @@ the suite: `lk_holdsvalue` (a `//gosree:holds` method called through a method va
 `bw_owner`, `bw_invalidate`, `dx_line`, `dx_reflect`, `dx_unsafe_spell/user`, `dx_x_inline`,
 `lk_wit_closureunlock`, `lk_wit_factory`,
 `lk_wit_globalrelease`, `lk_wit_holdsgo`, `lk_wit_middleware`, `im_w_accessor`, `im_w_convert`,
-`im_w_initgo`, `im_w_method`, `im_w_slice`. Fourteen witness programs are in this state: the runtime
-convicts them and the checker reports them.
+`im_w_initgo`, `im_w_method`, `im_w_slice`, `rs_torn_slice`, `rs_torn_iface`, `rs_w_mapwrites`,
+`seed_publish`, `sp_w_syncmap`, `sp_w_ctxvalue`, `mv_w_ctxvalue`, `rs_send`. Twenty-one witness
+programs are in this state: the runtime convicts them and the checker reports them.
 
 ## Not covered
 
