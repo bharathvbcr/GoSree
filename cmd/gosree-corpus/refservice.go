@@ -66,7 +66,15 @@ func archiveRev(repo, rev, subdir, dst string) (string, error) {
 }
 
 // extractTar writes the entries under prefix to dst, with prefix stripped, and counts the files.
+// Every write goes through an os.Root on dst, so an entry that would land beneath a symlink the
+// archive itself planted, and so outside dst, fails instead of being written. Symlink entries are
+// still created (they are part of the tree), but annotations are never applied through one.
 func extractTar(r io.Reader, prefix, dst string) (int, error) {
+	root, err := os.OpenRoot(dst)
+	if err != nil {
+		return 0, err
+	}
+	defer root.Close()
 	tr := tar.NewReader(r)
 	files := 0
 	for {
@@ -95,17 +103,17 @@ func extractTar(r io.Reader, prefix, dst string) (int, error) {
 		if path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
 			return files, fmt.Errorf("archive entry %q escapes the destination", h.Name)
 		}
-		target := filepath.Join(dst, filepath.FromSlash(clean))
+		target := filepath.FromSlash(clean)
 		switch h.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := root.MkdirAll(target, 0o755); err != nil {
 				return files, err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return files, err
 			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+			f, err := root.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 			if err != nil {
 				return files, err
 			}
@@ -117,10 +125,10 @@ func extractTar(r io.Reader, prefix, dst string) (int, error) {
 			}
 			files++
 		case tar.TypeSymlink:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return files, err
 			}
-			if err := os.Symlink(h.Linkname, target); err != nil {
+			if err := root.Symlink(h.Linkname, target); err != nil {
 				return files, err
 			}
 		default:
