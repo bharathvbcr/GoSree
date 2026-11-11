@@ -1,6 +1,8 @@
 package ownership_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/analysis/analysistest"
@@ -101,6 +103,78 @@ func nested(b *B) {
 	inner := func() { b.n++ }
 	outer := func() { inner() }
 	go outer() // want "CAP003: stack-scoped borrow 'b'"
+}
+`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	analysistest.Run(t, dir, ownership.Analyzer, "p")
+}
+
+// immInValueType used to give up after 16 distinct types and report nothing, so an imm value
+// buried after enough other field types was silently writable.
+func TestImmStoreFoundBehindManyFieldTypes(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("package p\n\n//gosree:imm\ntype Config struct { // want Config:\"imm\"\n\tport int\n}\n\n")
+	for i := range 24 {
+		fmt.Fprintf(&b, "type A%d struct{ x int }\n\n", i)
+	}
+	b.WriteString("type Wrapper struct {\n")
+	for i := range 24 {
+		fmt.Fprintf(&b, "\tf%d A%d\n", i, i)
+	}
+	b.WriteString("\tcfg Config\n}\n\n")
+	b.WriteString("func overwrite(w *Wrapper) { *w = Wrapper{} } // want `SAFE005: store through a \\*Wrapper overwrites an immutable value`\n")
+	dir, cleanup, err := analysistest.WriteFiles(map[string]string{"p/p.go": b.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	analysistest.Run(t, dir, ownership.Analyzer, "p")
+}
+
+// A handler factory with an early return that gives no handler still builds one further down; the
+// roots come from every return, not the first.
+func TestHandlerFactoryWithEarlyNilReturn(t *testing.T) {
+	dir, cleanup, err := analysistest.WriteFiles(map[string]string{
+		"p/p.go": `package p
+
+import "net/http"
+
+func makeGuarded(enabled bool) http.HandlerFunc {
+	if !enabled {
+		return nil
+	}
+	n := 0
+	return func(w http.ResponseWriter, r *http.Request) {
+		n++ // want "SAFE008: captured variable n is written here"
+	}
+}
+
+func makeUnguarded() http.HandlerFunc {
+	n := 0
+	return func(w http.ResponseWriter, r *http.Request) {
+		n++ // want "SAFE008: captured variable n is written here"
+	}
+}
+
+func makeClean(enabled bool) http.HandlerFunc {
+	if !enabled {
+		return nil
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		local := 0
+		local++
+		_ = local
+	}
+}
+
+func register(mux *http.ServeMux) {
+	mux.HandleFunc("/g", makeGuarded(true))
+	mux.HandleFunc("/u", makeUnguarded())
+	mux.HandleFunc("/c", makeClean(true))
 }
 `,
 	})

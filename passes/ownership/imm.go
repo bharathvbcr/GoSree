@@ -163,8 +163,11 @@ func (st *state) immInValueType(t types.Type) types.Type {
 	return st.immInValueTypeSeen(t, map[types.Type]bool{})
 }
 
+// immInValueTypeSeen looks for an imm type held by value in t. seen both stops cycles and makes
+// each distinct type count once, so the walk is bounded by the number of types reachable by value
+// and needs no depth cap (a cap made it return nil, a false negative, on wide structs).
 func (st *state) immInValueTypeSeen(t types.Type, seen map[types.Type]bool) types.Type {
-	if t == nil || seen[t] || len(seen) >= 16 {
+	if t == nil || seen[t] {
 		return nil
 	}
 	seen[t] = true
