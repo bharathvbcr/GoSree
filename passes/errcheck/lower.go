@@ -5,6 +5,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -88,6 +89,9 @@ type funcLowerer struct {
 	boxedConcreteErr map[ssa.Value]types.Type
 	ioReadErrVals    map[ssa.Value]bool
 	companionVals    map[ssa.Value]bool
+
+	lineIdx         *blockLineIndex
+	consumedBlanked map[token.Pos]bool
 }
 
 func (b *packageBuilder) lowerFunc(funcIdx uint32, fn *ssa.Function) gusseterr.FuncIR {
@@ -123,6 +127,8 @@ func (b *packageBuilder) lowerFunc(funcIdx uint32, fn *ssa.Function) gusseterr.F
 		boxedConcreteErr: make(map[ssa.Value]types.Type),
 		ioReadErrVals:    make(map[ssa.Value]bool),
 		companionVals:    make(map[ssa.Value]bool),
+
+		consumedBlanked: make(map[token.Pos]bool),
 	}
 
 	return fl.build(flags)
@@ -278,6 +284,22 @@ func (fl *funcLowerer) emitObserveErr(ops *[]gusseterr.OpIR, val ssa.Value) {
 		})
 	}
 	fl.emitObserveErrVarsOnly(ops, val)
+}
+
+// emitObserveConcreteErrPtr records that a concrete error pointer (a `*T` implementing error) was
+// dereferenced or had a field read. Reading the pointee inspects the error, so a prior `p != nil`
+// check is not an ignored error: nilerr must not fire on a later `return nil`.
+func (fl *funcLowerer) emitObserveConcreteErrPtr(ops *[]gusseterr.OpIR, val ssa.Value) {
+	if val == nil || !isConcreteErrPtr(val.Type()) {
+		return
+	}
+	// A pointer loaded from a variable cell (a captured variable lives in one) is a copy of the
+	// cell's slot, and the nil-check refinement can sit on either; observe both.
+	root := fl.rootSlot(val)
+	*ops = append(*ops, gusseterr.OpIR{Kind: gusseterr.OpObserveErr, SiteID: 0, SlotA: root})
+	if own := fl.slot(val); own != root {
+		*ops = append(*ops, gusseterr.OpIR{Kind: gusseterr.OpObserveErr, SiteID: 0, SlotA: own})
+	}
 }
 
 func (fl *funcLowerer) emitObserveErrVarsOnly(ops *[]gusseterr.OpIR, val ssa.Value) {
@@ -805,6 +827,7 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 						fl.propagateBlankedMeta(x, alloc)
 					} else {
 						fl.emitUseCompanion(&ops, x.Pos(), x.X)
+						fl.emitObserveConcreteErrPtr(&ops, x.X)
 					}
 				} else if x.Op != token.NOT {
 					fl.emitUseCompanion(&ops, x.Pos(), x.X)
@@ -812,8 +835,10 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 
 			case *ssa.FieldAddr:
 				fl.emitUseCompanion(&ops, x.Pos(), x.X)
+				fl.emitObserveConcreteErrPtr(&ops, x.X)
 			case *ssa.Field:
 				fl.emitUseCompanion(&ops, x.Pos(), x.X)
+				fl.emitObserveConcreteErrPtr(&ops, x.X)
 			case *ssa.IndexAddr:
 				fl.emitUseCompanion(&ops, x.Pos(), x.X)
 				fl.emitUseCompanion(&ops, x.Pos(), x.Index)
@@ -1018,7 +1043,7 @@ func (fl *funcLowerer) lowerCall(
 	}
 
 	// 1. Check Close() error statement discard (ERR005).
-	if cl, key, ok := fl.matchCloseSite(pos, consumedCloses); ok {
+	if cl, key, ok := fl.matchCloseSite(cc, pos, consumedCloses); ok {
 		consumedCloses[key] = true
 		if recv := methodReceiverVal(cc); recv != nil {
 			sid := fl.pkg.addSite(cl.pos, cl.recvDesc, "")
@@ -1033,7 +1058,7 @@ func (fl *funcLowerer) lowerCall(
 	}
 
 	// 2. Check bare unhandled error-returning call statement (ERR001).
-	if uh, key, ok := fl.matchUnhandledSite(pos, consumedUnhandled); ok {
+	if uh, key, ok := fl.matchUnhandledSite(cc, pos, consumedUnhandled); ok {
 		consumedUnhandled[key] = true
 		sid := fl.pkg.addSite(uh.pos, uh.desc, "")
 		*ops = append(*ops, gusseterr.OpIR{
@@ -1236,7 +1261,7 @@ func (fl *funcLowerer) lowerDefer(
 	pos := cc.Pos()
 	fl.lowerCallOperands(cc, pos, ops)
 
-	if cl, key, ok := fl.matchCloseSite(pos, consumedCloses); ok {
+	if cl, key, ok := fl.matchCloseSite(cc, pos, consumedCloses); ok {
 		consumedCloses[key] = true
 		if recv := methodReceiverVal(cc); recv != nil {
 			sid := fl.pkg.addSite(cl.pos, cl.recvDesc, "")
@@ -1249,7 +1274,7 @@ func (fl *funcLowerer) lowerDefer(
 		}
 		return
 	}
-	if uh, key, ok := fl.matchUnhandledSite(pos, consumedUnhandled); ok {
+	if uh, key, ok := fl.matchUnhandledSite(cc, pos, consumedUnhandled); ok {
 		consumedUnhandled[key] = true
 		sid := fl.pkg.addSite(uh.pos, uh.desc, "")
 		*ops = append(*ops, gusseterr.OpIR{
@@ -1267,7 +1292,7 @@ func (fl *funcLowerer) lowerGo(
 	cc := &ins.Call
 	pos := cc.Pos()
 	fl.lowerCallOperands(cc, pos, ops)
-	if uh, key, ok := fl.matchUnhandledSite(pos, consumedUnhandled); ok {
+	if uh, key, ok := fl.matchUnhandledSite(cc, pos, consumedUnhandled); ok {
 		consumedUnhandled[key] = true
 		sid := fl.pkg.addSite(uh.pos, uh.desc, "")
 		*ops = append(*ops, gusseterr.OpIR{
@@ -1328,6 +1353,22 @@ func (fl *funcLowerer) lowerTerminator(b *ssa.BasicBlock, ops *[]gusseterr.OpIR)
 
 	case *ssa.Return:
 		if !t.Pos().IsValid() {
+			// A function that falls off its end exits through an implicit return with no source
+			// position. It is a real exit for deferred-close resolution, but it carries nothing for
+			// the return checks (no results, so no nilerr or companion uses).
+			// The synthetic yield function of a range-over-func loop falls off its end through
+			// `return true`, which has a result but is the same kind of exit. Defers inside the
+			// body are pushed onto the enclosing function's defer stack (ssa Defer.DeferStack)
+			// and run when that function returns; the body's exits stand in for that point, which
+			// sees every write made in the iteration.
+			_, isYield := fl.fn.Syntax().(*ast.RangeStmt)
+			if len(t.Results) == 0 || isYield {
+				return gusseterr.Terminator{
+					Kind:    gusseterr.TermReturn,
+					SiteID:  fl.siteForVal(token.NoPos, "return"),
+					RetSlot: gusseterr.NoneU32,
+				}
+			}
 			return gusseterr.Terminator{Kind: gusseterr.TermStop}
 		}
 		returnsErr := sigReturnsErrorLast(fl.fn.Signature)
@@ -1506,52 +1547,97 @@ func (fl *funcLowerer) siteForVal(pos token.Pos, desc string) uint32 {
 	return fl.pkg.addSite(pos, desc, "")
 }
 
-func (fl *funcLowerer) matchUnhandledSite(pos token.Pos, consumed map[token.Pos]bool) (unhandledCallAST, token.Pos, bool) {
+// sameLineMatch picks the AST entry for an SSA call whose position did not match an entry's
+// Lparen exactly. Candidates are the unconsumed entries on the call's source line that accept the
+// call; the nearest one wins and ties go to the lower position, so the choice never depends on
+// map iteration order.
+func sameLineMatch[V any](
+	fset *token.FileSet,
+	entries map[token.Pos]V,
+	pos token.Pos,
+	consumed map[token.Pos]bool,
+	accepts func(V) bool,
+) (V, token.Pos, bool) {
+	var zero V
+	line := fset.Position(pos).Line
+	if line == 0 {
+		return zero, token.NoPos, false
+	}
+	best, found := token.NoPos, false
+	var bestDist token.Pos
+	for k, v := range entries {
+		if consumed[k] || fset.Position(k).Line != line || !accepts(v) {
+			continue
+		}
+		dist := k - pos
+		if dist < 0 {
+			dist = -dist
+		}
+		if !found || dist < bestDist || (dist == bestDist && k < best) {
+			best, bestDist, found = k, dist, true
+		}
+	}
+	if !found {
+		return zero, token.NoPos, false
+	}
+	return entries[best], best, true
+}
+
+func (fl *funcLowerer) matchUnhandledSite(cc *ssa.CallCommon, pos token.Pos, consumed map[token.Pos]bool) (unhandledCallAST, token.Pos, bool) {
 	if uh, ok := fl.astInfo.unhandled[pos]; ok && !consumed[pos] {
 		return uh, pos, true
 	}
-	posLine := fl.pkg.pass.Fset.Position(pos).Line
-	if posLine == 0 {
+	// A call that returns no error cannot be the discarded error call of a shared line.
+	if !sigHasErrorResult(cc.Signature()) {
 		return unhandledCallAST{}, token.NoPos, false
 	}
-	for k, uh := range fl.astInfo.unhandled {
-		if !consumed[k] && fl.pkg.pass.Fset.Position(k).Line == posLine {
-			return uh, k, true
-		}
-	}
-	return unhandledCallAST{}, token.NoPos, false
+	return sameLineMatch(fl.pkg.pass.Fset, fl.astInfo.unhandled, pos, consumed, func(unhandledCallAST) bool { return true })
 }
 
-func (fl *funcLowerer) matchCloseSite(pos token.Pos, consumed map[token.Pos]bool) (closeCallAST, token.Pos, bool) {
+func (fl *funcLowerer) matchCloseSite(cc *ssa.CallCommon, pos token.Pos, consumed map[token.Pos]bool) (closeCallAST, token.Pos, bool) {
 	if cl, ok := fl.astInfo.closes[pos]; ok && !consumed[pos] {
 		return cl, pos, true
 	}
-	posLine := fl.pkg.pass.Fset.Position(pos).Line
-	if posLine == 0 {
+	// Only a Close method call can be the discarded close of a shared line; the constructor in
+	// `defer gzip.NewWriter(f).Close()` shares its line but is not the close.
+	if !isCloseMethodCall(cc) {
 		return closeCallAST{}, token.NoPos, false
 	}
-	for k, cl := range fl.astInfo.closes {
-		if !consumed[k] && fl.pkg.pass.Fset.Position(k).Line == posLine {
-			return cl, k, true
-		}
-	}
-	return closeCallAST{}, token.NoPos, false
+	return sameLineMatch(fl.pkg.pass.Fset, fl.astInfo.closes, pos, consumed, func(closeCallAST) bool { return true })
 }
 
 func (fl *funcLowerer) matchBlankedTuple(pos token.Pos) (blankedTupleAST, bool) {
 	if bl, ok := fl.astInfo.blanked[pos]; ok {
+		fl.consumedBlanked[pos] = true
 		return bl, true
 	}
-	posLine := fl.pkg.pass.Fset.Position(pos).Line
-	if posLine == 0 {
-		return blankedTupleAST{}, false
+	// Each blanked assignment belongs to one call: a second tuple call on the same line must not
+	// inherit an entry another call already claimed.
+	bl, key, ok := sameLineMatch(fl.pkg.pass.Fset, fl.astInfo.blanked, pos, fl.consumedBlanked, func(blankedTupleAST) bool { return true })
+	if ok {
+		fl.consumedBlanked[key] = true
 	}
-	for k, bl := range fl.astInfo.blanked {
-		if fl.pkg.pass.Fset.Position(k).Line == posLine {
-			return bl, true
+	return bl, ok
+}
+
+func sigHasErrorResult(sig *types.Signature) bool {
+	if sig == nil || sig.Results() == nil {
+		return false
+	}
+	for i := range sig.Results().Len() {
+		if isErrorInterface(sig.Results().At(i).Type()) {
+			return true
 		}
 	}
-	return blankedTupleAST{}, false
+	return false
+}
+
+func isCloseMethodCall(cc *ssa.CallCommon) bool {
+	if cc.IsInvoke() {
+		return cc.Method != nil && cc.Method.Name() == "Close"
+	}
+	callee := cc.StaticCallee()
+	return callee != nil && callee.Signature.Recv() != nil && callee.Name() == "Close"
 }
 
 func (fl *funcLowerer) blankedAssignWritesNonLocalOrUsed(callPos token.Pos) bool {
@@ -1738,10 +1824,16 @@ func (fl *funcLowerer) stmtListDiscardsWithBlank(rest []ast.Stmt, target *types.
 	return false
 }
 
-func (fl *funcLowerer) findBlockForPos(target token.Pos) int {
-	targetLine := fl.pkg.pass.Fset.Position(target).Line
-	bestBB := 0
-	bestDist := 1 << 30
+// blockLineIndex maps each source line that carries an instruction to the first block (in block
+// order) holding one, with the lines ascending. It is built once per function so that locating a
+// block for a position is a binary search rather than a walk over every instruction.
+type blockLineIndex struct {
+	lines []int
+	block []int
+}
+
+func (fl *funcLowerer) buildBlockLineIndex() *blockLineIndex {
+	first := make(map[int]int)
 	for bi, b := range fl.fn.Blocks {
 		if b == fl.fn.Recover {
 			continue
@@ -1752,20 +1844,48 @@ func (fl *funcLowerer) findBlockForPos(target token.Pos) int {
 				continue
 			}
 			ln := fl.pkg.pass.Fset.Position(p).Line
-			dist := ln - targetLine
-			if dist < 0 {
-				dist = -dist
-			}
-			if dist < bestDist {
-				bestDist = dist
-				bestBB = bi
-				if dist == 0 {
-					return bi
-				}
+			if _, seen := first[ln]; !seen {
+				first[ln] = bi
 			}
 		}
 	}
-	return bestBB
+	idx := &blockLineIndex{lines: make([]int, 0, len(first))}
+	for ln := range first {
+		idx.lines = append(idx.lines, ln)
+	}
+	sort.Ints(idx.lines)
+	idx.block = make([]int, len(idx.lines))
+	for i, ln := range idx.lines {
+		idx.block[i] = first[ln]
+	}
+	return idx
+}
+
+// findBlockForPos returns the block holding the instruction nearest to target's line; on equal
+// distance the earlier block wins, and with no positioned instruction it is block 0.
+func (fl *funcLowerer) findBlockForPos(target token.Pos) int {
+	if fl.lineIdx == nil {
+		fl.lineIdx = fl.buildBlockLineIndex()
+	}
+	idx := fl.lineIdx
+	line := fl.pkg.pass.Fset.Position(target).Line
+	i := sort.SearchInts(idx.lines, line)
+	best, bestDist := 0, 1<<30
+	consider := func(j int) {
+		if j < 0 || j >= len(idx.lines) {
+			return
+		}
+		d := idx.lines[j] - line
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDist || (d == bestDist && idx.block[j] < best) {
+			best, bestDist = idx.block[j], d
+		}
+	}
+	consider(i - 1)
+	consider(i)
+	return best
 }
 
 func isLocalCellAlloc(alloc *ssa.Alloc) bool {
