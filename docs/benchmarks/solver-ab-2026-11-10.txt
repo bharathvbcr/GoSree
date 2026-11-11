@@ -1,0 +1,38 @@
+# BenchmarkSolvePackageAB, recorded 2026-11-10
+#
+# Command (clean checkout of commit 530c54b, rust/target/release/libgusset.a built from it):
+#   go test -run '^$' -bench BenchmarkSolvePackageAB -benchmem -count=6 ./internal/gusseterr
+# Machine: Apple silicon, darwin/arm64, go1.27.3, shared with other workloads:
+#   load average ~142 before and ~155 after the run, so ns/op is inflated and noisy; B/op and
+#   allocs/op do not depend on load. -count runs each sub-benchmark 6 times back to back (not interleaved).
+#
+goos: darwin
+goarch: arm64
+pkg: github.com/bharathvbcr/gosree/internal/gusseterr
+cpu: Apple M5 Pro
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/GoOracle-18         	     987	   4423910 ns/op	   7.10 MB/s	  962937 B/op	   14092 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/GoOracle-18         	     186	   5947710 ns/op	   5.28 MB/s	  962857 B/op	   14092 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/GoOracle-18         	     610	   3676475 ns/op	   8.54 MB/s	  962870 B/op	   14092 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/GoOracle-18         	     508	   3141431 ns/op	  10.00 MB/s	  962878 B/op	   14092 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/GoOracle-18         	     565	   4803508 ns/op	   6.54 MB/s	  962878 B/op	   14092 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/GoOracle-18         	     364	   4756247 ns/op	   6.60 MB/s	  962886 B/op	   14092 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/RustGusset-18       	     313	   4956212 ns/op	   6.34 MB/s	    8472 B/op	       7 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/RustGusset-18       	     182	   6565978 ns/op	   4.78 MB/s	    8472 B/op	       7 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/RustGusset-18       	     218	   5532946 ns/op	   5.68 MB/s	    8472 B/op	       7 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/RustGusset-18       	     181	   5843776 ns/op	   5.37 MB/s	    8472 B/op	       7 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/RustGusset-18       	     946	   5404352 ns/op	   5.81 MB/s	    8473 B/op	       7 allocs/op
+BenchmarkSolvePackageAB/MediumPkg_50Funcs/RustGusset-18       	     152	   7562972 ns/op	   4.15 MB/s	    8472 B/op	       7 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/GoOracle-18         	     100	  35233497 ns/op	   4.23 MB/s	 4990766 B/op	   72625 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/GoOracle-18         	      52	  30380736 ns/op	   4.91 MB/s	 4990717 B/op	   72625 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/GoOracle-18         	     100	  45846324 ns/op	   3.25 MB/s	 4990715 B/op	   72625 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/GoOracle-18         	      56	  45688852 ns/op	   3.26 MB/s	 4990656 B/op	   72624 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/GoOracle-18         	     100	  38047271 ns/op	   3.92 MB/s	 4990712 B/op	   72625 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/GoOracle-18         	      60	  25755936 ns/op	   5.79 MB/s	 4990862 B/op	   72626 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/RustGusset-18       	     100	  11175290 ns/op	  13.35 MB/s	   18753 B/op	       8 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/RustGusset-18       	     117	   9378423 ns/op	  15.91 MB/s	   18752 B/op	       8 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/RustGusset-18       	     104	  13012901 ns/op	  11.46 MB/s	   18752 B/op	       8 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/RustGusset-18       	      70	  19436350 ns/op	   7.67 MB/s	   18752 B/op	       8 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/RustGusset-18       	     100	  15263784 ns/op	   9.77 MB/s	   18752 B/op	       8 allocs/op
+BenchmarkSolvePackageAB/LargePkg_200Funcs/RustGusset-18       	     100	  13751739 ns/op	  10.85 MB/s	   18752 B/op	       8 allocs/op
+PASS
+ok  	github.com/bharathvbcr/gosree/internal/gusseterr	52.877s

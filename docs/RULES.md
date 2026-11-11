@@ -1,4 +1,4 @@
-# GoSree (`gosree` / `gocap`) Rules & Diagnostics Reference
+# GoSree (`gosree`) Rules & Diagnostics Reference
 
 [← README](../README.md) | [Architecture](ARCHITECTURE.md) | [Rules](RULES.md) | [Directives](DIRECTIVES.md) | [Borrow & NLL](BORROW_CHECKING_AND_NLL.md) | [Concurrency](CONCURRENCY_MODEL.md) | [Error Discipline](ERROR_DISCIPLINE.md) | [Tooling](TOOLING_AND_ERASURE.md)
 
@@ -10,27 +10,29 @@ This document provides a comprehensive reference for all diagnostic codes emitte
 
 ## Diagnostic Code Summary
 
-| Code | Subsystem | Description | Default Severity |
-|---|---|---|---|
-| **[SAFE001](#safe001-unsafe-operations-ban)** | `passes/unsafeban` | Use of `unsafe`, assembly, cgo, or unsafe reflection | Error |
-| **[SAFE002](#safe002-unowned-value-crossing-boundary)** | `passes/ownership` | Unowned memory crossing to another goroutine | Error |
-| **[SAFE003](#safe003-use-after-move)** | `passes/ownership` | Value used after ownership was moved | Error |
-| **[SAFE004](#safe004-moved-value-escapes-elsewhere)** | `passes/ownership` | Moved value also escapes into globals, returns, or callees | Error |
-| **[SAFE005](#safe005-deep-immutability-violation)** | `passes/ownership` | Immutability invariant violated on `//gocap:imm` type | Error |
-| **[SAFE006](#safe006-package-global-mutation)** | `passes/ownership` | Package variable mutated outside `init()` without mutex guard | Error |
-| **[SAFE007](#safe007-malformed-directive)** | `internal/annot` | Malformed, mispositioned, unknown, or unresolvable directive (and, only when the `safestale` analyzer is run, a stale `//gocap:unsafe`) | Error |
-| **[SAFE008](#safe008-self-racing-handler-writes)** | `passes/ownership` | HTTP handler writes shared receiver or captured memory | Error |
-| **[SAFE009](#safe009-guarded-memory-access-violation)** | `passes/ownership` | Guarded memory accessed without holding required mutex | Error |
-| **[BORROW001](#borrow001-second-class-borrow-storage-violation)** | `passes/borrow` | Second-class borrow stored in struct field or package global | Error |
-| **[BORROW002](#borrow002-conflicting-borrows)** | `passes/borrow` | Conflicting simultaneous mutable or aliased borrows (NLL) | Error |
-| **[BORROW003](#borrow003-owner-mutation-during-active-borrow)** | `passes/borrow` | Owner mutated or moved while active borrow exists | Error |
-| **[BORROW004](#borrow004-dangling-stack-reference-return)** | `passes/borrow` | Function returns reference to local stack allocation | Error |
-| **[CAP003](#cap003-stack-scoped-borrow-concurrency-escape)** | `passes/ownership` | Stack-scoped borrow crosses goroutine or channel boundary | Error |
-| **[ERR001](#err001-must-use-error-return-discarded)** | `passes/errcheck` + `rust/gosree-errsolve` | Error return silently discarded as statement, `go`, or `defer` (`#[must_use]`) | Error |
-| **[ERR002](#err002-unchecked-companion-result-unwrap)** | `passes/errcheck` + `rust/gosree-errsolve` | Companion value of `(T, error)` used after `_` discard or before proving `err == nil` | Error |
-| **[ERR003](#err003-shadowed-overwritten-or-inverted-error)** | `passes/errcheck` + `rust/gosree-errsolve` | Error lost via inner `err :=` shadow, unread overwrite, or `if err != nil { return nil }` | Error |
-| **[ERR004](#err004-typed-nil-concrete-error-interface-boxing)** | `passes/errcheck` + `rust/gosree-errsolve` | Concrete `*T` error pointer that may be `nil` boxed into an `error` interface | Error |
-| **[ERR005](#err005-writable-resource-close-error-discarded)** | `passes/errcheck` + `rust/gosree-errsolve` | `Close()` / `defer f.Close()` on writable or written resource discards flush error | Error |
+| Code | Subsystem | Description |
+|---|---|---|
+| **[SAFE001](#safe001-unsafe-operations-ban)** | `passes/unsafeban` | Use of `unsafe`, assembly, cgo, or unsafe reflection |
+| **[SAFE002](#safe002-unowned-value-crossing-boundary)** | `passes/ownership` | Unowned memory crossing to another goroutine |
+| **[SAFE003](#safe003-use-after-move)** | `passes/ownership` | Value used after ownership was moved |
+| **[SAFE004](#safe004-moved-value-escapes-elsewhere)** | `passes/ownership` | Moved value also escapes into globals, returns, or callees |
+| **[SAFE005](#safe005-deep-immutability-violation)** | `passes/ownership` | Immutability invariant violated on `//gosree:imm` type |
+| **[SAFE006](#safe006-package-global-mutation)** | `passes/ownership` | Package variable mutated outside `init()` without mutex guard |
+| **[SAFE007](#safe007-malformed-directive)** | `internal/annot` | Malformed, mispositioned, unknown, or unresolvable directive (and, only when the `safestale` analyzer is run, a stale `//gosree:unsafe`) |
+| **[SAFE008](#safe008-self-racing-handler-writes)** | `passes/ownership` | HTTP handler writes shared receiver or captured memory |
+| **[SAFE009](#safe009-guarded-memory-access-violation)** | `passes/ownership` | Guarded memory accessed without holding required mutex |
+| **[BORROW001](#borrow001-second-class-borrow-storage-violation)** | `passes/borrow` | Second-class borrow stored in struct field or package global |
+| **[BORROW002](#borrow002-conflicting-borrows)** | `passes/borrow` | Conflicting simultaneous mutable or aliased borrows (NLL) |
+| **[BORROW003](#borrow003-owner-mutation-during-active-borrow)** | `passes/borrow` | Owner mutated or moved while active borrow exists |
+| **[BORROW004](#borrow004-dangling-stack-reference-return)** | `passes/borrow` | Function returns reference to local stack allocation |
+| **[CAP003](#cap003-stack-scoped-borrow-concurrency-escape)** | `passes/ownership` | Stack-scoped borrow crosses goroutine or channel boundary |
+| **[ERR001](#err001-must-use-error-return-discarded)** | `passes/errcheck` + `rust/gosree-errsolve` | Error return silently discarded as statement, `go`, or `defer` (`#[must_use]`) |
+| **[ERR002](#err002-unchecked-companion-result-unwrap)** | `passes/errcheck` + `rust/gosree-errsolve` | Companion value of `(T, error)` used after `_` discard or before proving `err == nil` |
+| **[ERR003](#err003-shadowed-overwritten-or-inverted-error)** | `passes/errcheck` + `rust/gosree-errsolve` | Error lost via inner `err :=` shadow, unread overwrite, or `if err != nil { return nil }` |
+| **[ERR004](#err004-typed-nil-concrete-error-interface-boxing)** | `passes/errcheck` + `rust/gosree-errsolve` | Concrete `*T` error pointer that may be `nil` boxed into an `error` interface |
+| **[ERR005](#err005-writable-resource-close-error-discarded)** | `passes/errcheck` + `rust/gosree-errsolve` | `Close()` / `defer f.Close()` on writable or written resource discards flush error |
+
+Every finding makes the `gosree` driver exit with status 3 (`cmd/gosree/preflight.go`: 0 clean, 1 failed, 2 usage, 3 findings); diagnostics carry no separate severity levels.
 
 ---
 
@@ -39,7 +41,7 @@ This document provides a comprehensive reference for all diagnostic codes emitte
 ### Semantics
 `SAFE001` flags any operation that bypasses Go's type or memory safety:
 - `unsafe.Pointer`, `unsafe.Add`, `unsafe.Slice`, `unsafe.SliceData`, `unsafe.String`, `unsafe.StringData`, including via dot-import (`. "unsafe"`). `unsafe.Sizeof`, `Alignof` and `Offsetof` are compile-time constants and stay allowed.
-- Cgo invocations (`import "C"`).
+- Cgo invocations (`import "C"`). When the package is loaded, cgo has already replaced the import with generated files, so in a run against a cgo package the findings (`//go:linkname`, `//go:noescape`, functions without a body, `unsafe.Pointer`) are reported at positions inside cgo's generated files in the Go build cache, not at the `import "C"` line. The `cgo (import "C") bypasses Go's memory safety` message exists in `passes/unsafeban` but was not observed in this run.
 - Compiler directives that alter linkage or escape analysis (`//go:linkname`, `//go:noescape`).
 - Assembly functions declared without a Go body (`func asmFunc()`).
 - Reflection that writes or exposes raw memory: `reflect.NewAt`, `Copy`, `Swapper`, `SliceAt`, `SliceHeader`/`StringHeader`, and the `reflect.Value` methods `Set*`, `UnsafeAddr`, `UnsafePointer`, `Pointer`, `Addr`, `Clear`, `Grow`, `Send`, `TrySend`.
@@ -53,7 +55,7 @@ package example
 import "unsafe"
 
 func Cast(p *int) *float64 {
-    // SAFE001: use of unsafe.Pointer
+    // SAFE001: unsafe.Pointer bypasses Go's memory safety; wrap it in //gosree:unsafe <reason>
     return (*float64)(unsafe.Pointer(p))
 }
 ```
@@ -75,7 +77,7 @@ func Cast(p *int) uint64 {
 ## SAFE002: Unowned Value Crossing Boundary
 
 ### Semantics
-A value crossing to another goroutine (via `go f(x)`, channel send `ch <- x`, or call to a parameter marked `//gocap:iso`) must be **uniquely owned**. A value is not owned if it:
+A value crossing to another goroutine (via `go f(x)`, channel send `ch <- x`, or call to a parameter marked `//gosree:iso`) must be **uniquely owned**. A value is not owned if it:
 - Aliases an incoming parameter of the caller.
 - Aliases a package-level global variable.
 - Aliases a return value that the callee may still reference.
@@ -88,8 +90,7 @@ type Job struct{ ID int }
 
 func Forward(ch chan *Job, j *Job) {
     // SAFE002: parameter j is sent on a channel but is not owned here: the caller
-    // still holds it (mark the parameter //safe:iso to take ownership)
-    // (the hint echoes the legacy //safe: spelling; every prefix is accepted)
+    // still holds it (mark the parameter //gosree:iso to take ownership)
     ch <- j
 }
 ```
@@ -98,7 +99,9 @@ func Forward(ch chan *Job, j *Job) {
 ```go
 package example
 
-//gocap:iso j
+type Job struct{ ID int }
+
+//gosree:iso j
 func Forward(ch chan *Job, j *Job) {
     // Parameter j is uniquely owned by Forward; caller transfers ownership
     ch <- j
@@ -110,11 +113,11 @@ func Forward(ch chan *Job, j *Job) {
 ## SAFE003: Use After Move
 
 ### Semantics
-An owned value transferred to another goroutine (via `go`, channel send, or `//gocap:iso` call) has moved. Any subsequent read, write, or call on that value in the sender is rejected as use-after-move.
+An owned value transferred to another goroutine (via `go`, channel send, or `//gosree:iso` call) has moved. Any subsequent read, write, or call on that value in the sender is rejected as use-after-move.
 
 > [!NOTE]
 > **Diagnostic Category: `SAFE003-forkjoin`**
-> Emitted with `Diagnostic.Category = "SAFE003-forkjoin"` when a use occurs after a synchronization operation (`sync.WaitGroup.Wait`, channel receive, or mutex unlock) that fails to meet all formal requirements of a [join point](CONCURRENCY_MODEL.md#3-fork-join-synchronization-recovery). The emitted diagnostic message retains the canonical `SAFE003: ` prefix (e.g., `SAFE003: <var> is used after synchronization that did not prove ownership restored`).
+> Emitted with `Diagnostic.Category = "SAFE003-forkjoin"` when a use occurs after a synchronization operation (`sync.WaitGroup.Wait`, channel receive, or mutex unlock) that fails to meet all formal requirements of a [join point](CONCURRENCY_MODEL.md#3-fork-join-synchronization-recovery). The emitted diagnostic message retains the canonical `SAFE003: ` prefix and ends with a note, e.g. `SAFE003: variable j is used after it was captured by a goroutine started by (*sync.WaitGroup).Go (line N) (after a synchronisation point, but not one that joins the goroutine it was moved to)` (`passes/ownership/check.go`, `passes/ownership/testdata/src/callbacks/callbacks.go`).
 
 ### Failing Example
 ```go
@@ -189,20 +192,20 @@ func Process(ch chan *Item) {
 ## SAFE005: Deep Immutability Violation
 
 ### Semantics
-Types declared `//gocap:imm` (or `//safe:imm`) must be deeply immutable:
+Types declared `//gosree:imm` must be deeply immutable:
 - Every field must be unexported (otherwise `field Host is exported, so other packages could write it`).
-- Field types must be pointer-free primitives, strings, channels of shareable types, or pointers to other verified `//gocap:imm` types.
-- Slices, maps, and interface fields are disallowed unless guarded by `//safe:guarded_by`.
+- Field types must be pointer-free primitives, strings, channels of shareable types, or pointers to other verified `//gosree:imm` types.
+- Slices, maps, and interface fields are disallowed unless guarded by `//gosree:guarded_by`.
 - Values of an `imm` type are only written by their composite literal; any other field write is reported as `SAFE005`.
 
 ### Failing Example
 ```go
 package example
 
-//gocap:imm
+//gosree:imm
 type ServerConfig struct {
     host string
-    tags []string // SAFE005: //gocap:imm type ServerConfig is not immutable: field tags has type []string, which can hold shared mutable memory (...)
+    tags []string // SAFE005: //gosree:imm type ServerConfig is not immutable: field tags has type []string, which can hold shared mutable memory (...)
 }
 ```
 
@@ -210,7 +213,7 @@ type ServerConfig struct {
 ```go
 package example
 
-//gocap:imm
+//gosree:imm
 type ServerConfig struct {
     host string
     port int
@@ -223,7 +226,7 @@ type ServerConfig struct {
 ## SAFE006: Package Global Mutation
 
 ### Semantics
-Package-level global variables must not be mutated outside package `init()` functions unless protected by a declared mutex guard (`//safe:guarded_by <mu>`). The diagnostic is reported once at the global variable's declaration, with all mutation sites listed as related positions.
+Package-level global variables must not be mutated outside package `init()` functions unless protected by a declared mutex guard (`//gosree:guarded_by <mu>`). The diagnostic is reported once at the global variable's declaration, with all mutation sites listed as related positions.
 
 ### Failing Example
 ```go
@@ -244,7 +247,7 @@ package example
 import "sync"
 
 var mu sync.Mutex
-var counter int //safe:guarded_by mu
+var counter int //gosree:guarded_by mu
 
 func Increment() {
     mu.Lock()
@@ -258,16 +261,17 @@ func Increment() {
 ## SAFE007: Malformed Directive
 
 ### Semantics
-Emitted when a directive (any of the four prefixes, see [DIRECTIVES.md](DIRECTIVES.md)) is syntactically invalid, misplaced, or refers to nonexistent symbols. A malformed directive has no effect at all:
-- Unknown verb (`unknown directive //gocap:isoo (did you mean ...)`).
-- Near-miss spelling that reads like a directive but is not one (`// gocap:iso p`, `//Safe:holds mu`).
+Emitted when a `//gosree:` directive (see [DIRECTIVES.md](DIRECTIVES.md)) is syntactically invalid, misplaced, or refers to nonexistent symbols. A malformed directive has no effect at all:
+- Unknown verb (`unknown directive //gosree:isoo (known: unsafe, iso, imm, guarded_by, holds, mub, rob, mut, ref)`).
+- Near-miss spelling: a comment whose text after the marker starts with `gosree:` in any letter case but is not a valid directive (`// gosree:iso p`, `//Gosree:holds mu`, `/* gosree:mut */`). The message is `"// gosree:iso p" is not a gosree directive, so it has no effect: write it as //gosree:iso p (no space after the slashes, lower case)`. Prose such as `// gosree: this lock is held` is left alone (`internal/annot/nearmiss.go`).
 - `unsafe` without a reason, or with a reason that has no letter or digit.
 - `iso`/`mub`/`rob` naming a name that is not a parameter, or two conflicting capabilities on one variable.
 - A borrow directive attached to something other than a function or assignment (for example a struct field).
-- Stale `//gocap:unsafe` (it mutes no finding): produced by the `safestale` analyzer (`internal/annot/stale`), which neither `cmd/gosree` nor `cmd/gocap` registers, so it is emitted only when that analyzer is run (its own test).
+- Stale `//gosree:unsafe` (it mutes no finding): produced by the `safestale` analyzer (`internal/annot/stale`), which `cmd/gosree` does not register, so it is emitted only when that analyzer is run (its own test).
 - Guarded-by referencing a nonexistent mutex, a non-mutex, or guarding an exported field or variable.
 - Guarded-by target variable is not in scope.
-- Directive attached to an unsupported AST node.
+- Directive attached to a node it does not support (`//gosree:iso` above a `var`: `must be in a function's doc comment`; `//gosree:imm` outside a type declaration; `//gosree:unsafe` with nothing to attach to: `is not attached to a statement or declaration`).
+- `//gosree:holds` naming a selector path (`in.mu`): `//gosree:holds needs one mutex name`.
 
 ### Failing Example
 ```go
@@ -276,8 +280,9 @@ package example
 import "sync"
 
 type Store struct {
-    // SAFE007: //safe:guarded_by names "mu_nonexistent", which is not a field of this struct
-    data map[string]int //safe:guarded_by mu_nonexistent
+    mu sync.Mutex
+    // SAFE007: //gosree:guarded_by names "mu_nonexistent", which is not a field of this struct
+    data map[string]int //gosree:guarded_by mu_nonexistent
 }
 ```
 
@@ -289,7 +294,7 @@ import "sync"
 
 type Store struct {
     mu   sync.Mutex
-    data map[string]int //safe:guarded_by mu
+    data map[string]int //gosree:guarded_by mu
 }
 ```
 
@@ -298,7 +303,7 @@ type Store struct {
 ## SAFE008: Self-Racing Handler Writes
 
 ### Semantics
-HTTP request handlers run concurrently across incoming requests. The check fires at the handler's **registration** (`http.Handle`, `http.HandleFunc`, `(*ServeMux).Handle/HandleFunc`, ...), not at a `ServeHTTP` declaration with no registration. A write to memory shared across invocations (the receiver, or variables the handler closure captured) is flagged as `SAFE008` unless the field is `//safe:guarded_by` (then `SAFE009` governs). Writes through interface or dynamic calls are a stated gap.
+HTTP request handlers run concurrently across incoming requests. The check fires at the handler's **registration** (`http.Handle`, `http.HandleFunc`, `(*ServeMux).Handle/HandleFunc`, ...), not at a `ServeHTTP` declaration with no registration. A write to memory shared across invocations (the receiver, or variables the handler closure captured) is flagged as `SAFE008` unless the field is `//gosree:guarded_by` (then `SAFE009` governs). Passing shared memory to an interface method or a dynamic call is reported too (`captured variable count is passed to a dynamic function call, which may write it, by a handler registered with ...`). A write to a package variable is `SAFE006`, not `SAFE008`; an atomic update through a captured `atomic.Int64` is not flagged.
 
 ### Failing Example
 ```go
@@ -312,7 +317,7 @@ type MetricsHandler struct {
 
 func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     // SAFE008: receiver h is written here by a handler registered with
-    // (*net/http.ServeMux).Handle, which shares it with every concurrent request
+    // (*net/http.ServeMux).Handle (line N), which shares it with every concurrent request
     h.requestCount++
     _, _ = w.Write([]byte("OK"))
 }
@@ -333,7 +338,7 @@ import (
 
 type MetricsHandler struct {
     mu           sync.Mutex
-    requestCount int //safe:guarded_by mu
+    requestCount int //gosree:guarded_by mu
 }
 
 func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -350,10 +355,10 @@ func (h *MetricsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 ## SAFE009: Guarded Memory Access Violation
 
 ### Semantics
-Memory marked with `//safe:guarded_by <mu>` may only be accessed while `<mu>` is held:
+Memory marked with `//gosree:guarded_by <mu>` may only be accessed while `<mu>` is held:
 - Reads require at least `mu.RLock()` (or `mu.Lock()`).
 - Writes require `mu.Lock()`.
-- Functions marked `//safe:holds <mu>` must be invoked with `<mu>` held.
+- Functions marked `//gosree:holds <mu>` must be invoked with `<mu>` held.
 - Unlocked references to non-shareable guarded memory must not escape the critical section.
 
 ### Failing Example
@@ -364,11 +369,11 @@ import "sync"
 
 type SafeMap struct {
     mu   sync.RWMutex
-    data map[string]int //safe:guarded_by mu
+    data map[string]int //gosree:guarded_by mu
 }
 
 func (s *SafeMap) Get(key string) int {
-    // SAFE009: field data is accessed without holding s.mu
+    // SAFE009: field data is guarded by mu but is read here without holding it (lock mu, or mark Get //gosree:holds mu)
     return s.data[key]
 }
 ```
@@ -381,7 +386,7 @@ import "sync"
 
 type SafeMap struct {
     mu   sync.RWMutex
-    data map[string]int //safe:guarded_by mu
+    data map[string]int //gosree:guarded_by mu
 }
 
 func (s *SafeMap) Get(key string) int {
@@ -396,32 +401,39 @@ func (s *SafeMap) Get(key string) int {
 ## BORROW001: Second-Class Borrow Storage Violation
 
 ### Semantics
-Second-class borrows (`cap.Mut[T]`, `cap.Ref[T]` and their `Mub`/`Rob` aliases, `//gocap:mub`, `//gocap:rob`) are strictly activation-frame scoped. Verified to be rejected:
+Second-class borrows (`cap.Mut[T]`, `cap.Ref[T]` and their `Mub`/`Rob` aliases, `//gosree:mub`, `//gosree:rob`) are strictly activation-frame scoped. Verified to be rejected:
 - Struct fields declared with a `cap.Mut`/`cap.Ref` type.
 - Package-level global variables.
-- Channel sends (`channel send cannot store second-class borrow`).
+- Channel sends (`channel send cannot store second-class borrow`, reported together with `CAP003`).
+- Map stores (`map cannot store second-class borrow`).
+- A borrow placed in a composite literal such as `[]*int{p}` or `H{p: p}` (`borrow stored in struct field 'p' escapes stack frame`: the wording says "struct field" even for a slice literal).
+- `go` statements that capture a borrow (`goroutine cannot capture second-class borrow`, reported together with `CAP003`).
 
-Other sinks (slices, maps) are not covered by this section's examples; see `passes/borrow/storage.go`.
+Other sinks are not covered by this section's examples; see `passes/borrow/storage.go`.
 
 ### Failing Example
 ```go
 package example
 
+import "github.com/bharathvbcr/gosree/cap"
+
 type Holder struct {
     // BORROW001: struct field 'ptr' cannot have second-class borrow type: borrows are second-class and cannot be stored in struct fields
     ptr cap.Ref[int]
-    // (a trailing //gocap:rob on a struct field is itself reported as SAFE007, since the directive only attaches to functions and assignments)
 }
 
-var globalRef *int //gocap:mub // BORROW001: package variable 'globalRef' cannot store second-class borrow
+// BORROW001: package variable 'globalRef' cannot store second-class borrow
+var globalRef cap.Mut[int]
 ```
+
+A `//gosree:rob` or `//gosree:mub` written on a struct field or package variable instead of a `cap` type is itself reported as `SAFE007` (`//gosree:rob must be attached to a function declaration or an assignment statement`), because the directive only attaches to functions and assignments. The field or variable is nevertheless also reported as `BORROW001`: `var globalRef *int //gosree:mub` and `ptr *int //gosree:rob` each printed both `SAFE007` and `BORROW001` in this run.
 
 ### Passing Remediation
 ```go
 package example
 
 // Borrows passed directly as function arguments instead of stored in structs
-func Process(val *int /*gocap:rob*/) int {
+func Process(val *int /*gosree:rob*/) int {
     return *val
 }
 ```
@@ -441,8 +453,8 @@ package example
 
 func Conflict() {
     x := 10
-    b1 := &x //gocap:mut
-    b2 := &x //gocap:mut // BORROW002: cannot borrow 'x' as mutable more than once at a time: already borrowed as mutable at line N
+    b1 := &x //gosree:mut
+    b2 := &x //gosree:mut // BORROW002: cannot borrow 'x' as mutable more than once at a time: already borrowed as mutable at line N
     *b1 = 20
     *b2 = 30
 }
@@ -454,10 +466,10 @@ package example
 
 func Sequential() {
     x := 10
-    b1 := &x //gocap:mut
+    b1 := &x //gosree:mut
     *b1 = 20 // Last use of b1 (NLL lifetime expires here)
     
-    b2 := &x //gocap:mut // OK: b1 is no longer live
+    b2 := &x //gosree:mut // OK: b1 is no longer live
     *b2 = 30
 }
 ```
@@ -475,7 +487,7 @@ package example
 
 func Invalidation() {
     x := 100
-    b := &x //gocap:mut
+    b := &x //gosree:mut
     x = 200 // BORROW003: cannot assign to 'x' because it is borrowed at line N (the borrow's line)
     *b = 300
 }
@@ -487,7 +499,7 @@ package example
 
 func ValidOrder() {
     x := 100
-    b := &x //gocap:mut
+    b := &x //gosree:mut
     *b = 300 // Last use of b
     
     x = 200 // OK: borrow b has expired
@@ -533,11 +545,13 @@ A second-class stack-scoped borrow (`\mub` or `\rob`) cannot cross a concurrency
 - Cannot be captured inside a goroutine closure (`go func() { ... b ... }()`).
 - Cannot be passed as an argument to a `go` statement (`go worker(b)`).
 
+The three messages end in `cannot be sent on a channel`, `cannot be captured by a goroutine` and `cannot be passed as argument to go statement`.
+
 ### Failing Example
 ```go
 package example
 
-func Escape(ch chan *int, b *int /*gocap:mub*/) {
+func Escape(ch chan *int, b *int /*gosree:mub*/) {
     // CAP003: stack-scoped borrow 'b' (\mub) cannot cross goroutine boundary:
     // cannot be sent on a channel
     // (BORROW001 also reports the send: channel send cannot store second-class borrow)
@@ -550,7 +564,7 @@ func Escape(ch chan *int, b *int /*gocap:mub*/) {
 package example
 
 // Transfer owned isolated value instead of a stack borrow
-//gocap:iso val
+//gosree:iso val
 func Transfer(ch chan *int, val *int) {
     ch <- val // OK: val is uniquely owned (\iso)
 }
@@ -774,4 +788,4 @@ func WriteReport(path string, body []byte) (err error) {
 
 ## Suppressing ERR findings
 
-`safeerr` honors the same escape hatch as every other pass: a `//gocap:unsafe <reason>` (or `//gosree:unsafe`, `//sree:unsafe`, `//safe:unsafe`) covering the finding's position mutes it (`passes/errcheck/errcheck.go`, `ix.Suppressed` then `ix.Mute`), counted in `Summary.FindingsMuted`. Findings are deduplicated per line, rule and sub-kind. Fixture: `suppressedUnsafe` in `passes/errcheck/testdata/src/errbasic/basic.go`.
+`safeerr` honors the same escape hatch as every other pass: a `//gosree:unsafe <reason>` covering the finding's position mutes it (`passes/errcheck/errcheck.go`, `ix.Suppressed` then `ix.Mute`), counted in `Summary.FindingsMuted`. Findings are deduplicated per line, rule and sub-kind. Fixture: `suppressedUnsafe` in `passes/errcheck/testdata/src/errbasic/basic.go`.

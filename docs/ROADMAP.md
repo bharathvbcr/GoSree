@@ -1,21 +1,25 @@
 # Roadmap
 
-The README and `docs/` are the design of record: gocap checks memory where it crosses goroutines, and leaves
+The README and `docs/` are the design of record: GoSree checks memory where it crosses goroutines, and leaves
 aliasing within one goroutine alone. In build order:
 
 Done:
 - callback functions as goroutine boundaries;
 - SAFE001 for dot imports of `unsafe` and functions without a Go body;
 - SAFE008 for handlers that write shared memory;
+- the error-discipline pass: ERR001-ERR005 (`safeerr`), solved by a Rust solver hosted in-process over
+  Gusset, with a pure-Go oracle that must return the same bytes ([Error Discipline](ERROR_DISCIPLINE.md));
+- one `cmd/gosree` driver, whose preflight sets the exit status (0 clean, 1 no verdict, 2 usage,
+  3 findings), refuses `-fix` and `-diff`, and hands `-tags` to the go command;
 - items 1, 2 and 3 below;
 - item 4, closed with the reference service failing the thesis at its pin.
 
 1. **Done:** a guarded-by rule. It came before item 2, since recording writes in summaries turns calls like
    `h.cache.Set(...)` into SAFE008 findings that need it. The guarded SAFE008 findings on the
    reference service are its acceptance cases. Five steps, from the 2026-11-09 design ruling:
-   - **Done:** parse `//safe:guarded_by mu` and `//safe:holds mu`.
+   - **Done:** parse `//gosree:guarded_by mu` and `//gosree:holds mu`.
    - **Done:** SAFE006 checked where the package variable is declared. Race corpus: 229/234, and
-     38 → 36 race-free tests clean. `TestNoRaceFinGlobal` (fixed by `//safe:guarded_by Mutex`) and
+     38 → 36 race-free tests clean. `TestNoRaceFinGlobal` (fixed by `//gosree:guarded_by Mutex`) and
      `TestNoRaceRpcChan` write package variables outside init.
    - **Done:** lock tracking and SAFE009, with SAFE008 leaving guarded writes to SAFE009. No
      annotations exist in the corpus or the reference service, so neither moved. On a scratch copy
@@ -26,7 +30,7 @@ Done:
 
      The design review predicted 3. Its third, `client_telemetry_test.go:335`, reads under
      `limiter.mu.Lock()`, so no finding is right.
-   - **Done:** `//safe:imm` types may have guarded fields of any type. The same change closes a
+   - **Done:** `//gosree:imm` types may have guarded fields of any type. The same change closes a
      hole: the address of a field or element of a shared value (`&cfg.port` on an imm `*Config`)
      used to look owned and could be moved to a goroutine. It is now foreign (SAFE002). The race
      corpus and the reference service did not move, as predicted.
@@ -76,14 +80,14 @@ Done:
    - **Lock-acquire summaries.** Annotated corpus 229 / 40 → 229 / 42, as predicted. Reference
      service unchanged (no annotations).
 
-   gocap has no summary for `sync/atomic`'s functions (they have no Go body), so the writes bit
+   GoSree has no summary for `sync/atomic`'s functions (they have no Go body), so the writes bit
    counted `atomic.AddInt64(&h.n, 1)` in a handler as a write. That contradicts the README's rule that
    atomic calls are not stores, so `sync/atomic` functions write nothing. Like `lockOps`, this is
    vocabulary, not a budget entry. Only SAFE008 reads writes, and it stayed at 101 with and without
    the rule.
 3. The hatch ratio measured on the reference service: ScholarLM's `backend/go_orchestrator`, pinned
    at ScholarLM commit `bb60b53`, measured with `-tests` on go1.27.3. Untriaged baselines, each
-   with 0 `//safe:unsafe`:
+   with 0 `//gosree:unsafe`:
 
    | | Transfers | SAFE001 | SAFE002 | SAFE003 | SAFE003-forkjoin | SAFE004 | SAFE006 | SAFE008 | Findings |
    |---|---|---|---|---|---|---|---|---|---|
@@ -106,9 +110,9 @@ Done:
    `client_telemetry.go:119`, which that review's prototype missed.
 
    **Done: the triage.** The triage log is
-   [`refservice/scholarlm-bb60b53.md`](../cmd/gocap-corpus/refservice/scholarlm-bb60b53.md). It has
+   [`refservice/scholarlm-bb60b53.md`](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.md). It has
    each batch's prediction, made before its run, and its result. The ledger,
-   [`scholarlm-bb60b53.tsv`](../cmd/gocap-corpus/refservice/scholarlm-bb60b53.tsv), has one row per
+   [`scholarlm-bb60b53.tsv`](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.tsv), has one row per
    directive with its verdict. Both strata are measured on a `git archive` of `bb60b53`: the
    `-tests` baseline reproduced the row above exactly. The production stratum (no `-tests`) is the
    headline, since the abandon criterion is about a service, not its tests.
@@ -119,7 +123,8 @@ Done:
    | `-tests` | 1,798 | 1,014 | 450: the production 345, plus 105 transfers at a seeded sample of 100 of the 575 test-only positions | 25.0% measured (sample only); 56.4% if every flagged transfer takes a hatch, as every sampled one did | 0 in the sample |
 
    The design review predicted 50-70% and 30-50%: both **missed** high (the `-tests` figure by its
-   extrapolation).
+   extrapolation). These are the figures at the end of the triage; item 4 below records how they
+   moved when the branch merged `main`.
 
    "Races found" is what the reading found, not a proof of absence. 12 production transfers and 17
    sampled test transfers were read by hand; the other hatches were classified by rules over each
@@ -127,12 +132,12 @@ Done:
 
    Beside the ratio:
    - checked claims: 14 `guarded_by`, 9 `holds`, 1 imm, 8 iso;
-   - 0 stale `//safe:unsafe`;
+   - 0 stale `//gosree:unsafe`;
    - overrides 42 of 100. This item added `context.CancelFunc`, whose documentation says it may be
      called by several goroutines at once.
 
    What changed the count, in order:
-   - **Spawn wrappers.** `//safe:iso` on the service's spawn wrappers (`safego.SafeGo*`,
+   - **Spawn wrappers.** `//gosree:iso` on the service's spawn wrappers (`safego.SafeGo*`,
      `detachedTasks.spawn*`) turned 137 production escapes into transfers. The design review had
      found that its 113 `SafeGo*` calls were missing from the denominator.
    - **`guarded_by` on the mutex-protected singletons.** SAFE008 went from 98 to 75. The rest are
@@ -151,13 +156,13 @@ Done:
    The abandon criterion applies at 100 table entries, and this item ends at 42. So the measurement
    does not decide abandonment, but the diagnosis says more entries would not help: no flagged
    transfer is blocked by a third-party type. The ratio is set by dependency containers that are
-   mutable in type and frozen in practice. gocap needs a checked claim for them: an imm rule that
+   mutable in type and frozen in practice. GoSree needs a checked claim for them: an imm rule that
    accepts interface and func-typed fields set only during construction.
 4. **Closed: the reference service fails the thesis at `bb60b53`.** The 2026-11-09 design ruling
    planned three steps: a re-measure, a differential test against `-gcflags=-m`, and a census of what
    blocks each `IMM_BLOCKED` hatch. The census was to decide whether to build the
    frozen-after-construction imm rule. Each step's prediction and result is in
-   [the triage log](../cmd/gocap-corpus/refservice/scholarlm-bb60b53.md#item-4-2026-11-10).
+   [the triage log](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.md#item-4-2026-11-10).
    - **Re-measure** on `3c9677c`: both ratios reproduce. It found a merge bug: de-duplication was
      keyed on the message, which names the transfer, so one use was reported once per transfer
      reaching it. Production SAFE003 went from 364 to 1,795, all at hatched positions. Fixed in
@@ -167,7 +172,7 @@ Done:
      were reviewed by hand. It found one real hole: a closure's retention of its captures was lost
      when the closure was called through a function value. Fixed in `741e714`. After the fix, the
      race corpus is unchanged, production is unchanged and `-tests` is 25.1%.
-   - **Census** (`gocap-corpus -census`). The frozen rule as designed clears 2 of 324 hatches (72.5%
+   - **Census** (`gosree-corpus -census`). The frozen rule as designed clears 2 of 324 hatches (72.5%
      → 72.1%), so it was not built. Census v2 splits collections by whether their contents are
      written after construction. Collections written that way are in 215 of 219 big closures: the
      pre-registered failure condition. Its refuter, that at least 60% of hatches with a collection
@@ -183,6 +188,12 @@ Done:
      23 and SAFE009 from 8 to 36, with the ratio unchanged at 72.5%. Of the 28 new SAFE009, 23 are
      values read under a lock that leave it, reported by design, and 5 are lockset false positives.
      `globalSteeringBus` stays unclaimed, because claiming its fields gives 11 false SAFE009.
+   - **Re-measured after the merge.** The figures above are from the item-4 branch before it merged
+     `main` (`ffedea6` reproduces them exactly). The merge brought in `ffc95cf`'s ownership rewrite.
+     On `gosree` the production stratum is 516 transfers, 386 flagged, 345 hatched: 66.9%, or 74.8%
+     if the 41 newly flagged transfers each take a hatch. SAFE006 is 117. None of this is triaged,
+     and the failure at `bb60b53` stands
+     ([the triage log](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.md#re-measured-on-gosree-2026-11-10)).
 5. Open:
    - ownership of the channel's send end; joins through `select`;
    - `SafeGoWG`'s join (43 SAFE003-forkjoin findings);

@@ -4,15 +4,15 @@ The annotation table is [`scholarlm-bb60b53.tsv`](scholarlm-bb60b53.tsv): one ro
 the finding it answers and its verdict. This file records each batch's prediction, written before its
 run, and the result. Runs:
 
-    go run ./cmd/gocap-corpus -git ~/Code/scholarlm -rev bb60b53 -subdir backend/go_orchestrator \
-        -annotate cmd/gocap-corpus/refservice/scholarlm-bb60b53.tsv -list -out build/ref/<batch> [-tests]
+    go run ./cmd/gosree-corpus -git ~/Code/scholarlm -rev bb60b53 -subdir backend/go_orchestrator \
+        -annotate cmd/gosree-corpus/refservice/scholarlm-bb60b53.tsv -list -out build/ref/<batch> [-tests]
 
 The B4 rows, the test-stratum sample and the SAFE006 sort came from a throwaway tool kept, uncommitted,
 in `build/ref/_tools/triage` (gitignored), next to the final reports in `build/ref/final`.
 
 The plan is the 2026-11-09 design ruling for README item 3: two strata (production, the headline,
 and `-tests`), hatches only on transfers or on non-transfer sites (a SAFE001 node, a SAFE006
-declaration), never on a use or write line, and every `//safe:unsafe` must mute something.
+declaration), never on a use or write line, and every `//gosree:unsafe` must mute something.
 
 Verdicts: `RACE`, `GUARDED`, `IMM`, `ISO`, `OVERRIDE`, `FP:<class>`, `POLICY:<why>`,
 `IMM_BLOCKED:<type>.<field>:<kind>`.
@@ -22,7 +22,7 @@ Verdicts: `RACE`, `GUARDED`, `IMM`, `ISO`, `OVERRIDE`, `FP:<class>`, `POLICY:<wh
 Prediction (design ruling): `-tests` on the archive reproduces the README row exactly, 1,642
 transfers and 2,598 findings. Production: transfers 480-560, SAFE008 95-100.
 
-Result (gocap 47fd801 plus the item-3 counters):
+Result (GoSree 47fd801 plus the item-3 counters):
 
 | Stratum | Transfers | Flagged | Clean | SAFE001 | SAFE002 | SAFE003 | SAFE003-fj | SAFE004 | SAFE006 | SAFE008 | Findings |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -36,7 +36,7 @@ Result (gocap 47fd801 plus the item-3 counters):
 
 ## B0: spawn wrappers own their functions
 
-`//safe:iso` on the function parameters of `safego.SafeGo`, `SafeGoWG`, `SafeGoOnPanic`,
+`//gosree:iso` on the function parameters of `safego.SafeGo`, `SafeGoWG`, `SafeGoOnPanic`,
 `SafeGoWGOnPanic` (`onPanic` and `fn`) and `detachedTasks.spawn`, `spawnAfterPersist` (`fn`). Their
 calls were escapes (the callee's summary leaks `fn` into a goroutine) and become transfers.
 
@@ -88,7 +88,7 @@ Result, after two corrections made on reading the first run (SAFE008 75, SAFE009
 - The three `llm.Client` rows were dropped. `ensureClient` dials once under `mu` and every caller
   reads `c.client` after its own `ensureClient` took the lock: lock-protected publication, not lock
   discipline, so `guarded_by` turned 9 race-free reads into SAFE009 and cleared no SAFE008.
-- 8 `//safe:holds` were added on the `*Locked` helpers (`RuntimeJournal` x6,
+- 8 `//gosree:holds` were added on the `*Locked` helpers (`RuntimeJournal` x6,
   `RuntimeStateStore.initStorageLocked`, `clientTelemetryRateLimiter.evictExpiredLocked`).
 
 | Stratum | SAFE008 | SAFE009 | guarded_by | holds |
@@ -139,7 +139,7 @@ Census of what the flagged production transfers share (from the SAFE002 causes a
 | (dedup) | `*wisdev.IdempotencyStore` | - | none: imm once `records` is guarded |
 | (mcp) | `*wisdev.mcpDependencyProbeCache` | - | none: imm once its fields are guarded |
 
-`//safe:imm` on the two that qualify, and the missing `holds` on `rewriteFileEntriesLocked`.
+`//gosree:imm` on the two that qualify, and the missing `holds` on `rewriteFileEntriesLocked`.
 
 Prediction, written before the run: 0 handler types are eligible (the design ruling said 0-2), so no
 transfer is cleared by imm: flagged transfers unchanged in both strata, SAFE005 0 (both types
@@ -175,7 +175,7 @@ slightly over; the `-tests` run also carried B4's one `guarded_by`, which clears
 
 ## B4: hatches at the transfers
 
-Every flagged production transfer gets one `//safe:unsafe` on its own line above the transfer, its
+Every flagged production transfer gets one `//gosree:unsafe` on its own line above the transfer, its
 class first in the reason. The rows were generated from the B3 findings by the triage rules below,
 with the 12 transfers the rules could not place read by hand. One local, `worst` in
 `testsupport.WatchTimerLateness`, is written and read only under `mu`; it got a `guarded_by` instead.
@@ -248,7 +248,7 @@ the stratum.s ratio, if every flagged test transfer takes one, is 1,014 / 1,798 
 ## B5: SAFE006 (package variables), production
 
 73 findings, sorted by how each variable's writes are protected (`triage -safe006`, which reads the
-code around each write position gocap reports):
+code around each write position GoSree reports):
 
 | Class | Count | Rule |
 |---|---|---|
@@ -296,7 +296,7 @@ and function overrides: 42 of 100 (29 types, 4 functions, 9 spawners); this item
 
 Diagnosis: 97% of the hatches are transfers that share a long-lived dependency (a router config
 passed by value, the server, the agent gateway, a handler struct). Those types have interface,
-func-typed or exported fields, and are written only while they are built. gocap has no claim for
+func-typed or exported fields, and are written only while they are built. GoSree has no claim for
 "mutable type, frozen after construction", so each sharing transfer needs a hatch. The ratio is
 far above the 20% abandon line while the tables hold 42 entries, and more entries would not move it:
 no flagged transfer is blocked by a third-party type. The next checked claim has to be about the
@@ -332,21 +332,21 @@ de-duplication was narrowed to the use-site rules.
 
 ### Step 2: `-gcflags=-m` differential
 
-`TestEscapeOracleNoFreshOrWritesOracle` compares every exported function gocap summarises in `bytes`,
+`TestEscapeOracleNoFreshOrWritesOracle` compares every exported function GoSree summarises in `bytes`,
 `strings`, `strconv`, `sort`, `bufio`, `io`, `encoding/json` and `net/http` against `-gcflags=-m=2`:
 each parameter the compiler says leaks must be leaked, linked, or Unknown in the FuncFact.
 
 Prediction: 0 violations (ruling); under 5% of compared parameters (mine). Both wrong on the first run:
 75 of 480. After reading the compiler's flow for each:
 - excused by rule, counted not compared: 22 through a lock or atomic inside a sync or sync/atomic
-  function (the compiler cannot see past the runtime semaphore; gocap counts locks as synchronisation),
+  function (the compiler cannot see past the runtime semaphore; GoSree counts locks as synchronisation),
   8 stores back into the parameter's own memory (`b.buf = append(b.buf, c)`), 21 string fields;
   results of shareable types (`error`, `string`, `context.Context`) are skipped;
 - 15 reviewed by hand, callee source read (string data through `pathAddrs`, `findHandler`,
   `serveFile`, `Cookie.String` and so on), listed in the test with reasons; an entry that stops
   disagreeing fails the test;
 - 2 real: `http2ClientConn.RoundTrip` and `http2RoundTripper.RoundTrip` pass a bound interface method
-  to a function that calls it through a function value. gocap applied a closure body's retention of
+  to a function that calls it through a function value. GoSree applied a closure body's retention of
   its captures only where the closure is called statically; through any other call the retention was
   lost. Reading `graph.call` showed the general hole (not in the ruling): a closure that stores a
   capture in a package variable, handed to a function that calls it dynamically, left the capture
@@ -367,7 +367,7 @@ findings at hatched transfers, no new remaining finding; `-tests` 1,798 / 1,020 
 
 ### Step 3: census
 
-`gocap-corpus -census` resolves each production `IMM_BLOCKED` row's named value to a type and walks
+`gosree-corpus -census` resolves each production `IMM_BLOCKED` row's named value to a type and walks
 every module struct it reaches (fields, and the types stored into interface fields), classing what
 stops each from being imm under the frozen rule (classes in `census.go`; fixture test
 `TestCensusClasses`).
@@ -389,7 +389,7 @@ Result, 324 hatches, 18 unresolved (`(caller's parameter)`, closures):
 
 257 hatches (79.3%) reach a post-construction write; 217 (67.0%) reach `*llm.Client`. All three
 predictions hold, and the refuter fires. The 79.3% is an upper bound: W counts builder setters
-(`UnifiedResearchRuntime.WithClaimStore`) that a `//safe:init` claim could clear. Read by hand,
+(`UnifiedResearchRuntime.WithClaimStore`) that a `//gosree:init` claim (proposed, not implemented) could clear. Read by hand,
 `llm.Client.ensureClient` dials lazily and writes `c.client` once, nil-checked, under `c.mu` at the
 first gRPC call, and `EmbedBatch` reads it without the lock after calling `ensureClient` on the same
 goroutine. `SetClient` replaces it, but has no production caller (82 test files call it). So in
@@ -411,7 +411,7 @@ Re-plan ruling: split C by whether the collection's contents are written after c
 follow module interfaces to their implementations instead of calling them external. `mutates` follows
 each post-construction load of an unguarded collection field (and each `Field` of a struct held by
 value): map updates, element stores, `append`, `copy` into it, `delete`, `clear`, storing it, returning
-it, boxing it, or passing it to a call whose gocap summary writes or keeps it are writes; unexported
+it, boxing it, or passing it to a call whose GoSree summary writes or keeps it are writes; unexported
 module callees are followed into their bodies three levels deep. A collection whose every load and
 reassignment holds a lock is guardable (G), like a field. Fixture cases for each, every one failing on
 the first version; the summary path and the lock propagation were each checked by breaking them.
@@ -431,10 +431,10 @@ Result (306 resolved hatches; 219 big closures, six or more classes):
 Read by hand, the content writes in the big closures come from two types:
 - `wisdev.ADKRuntime.toolToPlug` (196 hatches reach it): filled by `registerPlugins`, which
   `loadADKRuntime` calls on the runtime it has just built, before returning it (`adk_runtime.go:258-264`).
-  Construction in practice; a `//safe:init` claim would cover it.
+  Construction in practice; a `//gosree:init` claim (proposed, not implemented) would cover it.
 - `wisdev.endpointBreaker.failures` (192): updated by `record` after each webhook delivery
   (`downstream_events.go:184-197`), on the one worker goroutine `DownstreamEventSink` starts (line 262).
-  Runtime state, but confined to that goroutine; no gocap claim says so.
+  Runtime state, but confined to that goroutine; no GoSree claim says so.
 
 Without those two, 16 of the 219 big closures keep a content write. As bounds on the production ratio,
 assuming every other claim (guarded_by rows, frozen collections, init, published-once, overrides for
@@ -481,11 +481,11 @@ pin of ScholarLM may be measured only as a labelled second row beside this one.
 
 ### B9: guarded_by on the mutex-protected package variables
 
-The 51 package variables item 3 sorted as mutex-protected get `//safe:guarded_by` rows: 40 generated
+The 51 package variables item 3 sorted as mutex-protected get `//gosree:guarded_by` rows: 40 generated
 from item 3's triage (each anchored at the declaration position the triage recorded and checked to
 name the variable; each guard checked to be a package `sync.Mutex` or `sync.RWMutex`), 10 by hand (4
 declarations whose text repeats as a reset inside a function, anchored after their mutex; 6 struct
-variables guarded by their own `mu` or embedded mutex, a row per field, 8 rows), plus `//safe:holds`
+variables guarded by their own `mu` or embedded mutex, a row per field, 8 rows), plus `//gosree:holds`
 on two `*Locked` helpers. The 51st, `globalSteeringBus`, is left unclaimed (below). Dropped: a `holds` on the test hook `MockProjectIDForTest`, whose callers take no
 lock, and the 3 rows for `steeringBus`'s fields (below).
 
@@ -517,3 +517,28 @@ held mutex and the guarded field are not tied to the same base.
 SAFE006 left: 23 = 13 test seams, 7 `sync.Once`, 2 generated, 1 `globalSteeringBus`. The `sync.Once`
 exemption and the four lockset false-positive classes are in files another session is changing
 (`lockset.go`, `globals.go`); they were handed to it instead of fixed here.
+
+## Re-measured on `gosree` (2026-11-10)
+
+The figures above were measured with the item-4 branch before it merged `main`. The merge commit
+`7b2f023` brought in `ffc95cf`, which rewrote much of `passes/ownership` (lockset, globals, graph,
+summaries), and the production stratum changed with it. Nobody re-recorded it then. Each row below is
+a production run (no `-tests`) on a `git archive` of `bb60b53` with this ledger, on go1.27.3:
+
+| Tool commit | Transfers | Flagged | Hatched | Hatch ratio | Remaining findings |
+|---|---|---|---|---|---|
+| `ffedea6` (item 4 before the merge) | 476 | 345 | 345 | 72.5% | SAFE001 19, SAFE006 23, SAFE009 36 |
+| `7b2f023` (the merge) | 519 | 387 | 346 | 66.7% | SAFE001 22, SAFE002 36, SAFE003 43, SAFE004 20, SAFE006 117, SAFE008 3, SAFE009 36 |
+| `f9b5915` | 516 | 386 | 345 | 66.9% | SAFE001 22, SAFE002 34, SAFE003 32, SAFE004 16, SAFE005 1, SAFE006 117, SAFE008 5, SAFE009 36 |
+
+- `ffedea6` reproduces the B9 row exactly, so the input and toolchain are unchanged and the difference
+  is the tool. `fc0a3d0`, the other commit the merge brought in, changes only documentation.
+- The lower ratio is not progress. 41 more transfers are flagged and none of them has a ledger row,
+  so their findings stay unmuted. If each takes a hatch, as every flagged transfer in B4 did, the
+  ratio is 386 / 516 = 74.8%. SAFE006 rose from 23 to 117 with the same 66 `guarded_by` rows; which
+  variables the new findings are on has not been examined. Neither change has been triaged.
+- Both figures are far above the 20% threshold, so the recorded failure at `bb60b53` stands.
+- On `f9b5915`, `unsafe_stale` comes from `safestale`, which runs the borrow and errcheck passes as
+  dependencies: 0 of 333 directives mute nothing. On the commit before it, that run died with a stack
+  overflow in `passes/borrow.canHoldBorrow` on a type that contains a slice of itself.
+- Run time on `f9b5915`: 134 s wall, 7.8 GB peak RSS, under a load average near 200.

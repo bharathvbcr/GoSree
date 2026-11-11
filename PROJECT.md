@@ -1,7 +1,7 @@
-# Project: GoSree (`gosree` / `gocap`) — Rust-Style Safety, Reference Capabilities & Second-Class Borrows
+# Project: GoSree (`gosree`) — Rust-Style Safety, Reference Capabilities & Second-Class Borrows
 
 ## Architecture & Overview
-`gosree` (Go + श्री *Śrī* · **S**tatic **R**ace & **E**scape **E**nforcer, formerly `gocap`) is a static analysis suite for Go built on `golang.org/x/tools/go/analysis` and `golang.org/x/tools/go/ssa`. It enforces Rust-style memory safety, reference capabilities, borrow checking and `Result<T, E>`-style error discipline (`ERR001`–`ERR005`) with zero-cost erasure to standard Go code. The error-discipline solver is a Rust engine linked in-process through Gusset (`rust/gosree-errsolve`, `internal/gusseterr`), with a pure-Go oracle used when cgo is off. The product was renamed from `gocap`, so the module path (`github.com/bharathvbcr/gocap`) and some directories and binaries (`cmd/gocap`, `cmd/gocap-erase`, `cmd/gocap-corpus`) keep the old name.
+`gosree` (Go + श्री *Śrī* · **S**tatic **R**ace & **E**scape **E**nforcer) is a static analysis suite for Go built on `golang.org/x/tools/go/analysis` and `golang.org/x/tools/go/ssa`. It enforces Rust-style memory safety, reference capabilities, borrow checking and `Result<T, E>`-style error discipline (`ERR001`–`ERR005`) with zero-cost erasure to standard Go code. The error-discipline solver is a Rust engine linked in-process through Gusset (`rust/gosree-errsolve`, `internal/gusseterr`), with a pure-Go oracle used when cgo is off. The Go module is `github.com/bharathvbcr/gosree`; the commands are `cmd/gosree` (the checker), `cmd/gosree-erase` (the eraser) and `cmd/gosree-corpus` (the measurement tool).
 
 Detailed documentation is available in the [`docs/`](docs/) directory:
 - [Architecture & Subsystem Design](docs/ARCHITECTURE.md)
@@ -20,7 +20,7 @@ Detailed documentation is available in the [`docs/`](docs/) directory:
 ```mermaid
 flowchart TD
     subgraph Directives ["1. Directive & Annotation Engine (internal/annot/)"]
-        D1["Parse //gosree:, //sree:, //gocap: and //safe: line comments"]
+        D1["Parse //gosree: line comments and /*gosree:*/ blocks"]
         D2["Extract capabilities: \\iso, \\imm, \\mub, \\rob, guarded_by, holds"]
         D3["Construct *annot.Index"]
         D1 --> D2 --> D3
@@ -45,11 +45,11 @@ flowchart TD
         O3 --> O4 --> O5
     end
 
-    subgraph Toolchain ["4. Zero-Cost Erasure & Tooling (cmd/gosree, cmd/gocap, cmd/gocap-erase, cap/)"]
+    subgraph Toolchain ["4. Zero-Cost Erasure & Tooling (cmd/gosree, cmd/gosree-erase, cap/)"]
         T1["cap/ generic zero-cost type aliases (type Mut[T] = *T)"]
-        T2["gocap-erase: AST rewriting tool stripping markers & imports"]
-        T3["cmd/gosree and cmd/gocap multichecker drivers (go vet -vettool)"]
-        T4["cmd/gocap preflight: exit codes 0/1/2/3, refuses -fix and -diff"]
+        T2["gosree-erase: AST rewriting tool stripping markers & imports"]
+        T3["cmd/gosree multichecker driver (go vet -vettool)"]
+        T4["cmd/gosree preflight: exit codes 0/1/2/3, refuses -fix and -diff"]
     end
 
     subgraph Errors ["5. Error Discipline (passes/errcheck/, internal/gusseterr/, rust/)"]
@@ -72,57 +72,59 @@ flowchart TD
 
 ## Feature Inventory
 
-Every feature identified during development is inventoried and assigned to a milestone:
+Every feature is listed with the milestone it belongs to and the command that checks it. A row describes what the code does; the Check column is the command to run to see it. The test packages are named by the commands, so a feature with no test would have no command here.
 
-| # | Feature | Description | Milestone | Status |
-|---|---------|-------------|-----------|--------|
-| 1 | `//gocap:iso` Parameter Directive | Marks function parameter as uniquely owned; caller transfers ownership | M2 | **DONE** |
-| 2 | `//gocap:imm` Type Directive | Marks struct type as deeply immutable | M2 | **DONE** |
-| 3 | `//gocap:mub` / `//gocap:mut` Param Directive | Marks parameter as second-class mutable borrow (`&mut T` / `\mub`) | M1 | **DONE** |
-| 4 | `//gocap:rob` / `//gocap:ref` Param Directive | Marks parameter as second-class read-only borrow (`&T` / `\rob`) | M1 | **DONE** |
-| 5 | `//gocap:mut` Local Binding Directive | Marks local pointer binding as active second-class mutable borrow | M1 | **DONE** |
-| 6 | `//gocap:rob` Local Binding Directive | Marks local pointer binding as active second-class read-only borrow | M1 | **DONE** |
-| 7 | `//gocap:unsafe <reason>` Escape Hatch | Suppresses diagnostics for attached declaration or statement | M1 | **DONE** |
-| 8 | Legacy `//safe:*` Directive Aliases | Backward compatibility alias for `//safe:iso`, `//safe:imm`, `//safe:unsafe` | M1 | **DONE** |
-| 9 | Generic Marker Type `cap.Mut[T]` / `Mub[T]` | Type expression representing `&mut T` / `\mub` | M3 | **DONE** |
-| 10 | Generic Marker Type `cap.Ref[T]` / `Rob[T]` | Type expression representing `&T` / `\rob` | M3 | **DONE** |
-| 11 | Generic Marker Type `cap.Iso[T]` | Type expression representing `\iso` unique ownership | M3 | **DONE** |
-| 12 | Generic Marker Type `cap.Imm[T]` | Type expression representing `\imm` deep immutability | M3 | **DONE** |
-| 13 | Dummy Expressions `BorrowMut` / `Borrow` / `BorrowRef` / `BorrowMub` / `BorrowRob` | Helper expressions for explicit borrowing | M3 | **DONE** |
-| 14 | Dummy Expression `Move(x)` | Helper expression for explicit ownership transfer | M3 | **DONE** |
-| 15 | Struct Field Borrow Prohibition | Rejects borrow types/annotations in struct fields (`BORROW001`) | M1 | **DONE** |
-| 16 | Package Global Borrow Prohibition | Rejects borrow types/annotations in package globals (`BORROW001`) | M1 | **DONE** |
-| 17 | Transient Stack Struct Exception | Permits non-escaping stack tuples to hold stack borrows | M1 | **DONE** |
-| 18 | Simultaneous Mutable Borrow Detection | Rejects multiple concurrent mutable borrows of same allocation (`BORROW002`) | M1 | **DONE** |
-| 19 | Mutable-Immutable Aliasing Detection | Rejects mutable borrow when read-only borrow is active, or vice-versa (`BORROW002`) | M1 | **DONE** |
-| 20 | Owner Invalidation During Borrow | Rejects mutation or move of owner allocation while borrowed (`BORROW003`) | M1 | **DONE** |
-| 21 | Local Stack Return Prohibition | Rejects returning reference to local stack allocation (`BORROW004`) | M1 | **DONE** |
-| 22 | Non-Lexical Lifetime (NLL) Analysis | Resolves borrow expiry at last SSA use, permitting sequential reuse without lifetimes | M1 | **DONE** |
-| 23 | `\iso` Channel Send Move Invalidation | Invalidates sender binding upon channel send; reports use-after-move (`SAFE003`) | M2 | **DONE** |
-| 24 | `\iso` Goroutine Move Invalidation | Invalidates sender binding upon `go` spawn; reports use-after-move (`SAFE003`) | M2 | **DONE** |
-| 25 | Fork-Join Synchronization Join Point | Restores ownership to parent if goroutine joined via `sync.WaitGroup` or channel | M2 | **DONE** |
-| 26 | Deep Immutability Transitive Check | Verifies all struct fields are pointer-free, strings, or pointers to `\imm` (`SAFE005`) | M2 | **DONE** |
-| 27 | `\imm` Goroutine Sharing | Permits verified `\imm` pointers to be shared across goroutines without move invalidation | M2 | **DONE** |
-| 28 | `\mub` / `\rob` Channel Escape Ban | Rejects sending stack-scoped borrow over a channel (`CAP003`) | M2 | **DONE** |
-| 29 | `\mub` / `\rob` Goroutine Escape Ban | Rejects capturing stack-scoped borrow in a `go` closure or argument (`CAP003`) | M2 | **DONE** |
-| 30 | Native Comment Erasure Verification | Directives erase natively with 0 bytes and 0 instructions overhead | M3 | **DONE** |
-| 31 | AST Stripping Erasure Tool (`gocap-erase`) | Rewrites marker types to standard Go types and strips imports | M3 | **DONE** |
-| 32 | Comprehensive Acceptance Test Suite | Dual-track 4-tier E2E acceptance suite (`tests/e2e`: 12 top-level Go tests over 12 `analysistest` packages; tier 1 follows AC1–AC7) | M4 | **DONE** |
-| 33 | Error-Discipline Pass `safeerr` | `passes/errcheck` reports discarded errors, unchecked `(T, error)` unwraps, lost or shadowed errors, typed-nil errors and dropped writable `Close` errors (`ERR001`–`ERR005`) | M5 | **DONE** |
-| 34 | Rust Error Solver over Gusset | `rust/gosree-errsolve` solves the lowered wire frame in-process (unix and cgo); `internal/gusseterr` holds the wire format and a pure-Go oracle used otherwise | M5 | **DONE** |
-| 35 | `cmd/gocap` Preflight | Exit codes 0 clean, 1 failed, 2 usage, 3 findings; refuses `-fix` and `-diff`; forwards `-tags`; warns when a flag switches passes off | M5 | **DONE** |
+| # | Feature | Description | Milestone | Check |
+|---|---------|-------------|-----------|-------|
+| 1 | `//gosree:iso` Parameter Directive | Marks function parameter as uniquely owned; caller transfers ownership | M2 | `go test ./passes/ownership` |
+| 2 | `//gosree:imm` Type Directive | Marks struct type as deeply immutable | M2 | `go test ./passes/ownership` |
+| 3 | `//gosree:mub` / `//gosree:mut` Param Directive | Marks parameter as second-class mutable borrow (`&mut T` / `\mub`) | M1 | `go test ./internal/annot ./passes/borrow` |
+| 4 | `//gosree:rob` / `//gosree:ref` Param Directive | Marks parameter as second-class read-only borrow (`&T` / `\rob`) | M1 | `go test ./internal/annot ./passes/borrow` |
+| 5 | `//gosree:mut` Local Binding Directive | Marks local pointer binding as active second-class mutable borrow | M1 | `go test ./passes/borrow` |
+| 6 | `//gosree:rob` Local Binding Directive | Marks local pointer binding as active second-class read-only borrow | M1 | `go test ./passes/borrow` |
+| 7 | `//gosree:unsafe <reason>` Escape Hatch | Suppresses diagnostics for attached declaration or statement; a missing reason is `SAFE007` | M1 | `go test ./internal/annot ./passes/ownership` |
+| 8 | Near-Miss Directive Reporting | A comment that reads as a directive but is not one (`// gosree:iso p`, `//Gosree:holds mu`) is reported as `SAFE007` instead of silently doing nothing | M1 | `go test ./internal/annot` |
+| 9 | Generic Marker Type `cap.Mut[T]` / `Mub[T]` | Type expression representing `&mut T` / `\mub` | M3 | `go test ./cap` |
+| 10 | Generic Marker Type `cap.Ref[T]` / `Rob[T]` | Type expression representing `&T` / `\rob` | M3 | `go test ./cap` |
+| 11 | Generic Marker Type `cap.Iso[T]` | Type expression representing `\iso` unique ownership | M3 | `go test ./cap` |
+| 12 | Generic Marker Type `cap.Imm[T]` | Type expression representing `\imm` deep immutability | M3 | `go test ./cap` |
+| 13 | Dummy Expressions `BorrowMut` / `Borrow` / `BorrowRef` / `BorrowMub` / `BorrowRob` | Helper expressions for explicit borrowing | M3 | `go test ./cap` |
+| 14 | Dummy Expression `Move(x)` | Helper expression for explicit ownership transfer | M3 | `go test ./cap ./passes/ownership` |
+| 15 | Struct Field Borrow Prohibition | Rejects borrow types/annotations in struct fields (`BORROW001`) | M1 | `go test ./passes/borrow` |
+| 16 | Package Global Borrow Prohibition | Rejects borrow types/annotations in package globals (`BORROW001`) | M1 | `go test ./passes/borrow` |
+| 17 | Transient Stack Struct Exception | Permits non-escaping stack tuples to hold stack borrows | M1 | `go test ./passes/borrow` |
+| 18 | Simultaneous Mutable Borrow Detection | Rejects multiple concurrent mutable borrows of same allocation (`BORROW002`) | M1 | `go test ./passes/borrow` |
+| 19 | Mutable-Immutable Aliasing Detection | Rejects mutable borrow when read-only borrow is active, or vice-versa (`BORROW002`) | M1 | `go test ./passes/borrow` |
+| 20 | Owner Invalidation During Borrow | Rejects mutation or move of owner allocation while borrowed (`BORROW003`) | M1 | `go test ./passes/borrow` |
+| 21 | Local Stack Return Prohibition | Rejects returning reference to local stack allocation (`BORROW004`) | M1 | `go test ./passes/borrow` |
+| 22 | Non-Lexical Lifetime (NLL) Analysis | Resolves borrow expiry at last SSA use, permitting sequential reuse without lifetimes | M1 | `go test ./passes/borrow` |
+| 23 | `\iso` Channel Send Move Invalidation | Invalidates sender binding upon channel send; reports use-after-move (`SAFE003`) | M2 | `go test ./passes/ownership` |
+| 24 | `\iso` Goroutine Move Invalidation | Invalidates sender binding upon `go` spawn; reports use-after-move (`SAFE003`) | M2 | `go test ./passes/ownership` |
+| 25 | Fork-Join Synchronization Join Point | Restores ownership to the parent if the goroutine is joined through a channel, a `sync.WaitGroup` (including `WaitGroup.Go`) or an `errgroup.Group`; a use after any other synchronisation is reported as `SAFE003-forkjoin` | M2 | `go test ./passes/ownership` |
+| 26 | Deep Immutability Transitive Check | Verifies every field of an imm struct is pointer-free, a string, a pointer to an imm type, a shared-by-design type or a `guarded_by` field (`SAFE005`) | M2 | `go test ./passes/ownership` |
+| 27 | `\imm` Goroutine Sharing | Permits verified `\imm` pointers to be shared across goroutines without move invalidation | M2 | `go test ./passes/ownership` |
+| 28 | `\mub` / `\rob` Channel Escape Ban | Rejects sending stack-scoped borrow over a channel (`CAP003`) | M2 | `go test ./passes/ownership` |
+| 29 | `\mub` / `\rob` Goroutine Escape Ban | Rejects capturing stack-scoped borrow in a `go` closure or argument (`CAP003`) | M2 | `go test ./passes/ownership` |
+| 30 | Zero-Cost Directives | Directives are comments, and marker types are aliases of `*T`: the compiled assembly is identical with and without the directives (`TestTier1_DirectivesErasure`) | M3 | `bash tests/run_acceptance_tests.sh --tier 1` |
+| 31 | AST Stripping Erasure Tool (`gosree-erase`) | Rewrites marker types to standard Go types, strips `//gosree:` directives and the `cap` import | M3 | `go test ./cmd/gosree-erase` |
+| 32 | Comprehensive Acceptance Test Suite | Dual-track 4-tier E2E acceptance suite (`tests/e2e`: 12 top-level Go tests over 12 `analysistest` packages; tier 1 follows AC1–AC7) | M4 | `bash tests/run_acceptance_tests.sh` |
+| 33 | Error-Discipline Pass `safeerr` | `passes/errcheck` reports discarded errors, unchecked `(T, error)` unwraps, lost or shadowed errors, typed-nil errors and dropped writable `Close` errors (`ERR001`–`ERR005`) | M5 | `go test ./passes/errcheck` |
+| 34 | Rust Error Solver over Gusset | `rust/gosree-errsolve` solves the lowered wire frame in-process (unix and cgo); `internal/gusseterr` holds the wire format and a pure-Go oracle used otherwise | M5 | `go test ./internal/gusseterr`; `(cd rust && cargo test --release)` |
+| 35 | `cmd/gosree` Preflight | Exit codes 0 clean, 1 failed, 2 usage, 3 findings; refuses `-fix` and `-diff`; forwards `-tags`; warns when a flag switches passes off | M5 | `go test ./cmd/gosree` |
 
 ---
 
 ## Milestones Summary
 
-| # | Name | Scope | Status |
-|---|------|-------|--------|
-| **M1** | Second-Class Borrows & Local Borrow Checker | Directive parsing for `mub`/`rob`/`mut`/`ref` in `internal/annot/`; storage checks (`BORROW001`); SSA flow-sensitive borrow checking (`BORROW002`, `BORROW003`, `BORROW004`); NLL analysis | **DONE** |
-| **M2** | Reference Capabilities Across Concurrency Boundaries | `\iso` move invalidation across channel sends and `go` closures (`SAFE003`); fork-join recovery; `\imm` transitive deep immutability (`SAFE005`); stack-scoped borrow escape ban (`CAP003`) | **DONE** |
-| **M3** | Toolchain Compatibility & Zero-Cost Erasure | Native directive zero-cost erasure; `cap/` generic marker types and aliases; `cmd/gocap-erase` AST tool; CLI multi-checker wiring | **DONE** (zero-instruction erasure parity is checked in tier 1) |
-| **M4** | Dual-Track E2E Acceptance & Hardening | Dual-track 4-tier E2E acceptance test suite (`tests/e2e`, 12 top-level Go tests across Tiers 1-4); adversarial hardening (`tests/stress`) | **DONE** (the E2E suite passes; the whole repository does not: `passes/ownership` `TestEscapeOracleNoFreshOrWritesOracle` fails) |
-| **M5** | Error Discipline & Driver Preflight | `passes/errcheck` (`ERR001`–`ERR005`), the Rust solver and pure-Go oracle, `cmd/gocap` preflight | **DONE** |
+| # | Name | Scope | Check |
+|---|------|-------|-------|
+| **M1** | Second-Class Borrows & Local Borrow Checker | Directive parsing for `mub`/`rob`/`mut`/`ref` in `internal/annot/`; storage checks (`BORROW001`); SSA flow-sensitive borrow checking (`BORROW002`, `BORROW003`, `BORROW004`); NLL analysis | `go test ./internal/annot ./passes/borrow` |
+| **M2** | Reference Capabilities Across Concurrency Boundaries | `\iso` move invalidation across channel sends and `go` closures (`SAFE003`); fork-join recovery; `\imm` transitive deep immutability (`SAFE005`); stack-scoped borrow escape ban (`CAP003`) | `go test ./passes/ownership` |
+| **M3** | Toolchain Compatibility & Zero-Cost Erasure | Directives as comments; `cap/` generic marker types and aliases; `cmd/gosree-erase` AST tool; CLI multi-checker wiring | `go test ./cap ./cmd/gosree-erase`; `bash tests/run_acceptance_tests.sh --tier 1` (assembly parity) |
+| **M4** | Dual-Track E2E Acceptance & Hardening | Dual-track 4-tier E2E acceptance test suite (`tests/e2e`, 12 top-level Go tests across Tiers 1-4); adversarial hardening (`tests/stress`) | `bash tests/run_acceptance_tests.sh`; `go test -timeout 30m ./tests/stress` |
+| **M5** | Error Discipline & Driver Preflight | `passes/errcheck` (`ERR001`–`ERR005`), the Rust solver and pure-Go oracle, `cmd/gosree` preflight | `go test ./passes/errcheck ./internal/gusseterr ./cmd/gosree`; `(cd rust && cargo test --release)` |
+
+A milestone is complete when its check command exits 0. The stress suite takes minutes and can pass go test's default 10 minute timeout on a busy machine, hence `-timeout 30m`.
 
 ---
 
@@ -131,13 +133,12 @@ Every feature identified during development is inventoried and assigned to a mil
 ```text
 .
 ├── cmd/
-│   ├── gosree/             # Multichecker CLI entrypoint (go vet -vettool)
-│   ├── gocap/              # Multichecker CLI with exit-code and flag preflight
-│   ├── gocap-erase/        # AST zero-cost erasure tool
-│   └── gocap-corpus/       # Race corpus & real-world module evaluation engine
+│   ├── gosree/             # Multichecker CLI (go vet -vettool) with exit-code and flag preflight
+│   ├── gosree-erase/       # AST zero-cost erasure tool
+│   └── gosree-corpus/      # Race corpus & real-world module evaluation engine
 ├── cap/                    # Zero-cost generic type aliases (type Mut[T] = *T)
 ├── internal/
-│   ├── annot/              # Directive parser (gosree:, sree:, gocap: and safe: prefixes); stale/ reports unused escape hatches
+│   ├── annot/              # Directive parser (//gosree: prefix); stale/ reports unused escape hatches
 │   ├── gusseterr/          # Error-solver wire format, Gusset engine (unix and cgo), pure-Go oracle
 │   └── kinds/              # Type classification & immutability helpers
 ├── passes/

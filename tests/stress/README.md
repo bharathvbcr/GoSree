@@ -1,14 +1,19 @@
-# gocap stress suite
+# GoSree stress suite
 
 Programs written to get past the checker. Each one is real Go that compiles; each line records what
-gocap does with it today and whether that is right.
+`gosree` does with it today and whether that is right.
 
 ```bash
 go test ./tests/stress            # markers, determinism, runtime witnesses, scale, driver parity
-go test ./tests/stress -short     # markers only (about 3 s)
+go test ./tests/stress -short     # markers and harness self-tests only
 go test ./tests/stress -run TestStress -v   # the ledger
 bash tests/stress/fingerprint.sh  # hash of the checker sources a result belongs to
 ```
+
+The full run takes several minutes, and the scale tests dominate it (`TestScale` alone took 275 s on
+2026-11-10 on a loaded machine). Pass `-timeout 30m` when the machine is busy, because go test's
+default is 10 minutes. `-short` took 20 s on that machine; an earlier figure of about 3 s on an idle
+one was not re-measured.
 
 The run logs a ledger on every pass: hits locked, known misses, known false positives, known
 crashes, per rule. A green run means "the checker behaves exactly as recorded", not "no holes".
@@ -17,25 +22,26 @@ The holes are listed in [FINDINGS.md](FINDINGS.md), with the fingerprint its num
 | File | What it holds |
 |---|---|
 | `testdata/src/<area>_<topic>/` | the fixtures, one directory per topic; the area prefixes are in the next section |
-| `harness_test.go`, `stress_test.go` | the marker checker, the witness runner, the crash probe |
-| `harness_selftest_test.go` | proof the harness rejects wrong markers, clean witnesses and clean crash probes |
+| `harness_test.go`, `stress_test.go` | the marker checker (`TestStress`), `TestDump`, `TestDeterministic`, the witness runner (`TestWitnesses`), the crash probe, and the self-tests of the last two: `TestWitnessRunnerAcquitsCleanProgram` (a clean program is not convicted, a program that does not build is an error) and `TestCrashProbeTellsCrashFromClean` |
+| `harness_selftest_test.go` | proof the harness rejects wrong markers and markers without a reason |
 | `scale_test.go` | generated programs of growing size; bounds the growth, records the known blowups |
-| `vetparity_test.go` | standalone `gocap` against `go vet -vettool`, and the CLI contract |
+| `vetparity_test.go` | standalone `gosree` against `go vet -vettool`, and the CLI contract |
+| `fingerprint.sh` | one hash over the checker's non-test sources |
 
 ## Fixture families
 
-The prefix is the area. `GOCAP_STRESS_ROOTS` matches on it.
+The prefix is the area. `GOSREE_STRESS_ROOTS` matches on it.
 
 | Prefix | Covers |
 |---|---|
-| `mv_` | moves: alias graph, flow, idioms, `//gocap:iso`, spawn-through-callee |
+| `mv_` | moves: alias graph, flow, idioms, `//gosree:iso`, spawn-through-callee |
 | `sp_` | spawners and fork-join: the goroutine-boundary table, publication without a spawn or send |
 | `bw_` | borrows: BORROW001 to BORROW004, CAP003, non-lexical lifetimes |
 | `im_` | immutability and globals: SAFE005, SAFE006, constructors, laundering through conversions |
 | `lk_` | locks and handlers: SAFE008, SAFE009, `holds` contracts |
-| `dx_` | unsafe, directive lexing, `//line`, build tags and the escape hatch |
+| `dx_` | unsafe, directive lexing and near misses, `//line`, build tags and the escape hatch |
 | `rb_` | robustness: odd control flow, generics, range-over-func, closures, directives on every declaration |
-| `rs_` | distance to Rust: guarantees Rust enforces that gocap does not |
+| `rs_` | distance to Rust: guarantees Rust enforces that `gosree` does not |
 | `er_` | error discipline (`safeerr`): `er_close` ERR005, `er_mustuse` ERR001, `er_shadow` ERR003, `er_typednil` ERR004, `er_unwrap` ERR002, `er_xpkg` ERR004 across packages |
 | `adv_` | cross-cutting programs: `adv_break` mixes borrow, move, immutability, lock and error rules in one package; `adv_w_race` is a spawner-fact witness |
 | `seed_` | worked examples for writing a fixture |
@@ -50,9 +56,9 @@ markers (the checker convicts it statically and the runtime agrees), as `er_w_ty
 The `er_` and `adv_` fixtures run under the same analyzer set as the other families; `safeerr`
 is part of it.
 
-The erase tool's suite is `cmd/gocap-erase/stress_erase_test.go`. In the two generated-input files
-and there, a known bug is a test that asserts the bug is present and fails with "appears fixed"
-when it is not.
+The erase tool's suite is `cmd/gosree-erase/stress_erase_test.go`. There, and in `scale_test.go` and
+`vetparity_test.go`, a known bug is a test that asserts the bug is present and fails with
+"appears fixed" when it is not.
 
 ## Markers
 
@@ -60,13 +66,13 @@ A marker goes in a trailing comment on the line the diagnostic is, or should be,
 
 | Marker | Meaning | The suite fails when |
 |---|---|---|
-| `HIT(CODE)` | gocap reports CODE here, and should | it stops reporting (a regression) |
-| `MISS(CODE): why` | gocap is silent here, and should report CODE | it starts reporting (promote to `HIT`) |
-| `FP(CODE): why` | gocap reports CODE here, and should not | it stops reporting (remove the marker) |
+| `HIT(CODE)` | `gosree` reports CODE here, and should | it stops reporting (a regression) |
+| `MISS(CODE): why` | `gosree` is silent here, and should report CODE | it starts reporting (promote to `HIT`) |
+| `FP(CODE): why` | `gosree` reports CODE here, and should not | it stops reporting (remove the marker) |
 | *(none)* | the line must be clean | anything is reported |
 
-`CODE` is a rule id (`SAFE003`, `BORROW002`, `CAP003`, ...) or `NORULE` for a hazard no rule claims
-to cover. Several markers may share a line. `MISS` and `FP` need a reason.
+`CODE` is a rule id (`SAFE003`, `BORROW002`, `CAP003`, `ERR002`, ...) or `NORULE` for a hazard no
+rule claims to cover. Several markers may share a line. `MISS` and `FP` need a reason.
 
 File-level markers, on a comment line of their own:
 
@@ -77,27 +83,28 @@ File-level markers, on a comment line of their own:
 | `// WITNESS: panic` | the file is a `package main` that `go run` ends in a panic or fatal error |
 
 A witness is the evidence that a `MISS` is a real bug and not a matter of taste: the same file that
-gocap accepts is convicted by the runtime. It is built in the GOPATH the analyzers load from, so it
+`gosree` accepts is convicted by the runtime. It is built in the GOPATH the analyzers load from, so it
 may import the cap package and sub-packages of its own root.
 
 A panicking analyzer takes its process with it, so a root with a `CRASH` line is analyzed in a
-child process, and its other markers are not checked. Markers are matched on physical lines:
-`//line` directives do not move them.
+child process, and its other markers are not checked. No fixture carries one today, and
+`TestCrashProbeTellsCrashFromClean` is what shows the probe works. Markers are matched on physical
+lines: `//line` directives do not move them.
 
 ## Writing a fixture
 
 1. Create `testdata/src/<area>_<topic>/` with one mechanism per function. Imports: the standard
-   library and `github.com/bharathvbcr/gocap/cap` (the harness supplies the real package).
-2. See what gocap says:
+   library and `github.com/bharathvbcr/gosree/cap` (the harness supplies the real package).
+2. See what `gosree` says:
    ```bash
-   GOCAP_STRESS_DUMP=<area>_<topic> go test ./tests/stress -run TestDump -v
+   GOSREE_STRESS_DUMP=<area>_<topic> go test ./tests/stress -run TestDump -v
    ```
 3. Mark every reported line `HIT` or `FP`, and every line that should have been reported `MISS`.
    Put an accepted near-twin next to each miss, so the hole is pinned to one mechanism.
-4. Check the area: `GOCAP_STRESS_ROOTS=<area>_ go test ./tests/stress`. A run with
-   `GOCAP_STRESS_ROOTS` set is partial and says so.
+4. Check the area: `GOSREE_STRESS_ROOTS=<area>_ go test ./tests/stress`. A run with
+   `GOSREE_STRESS_ROOTS` set is partial and says so.
 
-The analyzers run in the order of `cmd/gocap/main.go`: annot, unsafeban, ownership, borrow, errcheck
+The analyzers run in the order of `cmd/gosree/main.go`: annot, unsafeban, ownership, borrow, errcheck
 (`cliAnalyzers`, `harness_test.go:53`).
 
 ## Running
@@ -107,16 +114,19 @@ go test ./tests/stress                          # everything, including witnesse
 go test ./tests/stress -short                   # markers and harness self-tests only
 go test ./tests/stress -run TestStress -v       # markers and the ledger
 go test ./tests/stress -run TestWitnesses -v    # `go run` / `go run -race` each WITNESS file
-GOCAP_STRESS_ROOTS=er_,adv_ go test ./tests/stress -run TestStress   # a partial run, comma-separated prefixes
+GOSREE_STRESS_ROOTS=er_,adv_ go test ./tests/stress -run TestStress   # a partial run, comma-separated prefixes
 ```
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `GOCAP_STRESS_ROOTS` | markers, witnesses | only fixture roots with one of these prefixes; the run logs `PARTIAL RUN` |
-| `GOCAP_STRESS_DUMP` | `TestDump` | comma-separated roots whose diagnostics are printed unchecked |
-| `GOCAP_SCALE_EXPLORE` | `TestScaleExplore` | size multiplier; the test skips when unset |
-| `GOCAP_SCALE_ONLY`, `GOCAP_SCALE_MAXN` | `TestScaleExplore` | restrict to shapes whose name contains the value; cap the size |
+| `GOSREE_STRESS_ROOTS` | markers, witnesses | only fixture roots with one of these prefixes; the run logs `PARTIAL RUN` |
+| `GOSREE_STRESS_DUMP` | `TestDump` | comma-separated roots whose diagnostics are printed unchecked |
+| `GOSREE_SCALE_EXPLORE` | `TestScaleExplore` | size multiplier; the test skips when unset |
+| `GOSREE_SCALE_ONLY`, `GOSREE_SCALE_MAXN` | `TestScaleExplore` | restrict to shapes whose name contains the value; cap the size |
+
+`GOSREE_STRESS_CRASH_PROBE` is set by `TestStress` for its own child processes and is not meant to be
+set by hand.
 
 `-short` skips `TestDeterministic`, `TestWitnesses`, the scale tests and the vet-parity tests, which
-need the `gocap` binary built from `cmd/gocap`. Witnesses need a Go toolchain and the race detector
+need the `gosree` binary built from `cmd/gosree`. Witnesses need a Go toolchain and the race detector
 (cgo).

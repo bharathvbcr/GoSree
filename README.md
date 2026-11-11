@@ -18,26 +18,28 @@
 
 ---
 
-**GoSree** (`gosree`, formerly `gocap`) is a suite of static analysis passes built on `golang.org/x/tools/go/analysis` and `golang.org/x/tools/go/ssa`—paired with an in-process **Rust CFG/SSA monotone fixpoint engine** (`rust/gosree-errsolve`) hosted via **Gusset** (`internal/gusseterr`)—that brings Rust-style memory safety, reference capabilities (`\iso`, `\imm`, `\mub`, `\rob`), mutex lockset verification (`guarded_by`, `holds`), second-class borrow checking with Non-Lexical Lifetimes (NLL), and `Result<T, E>` error-handling discipline (`ERR001`–`ERR005`) to ordinary Go.
+**GoSree** (`gosree`) is a suite of static analysis passes built on `golang.org/x/tools/go/analysis` and `golang.org/x/tools/go/ssa`—paired with an in-process **Rust CFG/SSA monotone fixpoint engine** (`rust/gosree-errsolve`) hosted via **Gusset** (`internal/gusseterr`)—that brings Rust-style memory safety, reference capabilities (`\iso`, `\imm`, `\mub`, `\rob`), mutex lockset verification (`guarded_by`, `holds`), second-class borrow checking with Non-Lexical Lifetimes (NLL), and `Result<T, E>` error-handling discipline (`ERR001`–`ERR005`) to ordinary Go.
 
 > **Why *GoSree*?**  
 > In Sanskrit, **श्री (*śrī*)**—from the verbal root **श्रि (*śri*)**—means *"that on which something safely rests, a foundation or refuge, order and harmony."* In English, **SREE** stands for **S**tatic **R**ace & **E**scape **E**nforcer (and **S**econd-class **R**eferences & **E**xclusive **E**rasure).
 
-The code stays plain, idiomatic Go: annotations are comments (`//gosree:`, `//sree:`, `//gocap:`, or `//safe:`), or zero-cost generic marker type aliases (`cap.Mut[T] = *T`), so `gofmt`, `gopls`, `go vet`, and `go test` compile and test normal Go with **zero runtime overhead**.
+The code stays plain, idiomatic Go: annotations are comments (`//gosree:`) or zero-cost generic marker type aliases (`cap.Mut[T] = *T`), so `gofmt`, `gopls`, `go vet`, and `go test` compile and test normal Go with **zero runtime overhead**.
 
 ---
 
 ## Capability & Directive Overview
 
-| Capability / Claim | Comment Directives (`//gosree:` / `//sree:` / `//gocap:` / `//safe:`) | Generic Marker Type | Semantics & Guarantee | Enforced By |
+| Capability / Claim | Comment Directive (`//gosree:`) | Generic Marker Type | Semantics & Guarantee | Enforced By |
 |---|---|---|---|---|
-| **Isolated (`\iso`)** | `//gosree:iso p` · `//sree:iso p` · `//gocap:iso p` · `//safe:iso p` | `cap.Iso[T]` + `cap.Move(x)` | Unique ownership root; affine move across goroutines/channels invalidates sender binding until a verified fork-join point | `SAFE002`, `SAFE003`, `SAFE004` |
-| **Immutable (`\imm`)** | `//gosree:imm` · `//sree:imm` · `//gocap:imm` · `//safe:imm` | `cap.Imm[T]` | Transitively immutable struct (or guarded fields only); freely shareable across goroutines without locks or moves | `SAFE005` |
-| **Mutable Borrow (`\mub`)** | `//gosree:mub p` · `//gosree:mut` · `//gocap:mub p` · `//gocap:mut` | `cap.Mut[T]` / `cap.Mub[T]` | Stack-confined exclusive mutable borrow (`&mut T`); no aliasing borrows, no owner mutation while live, no heap/goroutine escape | `BORROW001`–`004`, `CAP003` |
-| **Read-Only Borrow (`\rob`)** | `//gosree:rob p` · `//gosree:ref` · `//gocap:rob p` · `//gocap:ref` | `cap.Ref[T]` / `cap.Rob[T]` | Stack-confined shared read-only borrow (`&T`); multiple readers allowed, no concurrent `\mub`, no heap/goroutine escape | `BORROW001`–`004`, `CAP003` |
-| **Guarded Memory** | `//safe:guarded_by mu [x, y]` · `//gosree:guarded_by mu [x, y]` | — | Unexported struct field, package global, or local variable accessed only while mutex `mu` is held (`RLock` for reads, `Lock` for writes) | `SAFE009`, `SAFE006` |
-| **Lock Precondition** | `//safe:holds mu` · `//gosree:holds mu` | — | Function or method requires caller to hold `mu` on every incoming CFG path and must not unlock it | `SAFE007`, `SAFE009` |
-| **Escape Hatch** | `//gosree:unsafe <reason>` · `//gocap:unsafe <reason>` · `//safe:unsafe <reason>` | — | Audited, reason-mandatory suppression for a declaration, transfer, or statement; counted in the module hatch ratio | `SAFE007`, `ownership.Stats` |
+| **Isolated (`\iso`)** | `//gosree:iso p` | `cap.Iso[T]` + `cap.Move(x)` | Unique ownership root; affine move across goroutines/channels invalidates sender binding until a verified fork-join point | `SAFE002`, `SAFE003`, `SAFE004` |
+| **Immutable (`\imm`)** | `//gosree:imm` | `cap.Imm[T]` | Transitively immutable struct (or guarded fields only); freely shareable across goroutines without locks or moves | `SAFE005` |
+| **Mutable Borrow (`\mub`)** | `//gosree:mub p` · `//gosree:mut` | `cap.Mut[T]` / `cap.Mub[T]` | Stack-confined exclusive mutable borrow (`&mut T`); no aliasing borrows, no owner mutation while live, no heap/goroutine escape | `BORROW001`–`004`, `CAP003` |
+| **Read-Only Borrow (`\rob`)** | `//gosree:rob p` · `//gosree:ref p` · `//gosree:rob` on a local binding | `cap.Ref[T]` / `cap.Rob[T]` | Stack-confined shared read-only borrow (`&T`); multiple readers allowed, no concurrent `\mub`, no heap/goroutine escape | `BORROW001`–`004`, `CAP003` |
+| **Guarded Memory** | `//gosree:guarded_by mu [x, y]` | — | Unexported struct field, package global, or local variable accessed only while mutex `mu` is held (`RLock` for reads, `Lock` for writes) | `SAFE009`; `SAFE007` for a malformed declaration |
+| **Lock Precondition** | `//gosree:holds mu` | — | Function or method requires caller to hold `mu` on every incoming CFG path and must not unlock it | `SAFE007` (unlocks `mu`), `SAFE009` (called without `mu`) |
+| **Escape Hatch** | `//gosree:unsafe <reason>` | — | Audited, reason-mandatory suppression for a declaration, transfer, or statement; counted in the module hatch ratio | `SAFE007` (missing reason), `ownership.Stats` |
+
+Those are all the verbs: `unsafe`, `iso`, `imm`, `guarded_by`, `holds`, `mub`, `rob`, `mut`, `ref`. The block form `/*gosree:mut*/` reads the same way. A comment that looks like a directive but is not one (`// gosree:iso p`, `//Gosree:holds mu`) is reported as `SAFE007` so it cannot silently do nothing; a comment with any other prefix is plain prose.
 
 ---
 
@@ -46,7 +48,7 @@ The code stays plain, idiomatic Go: annotations are comments (`//gosree:`, `//sr
 ```mermaid
 flowchart TD
     subgraph Input ["Go Source (.go)"]
-        Src["Go Source Code\n(//gosree:, //gocap:, //safe: directives or cap.Mut[T] marker types)"]
+        Src["Go Source Code\n(//gosree: directives or cap.Mut[T] marker types)"]
     end
 
     subgraph FrontEnd ["Front-End & IR Construction"]
@@ -73,9 +75,9 @@ flowchart TD
     end
 
     subgraph Output ["Drivers & Toolchain Integration"]
-        Driver["cmd/gosree & cmd/gocap (multichecker)\ncmd/gocap adds a flag/exit-code preflight"]
+        Driver["cmd/gosree (multichecker)\nwith a flag/exit-code preflight"]
         Vet["go vet -vettool=build/gosree ./..."]
-        Eraser["cmd/gocap-erase (AST Rewriter)"]
+        Eraser["cmd/gosree-erase (AST Rewriter)"]
     end
 
     Src --> Parser
@@ -107,17 +109,17 @@ flowchart TD
 
 ### Analyzers
 
-`cmd/gosree` and `cmd/gocap` register the same five analyzers, in this order ([`cmd/gosree/main.go`](cmd/gosree/main.go), [`cmd/gocap/main.go`](cmd/gocap/main.go)):
+`cmd/gosree` registers five analyzers, in this order ([`cmd/gosree/main.go`](cmd/gosree/main.go)):
 
 | Analyzer (`-NAME` flag) | Package | Rules |
 |---|---|---|
-| `safeannot` | [`internal/annot`](internal/annot/annot.go) | Directive parsing; `SAFE007` |
+| `safeannot` | [`internal/annot`](internal/annot/annot.go) | Directive parsing; `SAFE007` (malformed directives, near misses, bad `guarded_by` declarations, missing hatch reasons) |
 | `safeunsafe` | [`passes/unsafeban`](passes/unsafeban/unsafeban.go) | `SAFE001` |
-| `safeownership` | [`passes/ownership`](passes/ownership/ownership.go) | `SAFE002`–`SAFE006`, `SAFE008`, `SAFE009`, `CAP003` |
+| `safeownership` | [`passes/ownership`](passes/ownership/ownership.go) | `SAFE002`–`SAFE006`, `SAFE007` (a `holds` function that unlocks its mutex), `SAFE008`, `SAFE009`, `CAP003` |
 | `borrow` | [`passes/borrow`](passes/borrow/borrow.go) | `BORROW001`–`BORROW004` |
 | `safeerr` | [`passes/errcheck`](passes/errcheck/errcheck.go) | `ERR001`–`ERR005` |
 
-A sixth analyzer, `safestale` ([`internal/annot/stale`](internal/annot/stale/stale.go)), requires the five above and reports escape hatches that mute nothing. Neither driver registers it; only its own test runs it.
+A sixth analyzer, `safestale` ([`internal/annot/stale`](internal/annot/stale/stale.go)), requires the five above and reports escape hatches that mute nothing (`SAFE007`). The driver does not register it; `cmd/gosree-corpus` runs it to count stale hatches (`unsafe_stale`), and its own tests run it.
 
 ---
 
@@ -135,7 +137,7 @@ go build -o build/gosree ./cmd/gosree
 
 - **Sibling checkout:** `go.mod` has `replace github.com/bharathvbcr/gusset => ../gusset`, and `rust/gusset-engine` depends on `../../../gusset/crates/gusset` by path, so gusset must sit next to this repository.
 - **Skipping `cargo build` fails at link time:** the cgo directive in [`internal/gusseterr/engine_unix.go`](internal/gusseterr/engine_unix.go) adds `-L rust/target/release` and expects the symbol `gosree_gusset_init`. Without that archive `go build ./cmd/gosree` ends with `Undefined symbols ... _gosree_gusset_init`.
-- **Without cgo (`CGO_ENABLED=0`) or on a non-unix target** no Rust is needed: [`engine_other.go`](internal/gusseterr/engine_other.go) solves with the pure-Go reference oracle ([`oracle.go`](internal/gusseterr/oracle.go)), which produces the same results bit for bit. Findings are the same; only speed and heap use differ. `errcheck.Summary.UsedRustGusset` reports which engine ran.
+- **Without cgo (`CGO_ENABLED=0`) or on a non-unix target** no Rust is needed: [`engine_other.go`](internal/gusseterr/engine_other.go) solves with the pure-Go reference oracle ([`oracle.go`](internal/gusseterr/oracle.go)), whose output is byte-identical to the Rust engine's (`TestDifferentialParityRandomizedCFGs` compares them on 250 randomized frames when the native engine is active). Findings are the same; only speed and heap use differ. `errcheck.Summary.UsedRustGusset` reports which engine ran.
 
 ### 2. Run Verification via `go vet` (or Standalone)
 ```bash
@@ -149,19 +151,19 @@ go vet -vettool=$(pwd)/build/gosree ./...
 ### 3. Run the Verification Suites
 ```bash
 # Run all unit and analysis pass tests (needs the Rust archive from step 1 when cgo is on).
-# One known failure: passes/ownership TestEscapeOracleNoFreshOrWritesOracle.
-go test ./...
+# tests/stress alone takes minutes and can pass go test's default 10m timeout on a busy machine.
+go test -timeout 30m ./...
 
 # Run the dual-track 4-tier E2E acceptance test suite (12 top-level Go tests in tests/e2e)
 bash tests/run_acceptance_tests.sh
 
 # Run the adversarial stress & runtime witness suite
-go test ./tests/stress
+go test -timeout 30m ./tests/stress
 ```
 
-### 4. `cmd/gocap`: exit codes and refused flags
+### 4. `cmd/gosree`: exit codes and refused flags
 
-`cmd/gocap` runs the same analyzers as `cmd/gosree`, behind a command-line preflight ([`cmd/gocap/preflight.go`](cmd/gocap/preflight.go)) so that a CI gate cannot pass by accident. `cmd/gosree` is the plain multichecker without it.
+`cmd/gosree` reads the command line before it runs the analyzers ([`cmd/gosree/preflight.go`](cmd/gosree/preflight.go)) so that a CI gate cannot pass by accident.
 
 | Exit | Meaning |
 |---|---|
@@ -172,13 +174,14 @@ go test ./tests/stress
 
 - **`-fix` and `-diff` are refused (exit 2).** GoSree offers no suggested fixes, and the driver exits 0 and prints nothing in those modes.
 - **`-tags a,b` is forwarded to the `go` command** through `GOFLAGS`, because the driver itself accepts and ignores it. The list must be comma-separated.
-- **`-json`**: the driver exits 0 even with findings, so `gocap` re-runs it as a child process and derives the exit code from the JSON. A failed analysis outranks findings.
+- **`-json`**: the driver exits 0 even with findings, so `gosree` re-runs itself as a child process (marked by the `GOSREE_JSON_CHILD` environment variable) and derives the exit code from the JSON. A failed analysis outranks findings.
 - **Warnings on stderr** when a flag makes a run cover less: `-test=false` (test files are not analysed), and `-NAME=false` or `-NAME` for an analyzer, which switches other passes off (exit 0 then does not mean those rules were checked).
+- **Under `go vet -vettool=...`** the exit status is `go vet`'s own: 1 for findings and for failures, 0 when clean.
 
-### 5. Optional: AST Erasure Tool (`cmd/gocap-erase`)
-Strip generic marker types (`cap.Mut[T]` → `*T`), helper intrinsics (`cap.BorrowMut(x)` → `x`), directive comments (`//gosree:`, `//sree:`, `//gocap:`, `//safe:`), and `cap` imports into dependency-free Go source:
+### 5. Optional: AST Erasure Tool (`cmd/gosree-erase`)
+Strip generic marker types (`cap.Mut[T]` → `*T`), helper intrinsics (`cap.BorrowMut(x)` → `x`), directive comments (`//gosree:`), and `cap` imports into dependency-free Go source:
 ```bash
-go build -o build/gosree-erase ./cmd/gocap-erase
+go build -o build/gosree-erase ./cmd/gosree-erase
 build/gosree-erase -d ./...   # preview unified diff
 build/gosree-erase -w ./...   # rewrite files in place atomically
 ```
@@ -191,10 +194,10 @@ Comprehensive guides, specifications, and reference manuals are located in [`doc
 
 - 📘 **[Architecture & Subsystem Design](docs/ARCHITECTURE.md)**: Deep dive into the static analysis pipeline, Steensgaard alias graph with pointer depths, SSA CFG traversal, and module interactions.
 - 📋 **[Rules & Diagnostics Reference](docs/RULES.md)**: Complete catalog of all diagnostic codes (`SAFE001`–`SAFE009`, `BORROW001`–`BORROW004`, `CAP003`, `ERR001`–`ERR005`) with failing/passing examples and remediation patterns.
-- 🏷️ **[Directives & Capability Markers](docs/DIRECTIVES.md)**: Specification for comment directives (`//gosree:...`, `//sree:...`, `//gocap:...`, `//safe:...`), attachment rules, and `cap.*` marker types.
+- 🏷️ **[Directives & Capability Markers](docs/DIRECTIVES.md)**: Specification for comment directives (`//gosree:...`), attachment rules, and `cap.*` marker types.
 - ⏳ **[Second-Class Borrows & Non-Lexical Lifetimes (NLL)](docs/BORROW_CHECKING_AND_NLL.md)**: How second-class borrows avoid Rust's explicit lifetime parameters (`'a`), storage constraints, and flow-sensitive SSA conflict resolution.
 - 🔀 **[Concurrency Model & Goroutine Boundaries](docs/CONCURRENCY_MODEL.md)**: Goroutine boundary invariants, spawner taxonomy, fork-join join points, HTTP handler self-races, and mutex locksets.
-- 🛠️ **[Tooling, Erasure & Verification Guide](docs/TOOLING_AND_ERASURE.md)**: User guide for `cmd/gosree` (`cmd/gocap`), `cmd/gocap-erase`, `cmd/gocap-corpus`, and the 4-tier acceptance test suite.
+- 🛠️ **[Tooling, Erasure & Verification Guide](docs/TOOLING_AND_ERASURE.md)**: User guide for `cmd/gosree`, `cmd/gosree-erase`, `cmd/gosree-corpus`, and the 4-tier acceptance test suite.
 - 🦀 **[Error Discipline (`safeerr`, `ERR001`–`ERR005`)](docs/ERROR_DISCIPLINE.md)**: The `passes/errcheck` pass, its binary wire format, the Rust solver hosted through Gusset, and the pure-Go reference oracle.
 - 🗺️ **[Roadmap & Abandon Criterion](docs/ROADMAP.md)**: Build order with each item's prediction and measured result, and the hatch-ratio criterion for abandoning the project.
 - 🧪 **[Adversarial Stress Suite & Findings](tests/stress/FINDINGS.md)**: Locked regression hits, runtime race/panic witnesses, scale bounds, and distance-to-Rust ledger.
@@ -209,12 +212,12 @@ Comprehensive guides, specifications, and reference manuals are located in [`doc
 | [**SAFE002**](docs/RULES.md#safe002-unowned-value-crossing-boundary) | `passes/ownership` | A value crossing to another goroutine is not owned: it may alias a parameter, a package variable, or a result the callee may still reference |
 | [**SAFE003**](docs/RULES.md#safe003-use-after-move) | `passes/ownership` | A value is used after it was moved; `SAFE003-forkjoin` category marks uses reached only after a channel receive, `select`, `WaitGroup.Wait` or `Lock` that is not a [join](docs/CONCURRENCY_MODEL.md#3-fork-join-synchronization-recovery) for that move |
 | [**SAFE004**](docs/RULES.md#safe004-moved-value-escapes-elsewhere) | `passes/ownership` | A moved value also escapes elsewhere (stored in a package variable, kept by a callee, returned) |
-| [**SAFE005**](docs/RULES.md#safe005-deep-immutability-violation) | `passes/ownership` | A `//gosree:imm` / `//safe:imm` type is malformed, or is written after its composite literal |
-| [**SAFE006**](docs/RULES.md#safe006-package-global-mutation) | `passes/ownership` | A package variable is written outside initialisation and is not `//safe:guarded_by`; reported once at the declaration, with each write as a related position |
-| [**SAFE007**](docs/RULES.md#safe007-malformed-directive) | `internal/annot` | A malformed `//gosree:`, `//sree:`, `//gocap:`, or `//safe:` directive |
+| [**SAFE005**](docs/RULES.md#safe005-deep-immutability-violation) | `passes/ownership` | A `//gosree:imm` type is malformed, or is written after its composite literal |
+| [**SAFE006**](docs/RULES.md#safe006-package-global-mutation) | `passes/ownership` | A package variable is written outside initialisation and is not `//gosree:guarded_by`; reported once at the declaration, with each write as a related position |
+| [**SAFE007**](docs/RULES.md#safe007-malformed-directive) | `internal/annot` | A malformed `//gosree:` directive, a comment that reads as one but is not (`// gosree:iso p`), a `//gosree:holds` function that unlocks its mutex, or an invalid `guarded_by` declaration |
 | [**SAFE008**](docs/RULES.md#safe008-self-racing-handler-writes) | `passes/ownership` | A handler (a callback that runs concurrently with itself) writes memory it shares with its other invocations: what it captured, or its receiver |
-| [**SAFE009**](docs/RULES.md#safe009-guarded-memory-access-violation) | `passes/ownership` | `//safe:guarded_by` memory is accessed without its mutex held, a `//safe:holds` function is called without it, or a value read from guarded memory leaves the lock |
-| [**BORROW001**](docs/RULES.md#borrow001-second-class-borrow-storage-violation) | `passes/borrow` | Second-class borrow stored in struct field or package global variable (transient stack structs excepted) |
+| [**SAFE009**](docs/RULES.md#safe009-guarded-memory-access-violation) | `passes/ownership` | `//gosree:guarded_by` memory is accessed without its mutex held, a `//gosree:holds` function is called without it, or a value read from guarded memory leaves the lock |
+| [**BORROW001**](docs/RULES.md#borrow001-second-class-borrow-storage-violation) | `passes/borrow` | Second-class borrow stored in a struct field or package global variable, or sent on a channel (transient stack structs excepted) |
 | [**BORROW002**](docs/RULES.md#borrow002-conflicting-borrows) | `passes/borrow` | Conflicting simultaneous mutable borrows or mutable-immutable aliasing (NLL flow-sensitive) |
 | [**BORROW003**](docs/RULES.md#borrow003-owner-mutation-during-active-borrow) | `passes/borrow` | Owner variable mutated or moved while an active second-class borrow exists |
 | [**BORROW004**](docs/RULES.md#borrow004-dangling-stack-reference-return) | `passes/borrow` | Function returns reference or pointer to local stack-allocated variable |
@@ -268,7 +271,7 @@ func SequentialBorrows() {
 
 ### Why only goroutine boundaries
 
-In a garbage-collected Go program, use-after-free and out-of-bounds access cannot happen unless memory is corrupted by a **data race**: a torn write to a two-word interface or slice header can pair a type with the wrong pointer. So GoSree checks ownership where a value crosses to another goroutine: a `go` statement (its arguments and the closure it starts), a callback handed to a function that runs it on another goroutine (`time.AfterFunc`, `context.AfterFunc`, `sync.WaitGroup.Go`, `errgroup.Group.Go`/`TryGo`, `net/http` handler registration, or any function whose `FuncFact.Spawns` summary marks a callback parameter as spawned), a channel send, and an argument for a `//gosree:iso` / `//safe:iso` parameter. A closure's captured variables cross only when the closure itself does. Inside one goroutine, ordinary Go aliasing is left alone (unless opted into second-class borrows).
+In a garbage-collected Go program, use-after-free and out-of-bounds access cannot happen unless memory is corrupted by a **data race**: a torn write to a two-word interface or slice header can pair a type with the wrong pointer. So GoSree checks ownership where a value crosses to another goroutine: a `go` statement (its arguments and the closure it starts), a callback handed to a function that runs it on another goroutine (`time.AfterFunc`, `context.AfterFunc`, `sync.WaitGroup.Go`, `errgroup.Group.Go`/`TryGo`, `net/http` handler registration, or any function whose `FuncFact.Spawns` summary marks a callback parameter as spawned), a channel send, and an argument for a `//gosree:iso` parameter. A closure's captured variables cross only when the closure itself does. Inside one goroutine, ordinary Go aliasing is left alone (unless opted into second-class borrows).
 
 The standard-library callback functions are a curated table in [`passes/ownership/spawn.go`](passes/ownership/spawn.go), an assumption about each callee like the type overrides. A function that runs its callback before returning (`sync.Once.Do`, `testing.T.Run` without `Parallel`, `slices.SortFunc`) is an ordinary call. An HTTP handler runs on every request's goroutine, concurrently with itself, so it never owns what it captured (moving a capture on is `SAFE002`), never hands anything back, and must not write memory it shares with its other invocations (`SAFE008`).
 
@@ -302,19 +305,19 @@ Two requests can run the same handler at once, and the code that registered it c
 - goroutines the handler starts, which the transfer rules check;
 - handler values it cannot resolve to a body.
 
-There is no exemption by type for a direct write: `s.count++` on an `int` races. An argument of a shareable type (a mutex, an atomic, an imm value) is exempt at a call, so `h.mu.Lock()` and `h.count.Add(1)` are never reported, and neither are the functions of `sync/atomic`: atomic accesses are synchronised, not writes. A write under a lock is reported unless the memory is `//safe:guarded_by`; then `SAFE009` checks it instead. A `//safe:unsafe` on the registration mutes every `SAFE008` of that handler and counts as a suppressed transfer. One on a write mutes that line only. One finding is reported per source line.
+There is no exemption by type for a direct write: `s.count++` on an `int` races. An argument of a shareable type (a mutex, an atomic, an imm value) is exempt at a call, so `h.mu.Lock()` and `h.count.Add(1)` are never reported, and neither are the functions of `sync/atomic`: atomic accesses are synchronised, not writes. A write under a lock is reported unless the memory is `//gosree:guarded_by`; then `SAFE009` checks it instead. A `//gosree:unsafe` on the registration mutes every `SAFE008` of that handler and counts as a suppressed transfer. One on a write mutes that line only. One finding is reported per source line.
 
 ---
 
 ### SAFE009: guarded memory
 
-A field, package variable or local variable annotated `//safe:guarded_by mu` may be read only while `mu` is held (`RLock` is enough for a `sync.RWMutex`), and written only while it is locked. A function marked `//safe:holds mu` may be called only with `mu` held, and must not unlock it (`SAFE007`). Nothing non-shareable read from guarded memory may leave the lock. That covers being returned, sent, stored outside memory the same mutex guards, handed to a goroutine or callback, or passed to a function whose summary says it may keep it.
+A field, package variable or local variable annotated `//gosree:guarded_by mu` may be read only while `mu` is held (`RLock` is enough for a `sync.RWMutex`), and written only while it is locked. A function marked `//gosree:holds mu` may be called only with `mu` held, and must not unlock it (`SAFE007`). Nothing non-shareable read from guarded memory may leave the lock. That covers being returned, sent, stored outside memory the same mutex guards, handed to a goroutine or callback, or passed to a function whose summary says it may keep it.
 
 "Held" is a forward must-analysis over each function's control-flow graph:
 - **Identity:** a mutex is identified by its path, a root SSA value plus field steps. A load is a step only from a variable assigned once before the load.
 - **Lock operations:** `Lock`/`RLock` add a path and `Unlock`/`RUnlock` remove it. A `TryLock`/`TryRLock` adds it on the branch where it succeeded (including across boolean negations, single-store local boolean variables `ok := mu.TryLock(); if ok`, and boolean constant comparisons). A deferred `Unlock` changes nothing until return.
 - **Calls:** a function of this package releases the parameter mutexes it unlocks, and acquires the parameter and captured mutexes it holds at every return after its deferred calls have run (both summarised via `FuncFact.Acquires`). A helper that locks for its caller, `func lock(mu *sync.Mutex) { mu.Lock() }`, leaves `mu` held after the call; one that locks on some paths only acquires nothing. Any call into another package, interface method or dynamic call releases every mutex in what it receives (unless re-established by `FuncFact.Acquires`), including through `fmt.Println(c)`'s variadic slice.
-- **Closures:** a closure called in place starts with its caller's locks. Any other function starts with none, plus its `//safe:holds`.
+- **Closures:** a closure called in place starts with its caller's locks. Any other function starts with none, plus its `//gosree:holds`.
 - **Locals:** a guarded local is a cell: its `Alloc` in the declaring function and, in each closure that captures it, the free variable bound to it. Its mutex is found the same way, so a goroutine that locks its captured `mu` holds the guard of its captured `x`. A closure that does not capture `mu` cannot hold it. A guarded local is not moved by the goroutines that capture it (no `SAFE003`), because `SAFE009` checks every access to it instead.
 
 Exempt: package variables during initialisation; a guarded local in its own function until a closure captures it or its address goes anywhere but a direct load or store; and an object this function allocated that nothing else can see yet (a constructor filling it in before it is returned, stored or moved).
@@ -323,7 +326,7 @@ Exempt: package variables during initialisation; a guarded local in its own func
 
 ## Annotations & Marker Types
 
-### Comment Directives (`//gosree:`, `//sree:`, `//gocap:`, `//safe:`)
+### Comment Directives (`//gosree:`)
 ```go
 //gosree:iso j          // on a func: j is owned; passing an argument to it moves the argument
 func forward(ch chan *Job, j *Job) { ch <- j }
@@ -341,16 +344,16 @@ func read(p *int) int { return *p }
 
 type Server struct {
 	mu   sync.Mutex
-	hits map[string]int //safe:guarded_by mu   // every access must hold mu
+	hits map[string]int //gosree:guarded_by mu   // every access must hold mu
 }
 
-//safe:holds mu         // on a func: its callers must hold mu (a receiver field or package variable)
+//gosree:holds mu         // on a func: its callers must hold mu (a receiver field or package variable)
 func (s *Server) evictLocked() { clear(s.hits) }
 ```
 
 ### Generic Marker Types (`cap`)
 ```go
-import "github.com/bharathvbcr/gocap/cap"
+import "github.com/bharathvbcr/gosree/cap"
 
 type Item struct{ Val int }
 
@@ -369,31 +372,31 @@ func main() {
 }
 ```
 
-`//safe:guarded_by mu` (or `//gosree:guarded_by mu`) goes on an unexported struct field (`mu` is a field of the same struct; an embedded mutex is named `Mutex`), on a package variable (`mu` is a package variable), or on a local variable declared with `var` or `:=` (`mu` is a variable in scope there: a local of this or an enclosing function, or a package variable). By default it guards every name the declaration introduces, or selective names when listed (`//safe:guarded_by mu x, y`); a `:=` that redeclares an existing name is rejected. The mutex is a `sync.Mutex` or `sync.RWMutex` held by value. Pointers to mutexes, `sync.Locker` values and exported fields or package variables are rejected as `SAFE007`. These are checked claims, like `imm` and `iso`, so they count toward neither the hatch ratio nor the override budget. `SAFE009` enforces them, and a write to a guarded package variable, or to a guarded field of one, is exempt from `SAFE006`.
+`//gosree:guarded_by mu` goes on an unexported struct field (`mu` is a field of the same struct; an embedded mutex is named `Mutex`), on a package variable (`mu` is a package variable), or on a local variable declared with `var` or `:=` (`mu` is a variable in scope there: a local of this or an enclosing function, or a package variable). By default it guards every name the declaration introduces, or selective names when listed (`//gosree:guarded_by mu x, y`); a `:=` that redeclares an existing name is rejected. The mutex is a `sync.Mutex` or `sync.RWMutex` held by value. Pointers to mutexes, `sync.Locker` values and exported fields or package variables are rejected as `SAFE007`. These are checked claims, like `imm` and `iso`, so they count toward neither the hatch ratio nor the override budget. `SAFE009` enforces them, and a write to a guarded package variable, or to a guarded field of one, is exempt from `SAFE006`.
 
 ```go
 var mu sync.Mutex
-x := 0 //safe:guarded_by mu
+x := 0 //gosree:guarded_by mu
 go func() { mu.Lock(); x++; mu.Unlock() }()
 mu.Lock(); x++; mu.Unlock()
 ```
 
-To share a struct between goroutines, make it `//safe:imm` and guard its mutable fields. An imm type's guarded fields may have any type, and `SAFE005` leaves them to `SAFE009`. Every other field still never changes after the composite literal, so a `*Server` holding a guarded map can be captured by every handler:
+To share a struct between goroutines, make it `//gosree:imm` and guard its mutable fields. An imm type's guarded fields may have any type, and `SAFE005` leaves them to `SAFE009`. Every other field still never changes after the composite literal, so a `*Server` holding a guarded map can be captured by every handler:
 
 ```go
-//safe:imm
+//gosree:imm
 type Server struct {
 	name string
 	mu   sync.Mutex
-	hits map[string]int //safe:guarded_by mu
+	hits map[string]int //gosree:guarded_by mu
 }
 ```
 
 Guarding a field of a type that is not imm does not make it shareable: moving it to another goroutine is still `SAFE002`/`003`.
 
-A `//safe:unsafe` (or `//gosree:unsafe`) on a transfer (a `go` statement, a send, a call to a `//safe:iso` parameter) covers everything that transfer causes: the `SAFE002` and `SAFE004` at the transfer, and the `SAFE003` uses after it, wherever they are. One placed on a later use covers only that use.
+A `//gosree:unsafe` on a transfer (a `go` statement, a send, a call to a `//gosree:iso` parameter) covers everything that transfer causes: the `SAFE002` and `SAFE004` at the transfer, and the `SAFE003` uses after it, wherever they are. One placed on a later use covers only that use.
 
-An owned value is one that starts as a fresh allocation (`&T{}`, `new`, `make`), a value received from a channel, a `//safe:iso` parameter, or the result of a function whose summary says it returns fresh memory. It stays owned while nothing outside its own object graph points into it.
+An owned value is one that starts as a fresh allocation (`&T{}`, `new`, `make`), a value received from a channel, a `//gosree:iso` parameter, or the result of a function whose summary says it returns fresh memory. It stays owned while nothing outside its own object graph points into it.
 
 Shareable without ownership: pointer-free values, strings, channels, verified imm types and pointers to them, and a curated override table (`sync` and `sync/atomic` types, `*testing.T`, `context.Context`, `context.CancelFunc`, `error`, `time.Time`, `*regexp.Regexp`, `*log.Logger`, `*slog.Logger`, `net.Listener`, ...). Each override is an **assumption, not a proof**; see [`internal/kinds/kinds.go`](internal/kinds/kinds.go). The `error` entry is the weakest one: it rests on the convention that errors are not mutated after creation.
 
@@ -407,8 +410,8 @@ A second table, [`internal/kinds/funcs.go`](internal/kinds/funcs.go), replaces t
 - **Summaries:** each function gets a summary saying which arguments it may retain or share, which it may write, which arguments and results it links, whether it returns fresh memory, which locks it acquires, and which callback parameters it spawns. Summaries are computed to a greatest fixpoint within a package and exported as analysis facts (`FuncFact`) for exported functions, so they cross package boundaries. That includes the standard library: `(*bytes.Buffer).WriteString` is shown not to retain its receiver. Functions without bodies, interface calls, dynamic calls and wrappers are treated as retaining and writing everything.
   - **Writes:** an argument is written when a write lies on its forward pointee chain: the memory it points to, and what that points to. Containers that point into it do not count, so `fmt.Println(p)`, which puts `p` in a variadic slice, does not write `p`. A write to guarded memory is left to `SAFE009`.
   - **Links:** a function that joins two arguments' memory (`root.Add(child)`) or returns memory of one (`root.First()`) links them instead of leaking them. The caller joins the same memory, at the pointer depth where the callee joined it, so two owned arguments stay owned as one region, and a foreign one makes the other foreign. A copy (`cp := *c; return &cp`) is linked one pointer down, so writing the copy is not writing `c`.
-- **Error-discipline lattice (`passes/errcheck` + `rust/gosree-errsolve` via Gusset):** `safeerr` lowers package SSA CFGs into a compact binary wire frame and solves a product of five monotone lattices (`Origin`, `NilVal`, `ErrVar`, `Writable`, `ErrLink`; see [docs/ERROR_DISCIPLINE.md](docs/ERROR_DISCIPLINE.md#23-what-the-solver-tracks)) + intra-package concrete-error callgraph fixpoint in Rust (`#![forbid(unsafe_code)]` inside `rust/gosree-errsolve`, linked into Go via `rust/gusset-engine` and `github.com/bharathvbcr/gusset` with panic-firewall isolation, `Counting<System>` Rust heap telemetry, and a bit-exact pure-Go reference oracle in `internal/gusseterr`). On 200-function cyclic packages (`BenchmarkSolvePackageAB`), the in-process Rust/Gusset solver runs in **1.140 ms** vs **2.867 ms** for the pure-Go oracle (**2.51× faster**, **266× less Go heap**: `18.8 KB` / `8 allocs` vs `4.99 MB` / `72,624 allocs`).
-- **Change from the design advice:** the original plan took standard-library escape information from the compiler (`go build -gcflags=-m`). The MVP uses the same summary facts for every package instead, which gives one mechanism and no parsing of compiler output. An escape oracle test in [`passes/ownership/escape_oracle_test.go`](passes/ownership/escape_oracle_test.go) checks summary alignment against `-gcflags=-m`.
+- **Error-discipline lattice (`passes/errcheck` + `rust/gosree-errsolve` via Gusset):** `safeerr` lowers package SSA CFGs into a compact binary wire frame and solves a product of five monotone lattices (`Origin`, `NilVal`, `ErrVar`, `Writable`, `ErrLink`; see [docs/ERROR_DISCIPLINE.md](docs/ERROR_DISCIPLINE.md#23-what-the-solver-tracks)) + intra-package concrete-error callgraph fixpoint in Rust (`#![forbid(unsafe_code)]` inside `rust/gosree-errsolve`, linked into Go via `rust/gusset-engine` and `github.com/bharathvbcr/gusset` with panic-firewall isolation, `Counting<System>` Rust heap telemetry, and a bit-exact pure-Go reference oracle in `internal/gusseterr`). `BenchmarkSolvePackageAB` ([recorded output](docs/benchmarks/solver-ab-2026-11-10.txt), 6 runs per case) measures both engines on generated packages. Allocation does not depend on machine load: on the 200-function package the Rust engine allocates 18,752 B in 8 allocations per solve on the Go heap, the oracle 4.99 MB in 72,625 (266× more bytes). Time was measured on a heavily shared machine (load average ~142), so it is indicative only: fastest of 6, 9.4 ms for Rust against 25.8 ms for the oracle (2.7×) on the 200-function package, but 5.0 ms against 3.1 ms on the 50-function package, where the oracle was faster.
+- **Escape information comes from summaries, not from the compiler.** Standard-library functions get the same summary facts as every other package, which gives one mechanism and no parsing of compiler output. An escape oracle test in [`passes/ownership/escape_oracle_test.go`](passes/ownership/escape_oracle_test.go) checks the summaries against `go build -gcflags=-m=2`.
 
 External dependencies are `golang.org/x/tools` and `github.com/bharathvbcr/gusset` (in-process Go↔Rust bridge).
 
@@ -447,7 +450,7 @@ A join needs all of these:
 
 - **The goroutine is started once.** `F` is a function literal whose closure value only that `go` statement uses, and the `go` statement is not inside a loop.
 - **The release follows the last use.** No instruction of `F` that touches the moved memory can run after any of `F`'s releases. Deferred calls count as running at exit: after every plain release, and after a deferred release when they were registered before it (defers run last-in, first-out). "Touches" uses `F`'s own alias graph, so a closure over the memory built before the release and called after it counts.
-- **Nothing else keeps it.** `F` does not move the memory on (no `go`, send or `//safe:iso` argument) and does not let it escape. Escape comes from the callee summaries, so this is only as precise as they are. A callback over the memory handed to `time.AfterFunc` is itself a move, and one handed to `runtime.SetFinalizer` is caught because its summary marks it as retained (a case covers `AfterFunc`; `TestRaceFin` in the corpus covers `SetFinalizer`).
+- **Nothing else keeps it.** `F` does not move the memory on (no `go`, send or `//gosree:iso` argument) and does not let it escape. Escape comes from the callee summaries, so this is only as precise as they are. A callback over the memory handed to `time.AfterFunc` is itself a move, and one handed to `runtime.SetFinalizer` is caught because its summary marks it as retained (a case covers `AfterFunc`; `TestRaceFin` in the corpus covers `SetFinalizer`).
 - **The sync object is local and fully visible.** It is one of:
   - **A channel the parent makes**, captured by `F`, whose only sends and closes anywhere are in `F` (a send, a `select` send case, `close`, `defer close`). Everything else may only receive from it or take `len`/`cap`. The join is a plain receive in the parent: `<-c`, `v, ok := <-c` or the exit of `for range c`. By the Go memory model, a send or close is synchronised before the receive that observes it, and `F` is the only sender.
   - **A `sync.WaitGroup` local to the parent**, used only through `Add`, `Done` and `Wait`. Every `Add` is in the parent, adds a positive constant, is not in a loop, and dominates every `go` statement whose goroutine calls `Done`. Each such goroutine is started once and calls `Done` at most once on any path. The `Add`s sum to the number of those goroutines. The join is `Wait` in the parent. Under those conditions `Wait` returns only after every `Done`, `F`'s included.
@@ -473,7 +476,7 @@ Two assumptions remain. The memory-model facts above are taken from the Go speci
 
 ## Measured on the Go race detector's corpus
 
-`go run ./cmd/gocap-corpus -out build` copies `$GOROOT/src/runtime/race/testdata` into `build/` (never committed), runs the analyzer unannotated, and writes `build/corpus-report.json`. It then scores a second copy carrying the `//safe:guarded_by` directives listed in [`annotations.go`](cmd/gocap-corpus/annotations.go) and writes `build/corpus-report-annotated.json` ([below](#the-annotated-copy)). A test function counts as flagged if the analyzer reports anything in it or in a same-package function it calls. A finding also counts where its related positions are, so a declaration-site `SAFE006` counts for the functions whose writes make the variable mutable.
+`go run ./cmd/gosree-corpus -out build` copies `$GOROOT/src/runtime/race/testdata` into `build/` (never committed), runs `safeannot`, `safeunsafe` and `safeownership` over it unannotated, and writes `build/corpus-report.json`. It then scores a second copy carrying the `//gosree:guarded_by` directives listed in [`annotations.go`](cmd/gosree-corpus/annotations.go) and writes `build/corpus-report-annotated.json` ([below](#the-annotated-copy)). A test function counts as flagged if the analyzer reports anything in it or in a same-package function it calls. A finding also counts where its related positions are, so a declaration-site `SAFE006` counts for the functions whose writes make the variable mutable.
 
 go1.27.3, 22 of 24 files. Skipped: `cgo_test.go` imports `internal/testenv` and `synctest_test.go` imports `internal/synctest`; neither can build outside GOROOT.
 
@@ -490,7 +493,7 @@ The writes bit, the function overrides and argument linking left the counts wher
 
 All five race tests were already flagged by `SAFE003`.
 
-Moving `SAFE006` to the declaration would have dropped five races caught only by it (`TestRaceIssue12664`…`_4`, `TestRaceIntRWGlobalFuncs`): the finding left the test functions. Scoring related positions keeps them. Two race-free tests became flagged because they write a package variable outside init: `TestNoRaceFinGlobal` (its mutex-guarded counter needs `//safe:guarded_by Mutex`) and `TestNoRaceRpcChan` (a counter reset on one goroutine).
+Moving `SAFE006` to the declaration would have dropped five races caught only by it (`TestRaceIssue12664`…`_4`, `TestRaceIntRWGlobalFuncs`): the finding left the test functions. Scoring related positions keeps them. Two race-free tests became flagged because they write a package variable outside init: `TestNoRaceFinGlobal` (its mutex-guarded counter needs `//gosree:guarded_by Mutex`) and `TestNoRaceRpcChan` (a counter reset on one goroutine).
 
 The callbacks run moved exactly the three predicted tests. `TestRaceAfterFunc3` is now flagged: two `time.AfterFunc` callbacks capture one variable. Two `TestNoRace*` tests became flagged. `TestNoRaceAfterFuncReset` writes after `Timer.Stop`, which that run did not model: in general `Stop` returning false means the callback already started. `TestNoRaceAfterFunc1` is a closure stored in a variable that respawns itself, so it does not own its own captured variable (`SAFE002`). It is not a goroutine body by the rule above, since its closure value reaches the spawn through a variable. `TestNoRaceAfterFunc` stayed clean: its callback hands the memory back through a channel it alone sends on, which is the [fork-join](#fork-join) rule applied to a callback.
 
@@ -516,7 +519,7 @@ Read these numbers with care:
 
 ### The annotated copy
 
-The unannotated numbers measure GoSree with no claims, and lock discipline is a claim the programmer makes. The annotated copy adds the comment a programmer would write who believes each test's locking protects a variable. That is 11 `//safe:guarded_by` directives: comments only, no code changes. Every corpus test whose sharing is a lock discipline is annotated, together with the race tests of the same shape, so the run also shows whether an annotation hides a race. Each directive anchors on one exact line inside one function or declaration, and the run fails if any anchor does not match.
+The unannotated numbers measure GoSree with no claims, and lock discipline is a claim the programmer makes. The annotated copy adds the comment a programmer would write who believes each test's locking protects a variable. That is 11 `//gosree:guarded_by` directives: comments only, no code changes. Every corpus test whose sharing is a lock discipline is annotated, together with the race tests of the same shape, so the run also shows whether an annotation hides a race. Each directive anchors on one exact line inside one function or declaration, and the run fails if any anchor does not match.
 
 | | With lock-acquire summaries | Predicted before that run | Annotated (11 directives) | Predicted before that run | Unannotated, same run |
 |---|---|---|---|---|---|
@@ -537,7 +540,7 @@ Per annotated test, the categories without the directives and with them, as pred
 | `TestRaceMutex`, `TestRaceMutex2`, `TestRaceMutexRWMutex`, `TestRaceAsFunc3` | SAFE003 or SAFE003-forkjoin | SAFE009 | SAFE009 |
 | `TestRaceRWMutexMultipleReaders` | SAFE003, SAFE003-forkjoin | SAFE009 | SAFE009 |
 
-- **No race was hidden.** Every annotated race test is still flagged, now by `SAFE009`, not by a move. The scorer records categories only, so the lines were checked separately (`go vet -vettool` on `build/racecorpus-annotated`). Each `SAFE009` sits on an unlocked or wrongly locked access.
+- **No race was hidden.** Every annotated race test is still flagged, now by `SAFE009`, not by a move. The scorer records categories only, so the lines were checked separately (`gosree ./...` with `GOFLAGS=-race`, run inside `build/racecorpus-annotated`). Each `SAFE009` sits on an unlocked or wrongly locked access.
 - **Locks taken in a callee.** `TestNoRaceFuncUnlock` and `TestNoRaceAsFunc4` take the lock inside a function they call and release it in the caller. Before lock-acquire summaries they stayed flagged by `SAFE009`; with them both are clean. `TestRaceAsFunc3` is still flagged: its argument is read before the call that locks.
 - **`TestNoRaceRWMutex` is not annotated.** It declares `var x, y int64 = 0, 1` and writes `y` under `RLock`. A directive on that line without a variable filter guards both names.
 - **`TestNoRaceCond` is not annotated.** Its `x` is handed over through a `sync.Cond` signal, not accessed under the mutex.
@@ -547,24 +550,24 @@ Per annotated test, the categories without the directives and with them, as pred
 ## Measuring the escape hatch on a module
 
 ```bash
-go run ./cmd/gocap-corpus -module ~/src/service [-tests] [packages]
+go run ./cmd/gosree-corpus -module ~/src/service [-tests] [packages]
 ```
 
-This analyses any module (patterns default to `./...`) and prints, per package and in total, the transfers GoSree checked, how many needed `//safe:unsafe` (a transfer counts once, and only if the directive actually muted a finding), the findings muted by any rule, and the findings that remain. The JSON goes to `build/module-report.json`. With `-tests`, each package is counted once through its test variant, so no file is counted twice. It reads `ownership.Stats`, which the analyzer returns for every package, so a driver never parses diagnostic text.
+This analyses any module (patterns default to `./...`) and prints, per package and in total, the transfers GoSree checked, how many needed `//gosree:unsafe` (a transfer counts once, and only if the directive actually muted a finding), the findings the ownership pass muted, and the findings that remain. The JSON goes to `build/module-report.json`. With `-tests`, each package is counted once through its test variant, so no file is counted twice. It reads `ownership.Stats`, which the analyzer returns for every package, and the stale analyzer's result, so a driver never parses diagnostic text.
 
 The hatch ratio, suppressed transfers over transfers, is the measurand of the [abandon criterion](docs/ROADMAP.md). Callbacks count as transfers, so a `net/http` service's handlers are in the denominator. Goroutines started by a library function missing from the spawner table are not. Beside the ratio the report counts:
 - flagged transfers (any finding, muted or not) and clean ones;
-- `//safe:unsafe` directives that muted nothing (`unsafe_stale`);
+- `//gosree:unsafe` directives that muted nothing (`unsafe_stale`), taken from `safestale` after every pass that mutes (borrow and errcheck run as its dependencies);
 - the checked claims: `guarded_by`, `holds`, valid imm types and iso parameters.
 
 A reference service is measured on an archived commit, not on a checkout:
 
 ```bash
-go run ./cmd/gocap-corpus -git ~/src/repo -rev <sha> -subdir backend/svc \
-    -annotate cmd/gocap-corpus/refservice/<table>.tsv -list -out build/ref/<run> [-tests]
+go run ./cmd/gosree-corpus -git ~/src/repo -rev <sha> -subdir backend/svc \
+    -annotate cmd/gosree-corpus/refservice/<table>.tsv -list -out build/ref/<run> [-tests]
 ```
 
-`-git` extracts the subdirectory at that commit with `git archive`, reading only the repository's object store, and records the full SHA. `-annotate` adds the `//safe` directives of a ledger table (one row per directive, with the finding it answers and its verdict) to the archived copy. A row that does not anchor, a directive that does not parse, or a count of parsed directives that differs from the table stops the run. `-list` writes every finding to `module-findings.json`, each with the transfer that caused it: `SAFE003` and `SAFE008` findings carry the transfer as a related position.
+`-git` extracts the subdirectory at that commit with `git archive`, reading only the repository's object store, and records the full SHA. `-annotate` adds the `//gosree:` directives of a ledger table (one row per directive, with the finding it answers and its verdict) to the archived copy. A row that does not anchor, a directive that does not parse, or a count of parsed directives that differs from the table stops the run. `-list` writes every finding to `module-findings.json`, each with the transfer that caused it: `SAFE003` and `SAFE008` findings carry the transfer as a related position.
 
 ---
 
@@ -572,7 +575,7 @@ go run ./cmd/gocap-corpus -git ~/src/repo -rev <sha> -subdir backend/svc \
 
 - **Fork-join covers channel, `sync.WaitGroup`, `errgroup.Group`, and `Timer.Stop`/`context.AfterFunc` stop-branch joins.** Shapes outside these recognised join patterns keep what they were given for good.
 - **Publication without spawning is not yet modelled as a transfer.** Sharing mutable memory by storing a pointer into `atomic.Pointer[T]`, `sync.Map`, or `sync.Pool` without a goroutine spawn or channel send is not yet checked; see [`tests/stress/FINDINGS.md`](tests/stress/FINDINGS.md).
-- **Lock discipline is declared, not inferred.** `SAFE009` checks memory annotated `//safe:guarded_by` (either guarding all names on a declaration, or selective names via `//safe:guarded_by mu x, y`). A struct with guarded fields crosses goroutines only if it is also `//safe:imm`.
+- **Lock discipline is declared, not inferred.** `SAFE009` checks memory annotated `//gosree:guarded_by` (either guarding all names on a declaration, or selective names via `//gosree:guarded_by mu x, y`). A struct with guarded fields crosses goroutines only if it is also `//gosree:imm`.
 - **SAFE009 tracks lock acquisitions across packages and in-place closures.** Callee lock-acquisition summaries are exported via `FuncFact.Acquires`, and in-place closures inherit locks held by enclosing scopes even without capturing the mutex directly.
 - **Callback goroutine boundaries combine listed standard-library spawners and summary-inferred spawners.** Functions that spawn or transfer a callback parameter (`FuncFact.Spawns`) are treated as goroutine boundaries alongside `spawn.go` entries. External functions whose source is unavailable without `FuncFact` summaries fall back to `spawn.go`.
 - **SAFE008 reports interface and dynamic calls on shared handler state.** Passing shared non-shareable memory to an interface method (`h.store.Put(...)`) or dynamic function value inside a concurrent handler is reported as `SAFE008`. Static calls into other packages are checked through the callee's `writes` summary bit.
@@ -581,8 +584,8 @@ go run ./cmd/gocap-corpus -git ~/src/repo -rev <sha> -subdir backend/svc \
 - **SAFE009 treats unknown cross-package calls as a possible unlock** of mutexes they receive unless the callee's `FuncFact.Acquires` summary re-establishes the lock. Its "leaves the lock" check uses callee summaries, so passing guarded memory to a function that retains it (`fmt` included) is a finding.
 - **`Timer.Stop` and `context.AfterFunc`'s stop function restore ownership only on the `true` branch.** Ignoring the boolean return value of `Stop()` does not restore ownership, since `false` means the callback may already be running.
 - **SAFE006 checks direct writes and helper/method mutations of package variables.** Stores, map updates, `copy`/`delete`/`clear`, and passing a package variable (or its address) to a mutating function, method, or interface call outside `init` are reported.
-- **Imm types require deep transitively immutable or guarded fields.** Struct types marked `//safe:imm` (or wrapped in `cap.Imm[T]`) must have unexported fields that are transitively shareable, `//safe:imm`, or `//safe:guarded_by`, and cannot be mutated through method calls on value fields.
-- **Trailing directives on the closing line of a multi-line statement attach to that statement.** A `//safe:unsafe`, `//gosree:unsafe`, or `//gocap:unsafe` on the closing `}` or `)` line of a multi-line call, assignment, or `go func() { ... }()` statement attaches to the statement ending on that line.
+- **Imm types require deep transitively immutable or guarded fields.** Struct types marked `//gosree:imm` (or wrapped in `cap.Imm[T]`) must have unexported fields that are transitively shareable, `//gosree:imm`, or `//gosree:guarded_by`, and cannot be mutated through method calls on value fields.
+- **Trailing directives on the closing line of a multi-line statement attach to that statement.** A `//gosree:unsafe` on the closing `}` or `)` line of a multi-line call, assignment, or `go func() { ... }()` statement attaches to the statement ending on that line.
 - **Range-over-func iterators preserve ownership for both static and dynamic iterator values.** Loop body closures passed to a `for ... range iter` call propagate only the loop body's own leaks and writes without treating the `yield` closure as escaping into `iter`.
 
 ---
@@ -603,24 +606,24 @@ bash tests/run_acceptance_tests.sh --tier 4
 
 ### 2. Unit & Analysis Pass Tests
 ```bash
-go test ./...
+go test -timeout 30m ./...
 ```
 
-The full run takes several minutes. On the current working tree every package passes except one pre-existing failure: `passes/ownership` `TestEscapeOracleNoFreshOrWritesOracle` (`--- FAIL`). The suite is not all green.
+The full run takes several minutes: `tests/stress` takes about 4 to 6 minutes alone, and `passes/ownership` is slow too (`TestEscapeOracleNoFreshOrWritesOracle` took about 105 s on a loaded machine). go test's default timeout is 10 minutes and a busy machine can exceed it, so pass `-timeout 30m`.
 
 ### 3. Adversarial Stress & Runtime Witness Suite
 ```bash
-go test ./tests/stress                      # markers, determinism, runtime witnesses, scale, vet parity
-go test ./tests/stress -short               # markers only
+go test -timeout 30m ./tests/stress         # markers, determinism, runtime witnesses, scale, vet parity
+go test ./tests/stress -short               # markers and harness self-tests only
 go test ./tests/stress -run TestStress -v   # print the per-rule HIT / MISS / FP ledger
 ```
 
 Each rule has `analysistest` cases with `// want` expectations, so a disabled rule fails its test:
-- [`cmd/gosree/`](cmd/gosree/main.go) & [`cmd/gocap/`](cmd/gocap/main.go): Multichecker CLI drivers for standalone and `go vet -vettool` execution; `cmd/gocap` adds the exit-code and flag preflight ([`preflight.go`](cmd/gocap/preflight.go), tested in `cmd/gocap/main_test.go`).
+- [`cmd/gosree/`](cmd/gosree/main.go): the multichecker driver for standalone and `go vet -vettool` execution, with the exit-code and flag preflight ([`preflight.go`](cmd/gosree/preflight.go), tested in `cmd/gosree/preflight_test.go` and `cmd/gosree/main_test.go`).
 - [`passes/errcheck/`](passes/errcheck/errcheck.go) & [`internal/gusseterr/`](internal/gusseterr/wire.go): Error-discipline pass (`safeerr`), the wire frame, the cgo engine, and the pure-Go oracle (`parity_test.go` checks them against each other when the native engine is active; `bench_test.go`).
 - [`tests/e2e/`](tests/e2e/): Dual-track 4-tier E2E acceptance suite: 12 top-level Go tests over 12 `analysistest` packages (64 lines carrying `// want`). Tier 1 is organised by acceptance criteria AC1–AC7 (see the comments in `tier1_feature_test.go`); no total case count is asserted here.
 - [`tests/stress/`](tests/stress/README.md): Adversarial fixtures (`HIT`, `MISS`, `FP`, `WITNESS: race`, `WITNESS: panic`), scaling bounds, and standalone vs. `go vet -vettool` parity checks.
 - [`passes/borrow/`](passes/borrow/borrow.go): Second-class borrow storage checks (`storage.go`), SSA NLL conflict detection, owner invalidation, and dangling returns (`check.go`).
 - [`passes/ownership/`](passes/ownership/ownership.go): Reference capabilities (`imm.go`, `check.go`), alias graph unification (`graph.go`), mutex locksets (`lockset.go`), HTTP handler writes (`handlerwrite.go`), and fork-join recovery (`forkjoin.go`).
-- [`cmd/gocap-erase/`](cmd/gocap-erase/main.go): AST rewriting verification ensuring machine-instruction parity against unannotated Go.
-- [`cmd/gocap-corpus/`](cmd/gocap-corpus/main.go): Race detector test corpus validation and reference microservice triage tracking.
+- [`cmd/gosree-erase/`](cmd/gosree-erase/main.go): AST rewriting verification ensuring machine-instruction parity against unannotated Go.
+- [`cmd/gosree-corpus/`](cmd/gosree-corpus/main.go): Race detector test corpus validation and reference microservice triage tracking.
