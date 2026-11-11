@@ -30,6 +30,9 @@ func TestParseCommandLine(t *testing.T) {
 		{name: "flags after the pattern are packages", args: []string{"./...", "-fix"}, want: []string{"./...", "-fix"}},
 		{name: "version", args: []string{"-V=full"}, want: []string{"-V=full"}},
 		{name: "flags", args: []string{"-flags"}, want: []string{"-flags"}},
+		{name: "help", args: []string{"-h"}, want: []string{"-h"}},
+		{name: "help false is dropped", args: []string{"-h=false", "-json", "./..."}, want: []string{"-json", "./..."}, json: true},
+		{name: "long help false is dropped", args: []string{"--help=0", "./..."}, want: []string{"./..."}},
 		{name: "flags false keeps checking", args: []string{"-flags=false", "-json", "-tags=a", "./..."}, want: []string{"-flags=false", "-json", "./..."}, goflags: " -tags=a", json: true},
 	} {
 		p, err := parseCommandLine(c.args, testAnalyzers)
@@ -56,7 +59,7 @@ func TestParseCommandLineRefusals(t *testing.T) {
 	for _, args := range [][]string{
 		{"-fix", "./..."}, {"--fix", "./..."}, {"-fix=true", "./..."}, {"-diff", "./..."}, {"-fix", "-diff", "./..."},
 		{"-tags", "a b", "./..."},
-		{"-flags=false", "-fix", "./..."}, {"--flags=0", "-diff", "./..."},
+		{"-flags=false", "-fix", "./..."}, {"--flags=0", "-diff", "./..."}, {"-help=false", "-fix", "./..."},
 	} {
 		if _, err := parseCommandLine(args, testAnalyzers); err == nil {
 			t.Errorf("%q was accepted", args)

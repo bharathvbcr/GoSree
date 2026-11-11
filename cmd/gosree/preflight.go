@@ -73,8 +73,15 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 			return err != nil || b // an unparsable value is the driver's error to report
 		}
 		switch {
-		case name == "V" || name == "help" || name == "h":
-			return plan{args: args}, nil // the driver answers these without analysing anything
+		case name == "V":
+			return plan{args: args}, nil // the driver answers this without analysing anything
+		case name == "help" || name == "h":
+			if truthy() {
+				return plan{args: args}, nil
+			}
+			// The driver does not define -help or -h: the flag package prints usage and exits 0 for
+			// any value, so -h=false would pass code it never analysed. Drop it and keep checking.
+			continue
 		case name == "flags":
 			// -flags prints the flag set and exits only when true; -flags=false is a no-op to the
 			// driver, so the rest of the command line still needs checking.
