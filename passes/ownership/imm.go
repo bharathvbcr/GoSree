@@ -217,45 +217,77 @@ type immRet struct {
 	param   int
 }
 
-// immReturns traces each single-result return of callee once per pass and caches the result. While
-// a callee's returns are being traced it has no cached returns, so a recursive call contributes
-// nothing and every function is traced at most once. Tracing each return afresh at every call site,
-// with a copy of the caller's seen set, explored every ordering of a recursive function's returns:
-// exponential in the number of recursive return sites.
+// immReturns says what each single-result return of callee traces to, computing it once per pass
+// where it can. Tracing each return afresh at every call site, with a copy of the caller's seen
+// set, explored every ordering of a recursive function's returns: exponential in the number of
+// recursive return sites.
 //
-// A result that depended on another function still being traced (a deeper member of a recursion
-// cycle) is incomplete: it is kept only until the outermost trace returns, so a later trace that
-// starts at that function computes it whole. Caching it for the whole pass made the reported
-// findings depend on which store was checked first.
+// Recursion is solved as a fixpoint. A call to a function whose returns are still being traced
+// reads its partial result (empty at first). A trace that read its own partial result is repeated
+// from its latest result until that result stops changing (at most immMaxRounds rounds), so a
+// self-recursive function that passes an imm address down through a parameter is still followed.
+// A trace that read the partial result of a function further out (a member of a larger cycle) is
+// provisional: it is kept, with the round it was made in, only until the outermost trace returns,
+// and a trace that starts at that function later computes it whole. Caching provisional results
+// for the pass made the reported findings depend on which store was checked first.
 func (st *state) immReturns(callee *ssa.Function) []immRet {
 	if rs, ok := st.immRets[callee]; ok {
 		return rs
 	}
 	if i, busy := st.immBusy[callee]; busy {
+		st.immStack[i].read = true
 		for j := i + 1; j < len(st.immStack); j++ {
-			st.immStack[j].incomplete = true // they read callee before its returns were known
+			st.immStack[j].provisional = true // they read callee before its returns were known
 		}
-		return nil
+		return st.immStack[i].partial
 	}
-	if rs, ok := st.immScratch[callee]; ok {
+	prev, seen := st.immScratch[callee]
+	if seen && prev.round == st.immRound {
 		for j := range st.immStack {
-			st.immStack[j].incomplete = true // an incomplete result makes its readers incomplete
+			st.immStack[j].provisional = true // a provisional result makes its readers provisional
 		}
-		return rs
+		return prev.rets
 	}
 	if st.immRets == nil {
 		st.immRets = map[*ssa.Function][]immRet{}
-		st.immScratch = map[*ssa.Function][]immRet{}
+		st.immScratch = map[*ssa.Function]immScratchEntry{}
 		st.immBusy = map[*ssa.Function]int{}
 	}
-	st.immBusy[callee] = len(st.immStack)
-	st.immStack = append(st.immStack, immFrame{fn: callee})
+	top := len(st.immStack)
+	st.immBusy[callee] = top
+	st.immStack = append(st.immStack, immFrame{partial: prev.rets})
 	defer func() {
 		delete(st.immBusy, callee)
 		if len(st.immStack) == 0 {
 			clear(st.immScratch)
 		}
 	}()
+	var rs []immRet
+	for round := 1; ; round++ {
+		st.immStack[top].read, st.immStack[top].provisional = false, false
+		rs = st.traceReturns(callee)
+		f := st.immStack[top]
+		if !f.read || f.provisional || immRetsEqual(rs, f.partial) || round == immMaxRounds {
+			break
+		}
+		st.immStack[top].partial = rs
+		st.immRound++ // results computed from the old partial result are stale
+	}
+	provisional := st.immStack[top].provisional
+	st.immStack = st.immStack[:top]
+	if provisional {
+		st.immScratch[callee] = immScratchEntry{rets: rs, round: st.immRound}
+	} else {
+		st.immRets[callee] = rs
+	}
+	return rs
+}
+
+// immMaxRounds bounds the fixpoint for one recursive function. A result that has not settled by
+// then is used as it stands, which can only miss findings, not loop.
+const immMaxRounds = 8
+
+func (st *state) traceReturns(callee *ssa.Function) []immRet {
 	var rs []immRet
 	for _, b := range callee.Blocks {
 		for _, ins := range b.Instrs {
@@ -271,21 +303,29 @@ func (st *state) immReturns(callee *ssa.Function) []immRet {
 			rs = append(rs, r)
 		}
 	}
-	frame := st.immStack[len(st.immStack)-1]
-	st.immStack = st.immStack[:len(st.immStack)-1]
-	if frame.incomplete {
-		st.immScratch[callee] = rs
-	} else {
-		st.immRets[callee] = rs
-	}
 	return rs
 }
 
-// immFrame is one immReturns trace in progress; incomplete is set when it read the returns of a
-// function that was itself still being traced.
+func immRetsEqual(a, b []immRet) bool {
+	return slices.EqualFunc(a, b, func(x, y immRet) bool {
+		sameType := x.immType == y.immType || (x.immType != nil && y.immType != nil && types.Identical(x.immType, y.immType))
+		return sameType && x.root == y.root && x.isParam == y.isParam && x.param == y.param
+	})
+}
+
+// immFrame is one immReturns trace in progress. partial is its latest result, read by recursive
+// calls; read says a recursive call read it this round; provisional says the trace read the
+// partial result of a function further out, so its own result is not final.
 type immFrame struct {
-	fn         *ssa.Function
-	incomplete bool
+	partial     []immRet
+	read        bool
+	provisional bool
+}
+
+// immScratchEntry is a provisional result and the round it was computed in.
+type immScratchEntry struct {
+	rets  []immRet
+	round int
 }
 
 func (st *state) traceImmAddr(v ssa.Value, seen map[ssa.Value]bool) (types.Type, ssa.Value, token.Pos) {

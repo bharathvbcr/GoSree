@@ -130,10 +130,11 @@ type state struct {
 	globalWrites   map[*ssa.Global][]token.Pos
 	mutatedGlobals map[*ssa.Global]bool
 	// immRets caches what each callee's single-result returns trace to (see immReturns); only
-	// results that did not depend on a function still being traced are kept here. immScratch holds
-	// the others until the outermost trace returns; immStack and immBusy are the traces in progress.
+	// final results are kept here. immScratch holds provisional ones until the outermost trace
+	// returns, tagged with immRound; immStack and immBusy are the traces in progress.
 	immRets    map[*ssa.Function][]immRet
-	immScratch map[*ssa.Function][]immRet
+	immScratch map[*ssa.Function]immScratchEntry
+	immRound   int
 	immStack   []immFrame
 	immBusy    map[*ssa.Function]int
 }
