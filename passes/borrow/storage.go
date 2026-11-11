@@ -222,9 +222,18 @@ func (sc *storageChecker) checkGlobalDeclarations() {
 // canHoldBorrow returns true if a type can be or can hold a second-class borrow.
 // Scalar primitives (int, bool, float, string) return false.
 func canHoldBorrow(t types.Type) bool {
+	return canHoldBorrowSeen(t, map[types.Type]bool{})
+}
+
+func canHoldBorrowSeen(t types.Type, seen map[types.Type]bool) bool {
 	if t == nil {
 		return false
 	}
+	t = types.Unalias(t)
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
 	switch u := t.Underlying().(type) {
 	case *types.Basic:
 		return false
@@ -234,19 +243,19 @@ func canHoldBorrow(t types.Type) bool {
 		return true
 	case *types.Struct:
 		for i := 0; i < u.NumFields(); i++ {
-			if canHoldBorrow(u.Field(i).Type()) {
+			if canHoldBorrowSeen(u.Field(i).Type(), seen) {
 				return true
 			}
 		}
 		return false
 	case *types.Array:
-		return canHoldBorrow(u.Elem())
+		return canHoldBorrowSeen(u.Elem(), seen)
 	case *types.Slice:
-		return canHoldBorrow(u.Elem())
+		return canHoldBorrowSeen(u.Elem(), seen)
 	case *types.Map:
-		return canHoldBorrow(u.Key()) || canHoldBorrow(u.Elem())
+		return canHoldBorrowSeen(u.Key(), seen) || canHoldBorrowSeen(u.Elem(), seen)
 	case *types.Chan:
-		return canHoldBorrow(u.Elem())
+		return canHoldBorrowSeen(u.Elem(), seen)
 	case *types.Signature:
 		return true
 	}
