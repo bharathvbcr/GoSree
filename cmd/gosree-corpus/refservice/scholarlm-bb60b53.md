@@ -536,8 +536,31 @@ a production run (no `-tests`) on a `git archive` of `bb60b53` with this ledger,
   is the tool. `fc0a3d0`, the other commit the merge brought in, changes only documentation.
 - The lower ratio is not progress. 41 more transfers are flagged and none of them has a ledger row,
   so their findings stay unmuted. If each takes a hatch, as every flagged transfer in B4 did, the
-  ratio is 386 / 516 = 74.8%. SAFE006 rose from 23 to 117 with the same 66 `guarded_by` rows; which
-  variables the new findings are on has not been examined. Neither change has been triaged.
+  ratio is 386 / 516 = 74.8%. SAFE006 rose from 23 to 117 with the same 66 `guarded_by` rows.
+  Neither change has been triaged.
+- A first look, from the item-4 session's compare of B9's remaining findings with `7cb05dd`'s
+  (production). The output files were lost with the worktree, so only these counts and the sites read
+  survive:
+  - **Counts.** 201 findings added, 2 removed. The added: SAFE006 96 (over 73 files), SAFE003 43,
+    SAFE002 36, SAFE004 20, SAFE001 3, SAFE008 3.
+  - **SAFE006: 4 of the 96 read.** Each reported write is a call:
+    - `logFieldNormalizer.Replace` (`correlation.go:97`). A `strings.Replacer` builds itself once,
+      under a `sync.Once`.
+    - `processRuntimeStats.reset` (`runtime_stats.go:229`), in a `*ForTests` function.
+    - `ts.Token()` (`svcauth/oidc.go:171`), an interface call on what `shared` holds.
+    - `slog.Log(..., d.attrs...)` (`startup_diagnostics.go:100`), on an element of the slice swapped
+      out of the guarded `startupDiagnostics`.
+
+    So SAFE006 now appears to count writes through calls, as SAFE008 does with the writes bit. That
+    brings in the writes bit's known over-counts: methods that synchronise internally, interface
+    calls, and aliases. This is inferred from 4 sites, not checked across the 96.
+  - **SAFE002 and SAFE003.** The new ones name goroutines started by in-module functions:
+    `holdRunLease`, `mapChunks`, and a `Run` method, the last capturing `newRepo` (10 SAFE002, 6
+    SAFE003) and `seed`. `ffc95cf` added inferred spawn parameters (`FuncFact.Spawns`), which
+    matches the 43 new transfers, but no transfer was traced to its inference.
+  - **Which commit.** A corpus build of `fc0a3d0`, without item 4, gave the same 519 / 346 / 66.7%.
+    So the shift comes with `ffc95cf`, not with item 4's commits. Item 4's commits change only 12
+    muted findings and SAFE003/SAFE004 (44/17 to 43/20).
 - Both figures are far above the 20% threshold, so the recorded failure at `bb60b53` stands.
 - On `f9b5915`, `unsafe_stale` comes from `safestale`, which runs the borrow and errcheck passes as
   dependencies: 0 of 333 directives mute nothing. On the commit before it, that run died with a stack
