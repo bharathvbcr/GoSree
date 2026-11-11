@@ -669,6 +669,17 @@ func stripDirectives(src []byte) []byte {
 						end = start + 2 + k + 2
 					}
 				}
+				if strings.HasPrefix(c.Text, "//") {
+					// Likewise a line comment holding a lone \r: it runs to the newline, less the \r of
+					// a CRLF terminator.
+					end = len(src)
+					if k := bytes.IndexByte(src[start:], '\n'); k >= 0 {
+						end = start + k
+					}
+					if end > start && src[end-1] == '\r' {
+						end--
+					}
+				}
 
 				isBlock := strings.HasPrefix(strings.TrimSpace(c.Text), "/*")
 				lineStart := start
