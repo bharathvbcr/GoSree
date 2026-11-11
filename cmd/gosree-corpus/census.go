@@ -679,15 +679,16 @@ func (c *census) reach(t types.Type) []*types.Named {
 
 // byValueContainer reports whether t is an array, at any depth, of module structs or pointers to
 // them: a type whose only content is children the closure walk reaches.
-func byValueContainer(t types.Type) bool {
+func (c *census) byValueContainer(t types.Type) bool {
 	a, ok := types.Unalias(t).Underlying().(*types.Array)
 	if !ok {
 		return false
 	}
-	if inner := types.Unalias(a.Elem()); byValueContainer(inner) {
+	if inner := types.Unalias(a.Elem()); c.byValueContainer(inner) {
 		return true
 	}
-	return namedStruct(a.Elem()) != nil
+	n := namedStruct(a.Elem())
+	return n != nil && c.inModule(n.Obj().Pkg())
 }
 
 func structOf(n *types.Named) *types.Struct { return n.Underlying().(*types.Struct) }
@@ -859,9 +860,15 @@ func (c *census) own(n *types.Named) ownResult {
 		case c.cls.Shareable(ft):
 		case isSlot(ft):
 			for _, st := range c.ifaceStores[n][f.Name()] {
-				if kids := c.reach(st); len(kids) > 0 {
-					children = append(children, kids...)
-				} else if impls := c.implementers(st); impls != nil {
+				if child := namedStruct(st); child != nil && c.inModule(child.Obj().Pkg()) {
+					// A module struct, or a pointer to one, is a pure child.
+					children = append(children, child)
+					continue
+				}
+				// Anything else keeps its own classification; the module structs it contains
+				// (map[string]*B, an external generic over B) are children beside it.
+				children = append(children, c.reach(st)...)
+				if impls := c.implementers(st); impls != nil {
 					// A module interface stored as it came: its dynamic type is one of the module's
 					// implementations, or a type from outside the census cannot see.
 					children = append(children, impls...)
@@ -874,7 +881,7 @@ func (c *census) own(n *types.Named) ownResult {
 				continue
 			}
 			switch {
-			case byValueContainer(ft):
+			case c.byValueContainer(ft):
 				// An array of module structs (or of pointers to them) holds no slot of its own: its
 				// elements are the children above, as a lone struct or pointer field would be.
 			case isCollection(ft):
