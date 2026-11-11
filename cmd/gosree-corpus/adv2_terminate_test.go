@@ -61,14 +61,20 @@ func NewS() *S { return &S{v: ` + ty + `{}} }
 }
 
 func TestAdv2DeepGenericsTerminate(t *testing.T) {
-	for _, n := range []int{50, 200} {
+	// Limits are wall-clock, so they sit far above the measured times (depth 50: 1.8 ms; depth 200:
+	// 115-425 ms at load ~30) to keep the test about blow-up, not about machine load.
+	for _, tc := range []struct {
+		n     int
+		limit time.Duration
+	}{{50, time.Second}, {200, 10 * time.Second}} {
+		n := tc.n
 		rep, d, ok := adv2Timed(t, adv2Deep(n), []string{"h", "s"}, 60*time.Second)
 		if !ok {
 			t.Fatalf("depth %d: census did not finish in 60s", n)
 		}
 		t.Logf("depth %d: %v classes %v", n, d, adv2Classes(rep))
-		if d > time.Second {
-			t.Errorf("depth %d: %v, want under 1s", n, d)
+		if d > tc.limit {
+			t.Errorf("depth %d: %v, want under %v", n, d, tc.limit)
 		}
 		for h, c := range adv2Classes(rep) {
 			if !slices.Contains(c, classW) {
