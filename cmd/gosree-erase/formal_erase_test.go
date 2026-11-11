@@ -459,4 +459,3 @@ func UseA(v int) int {
 		t.Fatalf("gosree-erase -verify dirA dirB exited %d, stderr=%s", code, errBuf.String())
 	}
 }
-

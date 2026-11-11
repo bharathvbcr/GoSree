@@ -200,8 +200,11 @@ Done:
      `globalSteeringBus` stays unclaimed, because claiming its fields gives 11 false SAFE009.
    - **Re-measured after the merge.** The figures above are from the item-4 branch before it merged
      `main` (`ffedea6` reproduces them exactly). The merge brought in `ffc95cf`'s ownership rewrite.
-     On `gosree` the production stratum is 516 transfers, 386 flagged, 345 hatched: 66.9%, or 74.8%
-     if the 41 newly flagged transfers each take a hatch. SAFE006 is 117. None of this is triaged,
+     On `f9b5915` the production stratum is 516 transfers, 386 flagged, 345 hatched: 66.9%, or 74.8%
+     if the 41 newly flagged transfers each take a hatch; SAFE006 is 117. After the container
+     contracts and the cross-package unsafe rule (`6b12630`) it is 562 transfers, 415 flagged, 344
+     hatched: 61.2%, or 73.8% if every flagged transfer takes a hatch; SAFE001 remaining is 370.
+     `-tests` fails closed on the error solver's 16,384-function limit. None of this is triaged,
      and the failure at `bb60b53` stands
      ([the triage log](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.md#re-measured-on-gosree-2026-11-10)).
 5. Open:

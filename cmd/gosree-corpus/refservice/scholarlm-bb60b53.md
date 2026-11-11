@@ -530,6 +530,7 @@ a production run (no `-tests`) on a `git archive` of `bb60b53` with this ledger,
 | `ffedea6` (item 4 before the merge) | 476 | 345 | 345 | 72.5% | SAFE001 19, SAFE006 23, SAFE009 36 |
 | `7b2f023` (the merge) | 519 | 387 | 346 | 66.7% | SAFE001 22, SAFE002 36, SAFE003 43, SAFE004 20, SAFE006 117, SAFE008 3, SAFE009 36 |
 | `f9b5915` | 516 | 386 | 345 | 66.9% | SAFE001 22, SAFE002 34, SAFE003 32, SAFE004 16, SAFE005 1, SAFE006 117, SAFE008 5, SAFE009 36 |
+| `6b12630` | 562 | 415 | 344 | 61.2% | SAFE001 370, SAFE002 58, SAFE003 39, SAFE004 16, SAFE005 4, SAFE006 118, SAFE008 5, SAFE009 37 |
 
 - `ffedea6` reproduces the B9 row exactly, so the input and toolchain are unchanged and the difference
   is the tool. `fc0a3d0`, the other commit the merge brought in, changes only documentation.
@@ -548,3 +549,17 @@ a production run (no `-tests`) on a `git archive` of `bb60b53` with this ledger,
   `passes/ownership.(*state).releaseSummaries` under `exportFacts`, in the equality checks of its
   release set: the fixpoint appends release paths whose steps grow through recursive calls, for up
   to 16 rounds. The `-tests` figures above (1,798 transfers, 25.1%) are from before the merge.
+
+### After the Claude Desktop session's work landed (`87e48f5` to `6b12630`)
+
+- The row for `6b12630` is the first production run after container contracts (`atomic.Pointer`,
+  `atomic.Value`, `sync.Map`, `sync.Pool`, `context.WithValue`), the cross-package `unsafe.Pointer`
+  rule and the bounded lockset landed: 20 s wall, 6.2 GB peak RSS, 0 of 333 directives stale.
+- 46 more transfers and 29 more flagged; hatched transfers 345 to 344, with no directive stale.
+  SAFE001 remaining rose from 22 to 370; which packages and whether they
+  are generated code has not been examined. None of the deltas is triaged, so 61.2% is not
+  comparable with the triaged 72.5%: every flagged transfer taking a hatch would give
+  415 / 562 = 73.8%. The failure at `bb60b53` stands either way.
+- `-tests` no longer stalls: on `6b12630` it stops after 37 s (9.2 GB peak RSS) because `safeerr`
+  fails `internal/wisdev`'s test variant, fail-closed: `gusseterr: func count 18973 exceeds 16384`.
+  So `-tests` is still not re-measured; it needs a larger solver limit or per-function chunking.

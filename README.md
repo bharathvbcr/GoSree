@@ -488,11 +488,13 @@ Two assumptions remain. The memory-model facts above are taken from the Go speci
 
 go1.27.3, 22 of 24 files. Skipped: `cgo_test.go` imports `internal/testenv` and `synctest_test.go` imports `internal/synctest`; neither can build outside GOROOT.
 
-| | Writes, overrides, links | Predicted before that run | SAFE006 at the declaration | Predicted before that run | With callbacks | Predicted before that run | With fork-join | Predicted before that run | MVP (`b42b26c`) | Predicted before the MVP run |
-|---|---|---|---|---|---|---|---|---|---|---|
-| `TestRace*` flagged | 229 / 234 (97.9%) | 229, unchanged | 229 / 234 (97.9%) | 229 (needs related positions) | 229 / 234 (97.9%) | 229 | 228 / 234 (97.4%) | 228, unchanged | 228 / 234 (97.4%) | at least 85% |
-| `TestNoRace*` clean | 36 / 129 (27.9%) | 36, unchanged | 36 / 129 (27.9%) | at most 38; the design review said 38 | 38 / 129 (29.5%) | 38 | 40 / 129 (31.0%) | 40 | 30 / 129 (23.3%) | 15 to 40% |
-| `TestNoRace*` flagged only for fork-join | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 17 | expected to dominate the misses; **it did not** |
+| | With container contracts (`87e48f5`) | Predicted before that run | Writes, overrides, links | Predicted before that run | SAFE006 at the declaration | Predicted before that run | With callbacks | Predicted before that run | With fork-join | Predicted before that run | MVP (`b42b26c`) | Predicted before the MVP run |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `TestRace*` flagged | 229 / 234 (97.9%) | not predicted | 229 / 234 (97.9%) | 229, unchanged | 229 / 234 (97.9%) | 229 (needs related positions) | 229 / 234 (97.9%) | 229 | 228 / 234 (97.4%) | 228, unchanged | 228 / 234 (97.4%) | at least 85% |
+| `TestNoRace*` clean | 37 / 129 (28.7%) | not predicted | 36 / 129 (27.9%) | 36, unchanged | 36 / 129 (27.9%) | at most 38; the design review said 38 | 38 / 129 (29.5%) | 38 | 40 / 129 (31.0%) | 40 | 30 / 129 (23.3%) | 15 to 40% |
+| `TestNoRace*` flagged only for fork-join | 7 | not predicted | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 7 | 17 | expected to dominate the misses; **it did not** |
+
+The container-contracts column was measured at `6b12630`, the commit that ends that work. One test moved: `TestNoRacePool` lost its `SAFE003` and is clean, because the `sync.Pool` contract (`passes/ownership/contracts.go`) treats `Get`'s result as freshly owned by the caller, like a channel receive: `x = p.Get().([]byte)` after `p.Put(x)` is a new value, not a use of the one put back. No `TestRace*` test changed, in either copy.
 
 The writes bit, the function overrides and argument linking left the counts where they were, as predicted, but six tests changed categories, which the prediction (unchanged) did not foresee:
 - `net.Listener` became a type override, so `TestNoRaceIOHttp` lost its `SAFE002`, `SAFE003` and `SAFE004`. It stays flagged by `SAFE006`.
@@ -529,11 +531,11 @@ Read these numbers with care:
 
 The unannotated numbers measure GoSree with no claims, and lock discipline is a claim the programmer makes. The annotated copy adds the comment a programmer would write who believes each test's locking protects a variable. That is 11 `//gosree:guarded_by` directives: comments only, no code changes. Every corpus test whose sharing is a lock discipline is annotated, together with the race tests of the same shape, so the run also shows whether an annotation hides a race. Each directive anchors on one exact line inside one function or declaration, and the run fails if any anchor does not match.
 
-| | With lock-acquire summaries | Predicted before that run | Annotated (11 directives) | Predicted before that run | Unannotated, same run |
-|---|---|---|---|---|---|
-| `TestRace*` flagged | 229 / 234 (97.9%) | 229 | 229 / 234 (97.9%) | 229 | 229 / 234 (97.9%) |
-| `TestNoRace*` clean | 42 / 129 (32.6%) | 42 (`FuncUnlock` and `AsFunc4` clear, `AsFunc3` stays flagged) | 40 / 129 (31.0%) | 40 (the design review said 42: its base of 38 plus Mutex, RWMutex, RWMutexMultipleReaders and RWMutexTransitive) | 36 / 129 (27.9%) |
-| `TestNoRace*` flagged only for fork-join | 6 | not predicted | 6 | not predicted | 7 |
+| | With container contracts (`87e48f5`) | Predicted before that run | With lock-acquire summaries | Predicted before that run | Annotated (11 directives) | Predicted before that run | Unannotated, same run |
+|---|---|---|---|---|---|---|---|
+| `TestRace*` flagged | 229 / 234 (97.9%) | not predicted | 229 / 234 (97.9%) | 229 | 229 / 234 (97.9%) | 229 | 229 / 234 (97.9%) |
+| `TestNoRace*` clean | 43 / 129 (33.3%) | not predicted | 42 / 129 (32.6%) | 42 (`FuncUnlock` and `AsFunc4` clear, `AsFunc3` stays flagged) | 40 / 129 (31.0%) | 40 (the design review said 42: its base of 38 plus Mutex, RWMutex, RWMutexMultipleReaders and RWMutexTransitive) | 36 / 129 (27.9%) |
+| `TestNoRace*` flagged only for fork-join | 6 | not predicted | 6 | not predicted | 6 | not predicted | 7 |
 
 Per annotated test, the categories without the directives and with them, as predicted:
 

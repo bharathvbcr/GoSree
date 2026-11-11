@@ -10,9 +10,9 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `1b06b99` (plus uncommitted checker edits) |
-| Checker fingerprint | `7dfbff9fe3b6d52f`: `bash tests/stress/fingerprint.sh` |
-| Run | 2026-11-10 (re-counted 2026-11-10); the suites that ran are listed under [What was run](#what-was-run) |
+| Git HEAD | `6b12630` (no uncommitted checker edits) |
+| Checker fingerprint | `ff1a7c9fe5e0967a`: `bash tests/stress/fingerprint.sh` |
+| Run | 2026-11-10: `go test ./...` with and without cgo, every package `ok`; the suites that ran are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
 is expected and is the suite working: each failure names the marker to promote or the lock that
