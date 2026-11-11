@@ -8,7 +8,8 @@ run, and the result. Runs:
         -annotate cmd/gosree-corpus/refservice/scholarlm-bb60b53.tsv -list -out build/ref/<batch> [-tests]
 
 The B4 rows, the test-stratum sample and the SAFE006 sort came from a throwaway tool kept, uncommitted,
-in `build/ref/_tools/triage` (gitignored), next to the final reports in `build/ref/final`.
+in `build/ref/_tools/triage` (gitignored), next to the final reports in `build/ref/final`. Neither
+directory exists any more (checked 2026-11-11), so the counts recorded here are what survives of them.
 
 The plan is the 2026-11-09 design ruling for README item 3: two strata (production, the headline,
 and `-tests`), hatches only on transfers or on non-transfer sites (a SAFE001 node, a SAFE006
@@ -307,7 +308,10 @@ values are set only during construction.
 
 The plan is the 2026-11-09 design ruling for README item 4: re-measure on the merged main, gate on a
 `-gcflags=-m` differential, then a census of what blocks each `IMM_BLOCKED` hatch, which decides
-whether the frozen-after-construction imm rule is worth building. Work is on branch `item4`, in a
+whether the frozen-after-construction imm rule is worth building. (Update, 2026-11-11: the branch is
+merged into `main` at `7cb05dd`, and the branch and its worktree are removed. The worktree's run
+directories and logs, formerly its `build/ref`, are kept, gitignored, in `build/ref-item4` of the main
+checkout.) Work was on branch `item4`, in a
 worktree off `3c9677c`, because another session was editing `passes/ownership` in the main checkout.
 
 ### Step 1: re-measure on `3c9677c`
@@ -567,7 +571,8 @@ a production run (no `-tests`) on a `git archive` of `bb60b53` with this ledger,
   overflow in `passes/borrow.canHoldBorrow` on a type that contains a slice of itself.
 - Run time on `f9b5915`: 134 s wall, 7.8 GB peak RSS, under a load average near 200.
 - `-tests` is not re-measured. No `-tests` run has finished since the merge: the two `-tests` runs
-  in the item-4 worktree with binaries built after it (12:10 and 16:17) left empty logs, and a run on `f9b5915` stopped at a 60-minute cap with
+  in the item-4 worktree with binaries built after it (12:10 and 16:17) left empty logs (the 16:17 run
+  was still going 14 h 48 min later, with no output, when it was stopped on 2026-11-11), and a run on `f9b5915` stopped at a 60-minute cap with
   no output (826 s CPU, 8.7 GB peak RSS). A stack sample of that run sat in
   `passes/ownership.(*state).releaseSummaries` under `exportFacts`, in the equality checks of its
   release set: the fixpoint appends release paths whose steps grow through recursive calls, for up
