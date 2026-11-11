@@ -620,13 +620,89 @@ func namedStruct(t types.Type) *types.Named {
 	return n.Origin()
 }
 
+// reach returns the module struct types a type expression names, in order of first appearance: a
+// named module struct (its generic origin) and the type arguments of any instantiated named type,
+// and through arrays, slices, maps, channels, pointers, unnamed struct literals and the underlying
+// type of named non-struct types (type Bs []*B). Left out on purpose:
+//   - func and interface element types: what they hold is only known per field from the stores
+//     the census sees (ifaceStores), not from the type, so an element of such a type is not a child;
+//   - type parameters: uninstantiated, they stand for whatever each use site supplies, and every
+//     use site's type arguments are walked where the instantiation appears;
+//   - a named struct's own fields: that struct is a child, and the closure walk reads its fields.
+//
+// The walk terminates on recursive named types (type T []T, type List[X] struct{ next *List[X] }):
+// a struct is never entered, and a named non-struct's underlying type is entered once.
+func (c *census) reach(t types.Type) []*types.Named {
+	var out []*types.Named
+	seen := map[*types.Named]bool{}
+	var walk func(types.Type)
+	walk = func(t types.Type) {
+		switch t := types.Unalias(t).(type) {
+		case *types.Named:
+			o := t.Origin()
+			// The type expression is finite, so its arguments are always walked (Box[Box[B]] names
+			// B through two instantiations of one origin); only the underlying type of a named
+			// non-struct can recurse into itself, so only that step is guarded.
+			for a := range t.TypeArgs().Types() {
+				walk(a)
+			}
+			if _, ok := o.Underlying().(*types.Struct); ok {
+				if c.inModule(o.Obj().Pkg()) && !slices.Contains(out, o) {
+					out = append(out, o)
+				}
+				return
+			}
+			if !seen[o] {
+				seen[o] = true
+				walk(o.Underlying())
+			}
+		case *types.Pointer:
+			walk(t.Elem())
+		case *types.Slice:
+			walk(t.Elem())
+		case *types.Array:
+			walk(t.Elem())
+		case *types.Chan:
+			walk(t.Elem())
+		case *types.Map:
+			walk(t.Key())
+			walk(t.Elem())
+		case *types.Struct:
+			for f := range t.Fields() {
+				walk(f.Type())
+			}
+		}
+	}
+	walk(t)
+	return out
+}
+
+// byValueContainer reports whether t is an array, at any depth, of module structs or pointers to
+// them: a type whose only content is children the closure walk reaches.
+func (c *census) byValueContainer(t types.Type) bool {
+	a, ok := types.Unalias(t).Underlying().(*types.Array)
+	if !ok {
+		return false
+	}
+	if inner := types.Unalias(a.Elem()); c.byValueContainer(inner) {
+		return true
+	}
+	n := namedStruct(a.Elem())
+	return n != nil && c.inModule(n.Obj().Pkg())
+}
+
 func structOf(n *types.Named) *types.Struct { return n.Underlying().(*types.Struct) }
 
 // rootClasses classifies the hatch's root type: a module struct is walked; anything else is
 // classified directly.
 func (c *census) rootClasses(t types.Type) (string, []string) {
 	if n := namedStruct(t); n != nil && c.inModule(n.Obj().Pkg()) {
-		return n.String(), c.classesOf(n)
+		cl := c.classesOf(n)
+		for _, k := range c.reach(t) {
+			cl = union(slices.Clone(cl), c.classesOf(k))
+		}
+		slices.Sort(cl)
+		return n.String(), cl
 	}
 	if c.cls.Shareable(t) {
 		return t.String(), []string{classOK}
@@ -774,13 +850,26 @@ func (c *census) own(n *types.Named) ownResult {
 		case f.Exported() && exportedType:
 			add(classE, "exported field "+f.Name())
 		}
+		if !isSlot(ft) {
+			// Every module struct the field's type names is a child, whether or not the type is
+			// shareable: the struct itself, a generic's type arguments, and the elements of arrays,
+			// slices, maps, channels and pointers.
+			children = append(children, c.reach(ft)...)
+		}
 		switch {
 		case c.cls.Shareable(ft):
 		case isSlot(ft):
 			for _, st := range c.ifaceStores[n][f.Name()] {
 				if child := namedStruct(st); child != nil && c.inModule(child.Obj().Pkg()) {
-					children = append(children, child)
-				} else if impls := c.implementers(st); impls != nil {
+					// A module struct, or a pointer to one, is a pure child: nothing about the store
+					// is classified. reach adds the struct and the type arguments of an instance.
+					children = append(children, c.reach(st)...)
+					continue
+				}
+				// Anything else keeps its own classification; the module structs it contains
+				// (map[string]*B, an external generic over B) are children beside it.
+				children = append(children, c.reach(st)...)
+				if impls := c.implementers(st); impls != nil {
 					// A module interface stored as it came: its dynamic type is one of the module's
 					// implementations, or a type from outside the census cannot see.
 					children = append(children, impls...)
@@ -790,10 +879,12 @@ func (c *census) own(n *types.Named) ownResult {
 			}
 		default:
 			if child := namedStruct(ft); child != nil && c.inModule(child.Obj().Pkg()) {
-				children = append(children, child)
 				continue
 			}
 			switch {
+			case c.byValueContainer(ft):
+				// An array of module structs (or of pointers to them) holds no slot of its own: its
+				// elements are the children above, as a lone struct or pointer field would be.
 			case isCollection(ft):
 				if c.allAccessLocked(n, f.Name()) && (c.contentWrites[n][f.Name()] != "" || c.reassigned(n, f.Name()) != "") {
 					// Every use after construction goes through a load of the field, so if each load
