@@ -52,16 +52,37 @@ func readOnlyFallOff(path string) {
 	println(f.Name())
 }
 
-// os.Exit never runs deferred calls: no finding (characterized behavior, unchanged).
+// Exits that are not a Return block. When the resource is not yet writable at registration these
+// produce no finding (the deferred close only resolves at Return blocks).
 func exitsProcess(w io.WriteCloser) {
 	defer w.Close()
 	_, _ = w.Write([]byte("x"))
 	os.Exit(0)
 }
 
-// A panic exit is not a Return block: no finding (characterized behavior, unchanged).
 func panicsAfterDefer(w io.WriteCloser) {
 	defer w.Close()
 	_, _ = w.Write([]byte("x"))
+	panic("boom")
+}
+
+// When the resource is already writable at registration (os.Create) the finding does not depend
+// on the exit kind, so these report today. The os.Exit one is questionable, since deferred calls
+// do not run on os.Exit; it is pinned here as characterized behavior, not endorsed.
+func createThenExit(path string) {
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	defer f.Close() // want "ERR005"
+	os.Exit(0)
+}
+
+func createThenPanic(path string) {
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	defer f.Close() // want "ERR005"
 	panic("boom")
 }

@@ -23,3 +23,7 @@ func TestNilerrConcreteErrorPointerObserved(t *testing.T) {
 func TestSameLineFallbackDoesNotMisattribute(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errsameline")
 }
+
+func TestShadowReadWindow(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errshadowwin")
+}

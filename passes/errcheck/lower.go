@@ -5,6 +5,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -88,6 +89,9 @@ type funcLowerer struct {
 	boxedConcreteErr map[ssa.Value]types.Type
 	ioReadErrVals    map[ssa.Value]bool
 	companionVals    map[ssa.Value]bool
+
+	lineIdx         *blockLineIndex
+	consumedBlanked map[token.Pos]bool
 }
 
 func (b *packageBuilder) lowerFunc(funcIdx uint32, fn *ssa.Function) gusseterr.FuncIR {
@@ -123,6 +127,8 @@ func (b *packageBuilder) lowerFunc(funcIdx uint32, fn *ssa.Function) gusseterr.F
 		boxedConcreteErr: make(map[ssa.Value]types.Type),
 		ioReadErrVals:    make(map[ssa.Value]bool),
 		companionVals:    make(map[ssa.Value]bool),
+
+		consumedBlanked: make(map[token.Pos]bool),
 	}
 
 	return fl.build(flags)
@@ -1594,9 +1600,15 @@ func (fl *funcLowerer) matchCloseSite(cc *ssa.CallCommon, pos token.Pos, consume
 
 func (fl *funcLowerer) matchBlankedTuple(pos token.Pos) (blankedTupleAST, bool) {
 	if bl, ok := fl.astInfo.blanked[pos]; ok {
+		fl.consumedBlanked[pos] = true
 		return bl, true
 	}
-	bl, _, ok := sameLineMatch(fl.pkg.pass.Fset, fl.astInfo.blanked, pos, nil, func(blankedTupleAST) bool { return true })
+	// Each blanked assignment belongs to one call: a second tuple call on the same line must not
+	// inherit an entry another call already claimed.
+	bl, key, ok := sameLineMatch(fl.pkg.pass.Fset, fl.astInfo.blanked, pos, fl.consumedBlanked, func(blankedTupleAST) bool { return true })
+	if ok {
+		fl.consumedBlanked[key] = true
+	}
 	return bl, ok
 }
 
@@ -1804,10 +1816,16 @@ func (fl *funcLowerer) stmtListDiscardsWithBlank(rest []ast.Stmt, target *types.
 	return false
 }
 
-func (fl *funcLowerer) findBlockForPos(target token.Pos) int {
-	targetLine := fl.pkg.pass.Fset.Position(target).Line
-	bestBB := 0
-	bestDist := 1 << 30
+// blockLineIndex maps each source line that carries an instruction to the first block (in block
+// order) holding one, with the lines ascending. It is built once per function so that locating a
+// block for a position is a binary search rather than a walk over every instruction.
+type blockLineIndex struct {
+	lines []int
+	block []int
+}
+
+func (fl *funcLowerer) buildBlockLineIndex() *blockLineIndex {
+	first := make(map[int]int)
 	for bi, b := range fl.fn.Blocks {
 		if b == fl.fn.Recover {
 			continue
@@ -1818,20 +1836,48 @@ func (fl *funcLowerer) findBlockForPos(target token.Pos) int {
 				continue
 			}
 			ln := fl.pkg.pass.Fset.Position(p).Line
-			dist := ln - targetLine
-			if dist < 0 {
-				dist = -dist
-			}
-			if dist < bestDist {
-				bestDist = dist
-				bestBB = bi
-				if dist == 0 {
-					return bi
-				}
+			if _, seen := first[ln]; !seen {
+				first[ln] = bi
 			}
 		}
 	}
-	return bestBB
+	idx := &blockLineIndex{lines: make([]int, 0, len(first))}
+	for ln := range first {
+		idx.lines = append(idx.lines, ln)
+	}
+	sort.Ints(idx.lines)
+	idx.block = make([]int, len(idx.lines))
+	for i, ln := range idx.lines {
+		idx.block[i] = first[ln]
+	}
+	return idx
+}
+
+// findBlockForPos returns the block holding the instruction nearest to target's line; on equal
+// distance the earlier block wins, and with no positioned instruction it is block 0.
+func (fl *funcLowerer) findBlockForPos(target token.Pos) int {
+	if fl.lineIdx == nil {
+		fl.lineIdx = fl.buildBlockLineIndex()
+	}
+	idx := fl.lineIdx
+	line := fl.pkg.pass.Fset.Position(target).Line
+	i := sort.SearchInts(idx.lines, line)
+	best, bestDist := 0, 1<<30
+	consider := func(j int) {
+		if j < 0 || j >= len(idx.lines) {
+			return
+		}
+		d := idx.lines[j] - line
+		if d < 0 {
+			d = -d
+		}
+		if d < bestDist || (d == bestDist && idx.block[j] < best) {
+			best, bestDist = idx.block[j], d
+		}
+	}
+	consider(i - 1)
+	consider(i)
+	return best
 }
 
 func isLocalCellAlloc(alloc *ssa.Alloc) bool {

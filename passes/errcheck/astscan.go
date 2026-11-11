@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -81,6 +82,11 @@ type funcASTInfo struct {
 	closes    map[token.Pos]closeCallAST     // keyed by CallExpr.Lparen
 	blanked   map[token.Pos]blankedTupleAST  // keyed by CallExpr.Lparen
 	shadows   []shadowErrAST
+
+	// shadowVisits counts the AST nodes the shadow scan visited. It is the work measure the
+	// complexity tests bound; it never influences a result.
+	shadowVisits int
+	readIdx      *shadowReadIndex
 }
 
 func scanFuncAST(pass *analysis.Pass, syntax ast.Node) *funcASTInfo {
@@ -129,9 +135,17 @@ func scanFuncAST(pass *analysis.Pass, syntax ast.Node) *funcASTInfo {
 }
 
 func walkNoNestedClosures(root ast.Node, visit func(ast.Node)) {
+	walkCounted(root, nil, visit)
+}
+
+// walkCounted is walkNoNestedClosures that adds each visited node to *visits when it is non-nil.
+func walkCounted(root ast.Node, visits *int, visit func(ast.Node)) {
 	ast.Inspect(root, func(n ast.Node) bool {
 		if n == nil {
 			return false
+		}
+		if visits != nil {
+			*visits++
 		}
 		if n != root {
 			if _, isLit := n.(*ast.FuncLit); isLit {
@@ -537,7 +551,7 @@ func checkIfInitShadow(
 			*outers = append(*outers, outerErrScope{v: v, declPos: id.Pos(), scopeEnd: ifStmt.End()})
 			continue
 		}
-		if matchesShadowedOuter(pass, v, id.Pos(), ifStmt.End(), *outers, fnBody) {
+		if matchesShadowedOuter(pass, v, id.Pos(), ifStmt.End(), pruneOuters(outers, id.Pos()), fnBody, info) {
 			info.shadows = append(info.shadows, shadowErrAST{pos: assign.Pos(), name: v.Name()})
 		}
 		*outers = append(*outers, outerErrScope{v: v, declPos: id.Pos(), scopeEnd: ifStmt.End()})
@@ -571,7 +585,7 @@ func checkStmtShadow(
 				}
 				if v, ok := pass.TypesInfo.Defs[id].(*types.Var); ok && isErrorInterface(v.Type()) {
 					if inNested && len(vs.Values) > 0 && !restGuardsNonNilExit(pass, restInBlock, v) {
-						if matchesShadowedOuter(pass, v, id.Pos(), blockEnd, *outers, fnBody) {
+						if matchesShadowedOuter(pass, v, id.Pos(), blockEnd, pruneOuters(outers, id.Pos()), fnBody, info) {
 							info.shadows = append(info.shadows, shadowErrAST{pos: vs.Pos(), name: v.Name()})
 						}
 					}
@@ -593,7 +607,7 @@ func checkStmtShadow(
 				continue
 			}
 			if inNested && !restGuardsNonNilExit(pass, restInBlock, v) {
-				if matchesShadowedOuter(pass, v, id.Pos(), blockEnd, *outers, fnBody) {
+				if matchesShadowedOuter(pass, v, id.Pos(), blockEnd, pruneOuters(outers, id.Pos()), fnBody, info) {
 					info.shadows = append(info.shadows, shadowErrAST{pos: s.Pos(), name: v.Name()})
 				}
 			}
@@ -602,12 +616,28 @@ func checkStmtShadow(
 	}
 }
 
+// pruneOuters drops declarations whose scope ended at or before pos and returns the live ones.
+// The scan visits declarations in source order, and matchesShadowedOuter only accepts an outer whose
+// scope extends past the inner declaration, so a dead scope can never match again. Without this the
+// list grows with every error declaration in the function and each candidate scans all of them.
+func pruneOuters(outers *[]outerErrScope, pos token.Pos) []outerErrScope {
+	live := (*outers)[:0]
+	for _, o := range *outers {
+		if o.scopeEnd > pos {
+			live = append(live, o)
+		}
+	}
+	*outers = live
+	return live
+}
+
 func matchesShadowedOuter(
 	pass *analysis.Pass,
 	inner *types.Var,
 	innerPos, innerScopeEnd token.Pos,
 	outers []outerErrScope,
 	fnBody *ast.BlockStmt,
+	info *funcASTInfo,
 ) bool {
 	for _, out := range outers {
 		if out.v == inner || out.v.Name() != inner.Name() {
@@ -616,11 +646,108 @@ func matchesShadowedOuter(
 		if innerPos <= out.declPos || out.scopeEnd <= innerScopeEnd {
 			continue
 		}
-		if outerReadAfterWithoutReassign(pass, out, innerScopeEnd, fnBody) {
+		if outerReadAfterWithoutReassign(pass, out, innerScopeEnd, fnBody, info) {
 			return true
 		}
 	}
 	return false
+}
+
+// shadowReadIndex answers "is this outer error variable read after this position, before an
+// unambiguous top-level overwrite" without re-walking the function body per candidate. It is built
+// in one pass over the body and queried by binary search, which keeps the shadow scan linear in
+// the size of the function instead of quadratic in the number of shadowing scopes.
+type shadowReadIndex struct {
+	// reads holds, per variable, the positions of identifiers that read it (a use that is not the
+	// left side of a plain assignment), ascending.
+	reads map[*types.Var][]token.Pos
+	// overwrites holds, per variable, the positions of top-level statements of the function body
+	// that assign it without reading it on the right-hand side, ascending.
+	overwrites map[*types.Var][]token.Pos
+	// bareReturns holds the positions of result-less return statements, ascending.
+	bareReturns []token.Pos
+}
+
+func buildShadowReadIndex(pass *analysis.Pass, body *ast.BlockStmt, visits *int) *shadowReadIndex {
+	idx := &shadowReadIndex{
+		reads:      make(map[*types.Var][]token.Pos),
+		overwrites: make(map[*types.Var][]token.Pos),
+	}
+	lhs := make(map[*ast.Ident]bool)
+	walkCounted(body, visits, func(n ast.Node) {
+		if as, ok := n.(*ast.AssignStmt); ok && (as.Tok == token.ASSIGN || as.Tok == token.DEFINE) {
+			for _, l := range as.Lhs {
+				if id, ok := unparenExpr(l).(*ast.Ident); ok {
+					lhs[id] = true
+				}
+			}
+		}
+	})
+	walkCounted(body, visits, func(n ast.Node) {
+		switch x := n.(type) {
+		case *ast.Ident:
+			if v, ok := pass.TypesInfo.Uses[x].(*types.Var); ok && !lhs[x] {
+				idx.reads[v] = append(idx.reads[v], x.Pos())
+			}
+		case *ast.ReturnStmt:
+			if len(x.Results) == 0 {
+				idx.bareReturns = append(idx.bareReturns, x.Pos())
+			}
+		}
+	})
+	for _, topStmt := range body.List {
+		if visits != nil {
+			*visits++
+		}
+		assign, ok := topStmt.(*ast.AssignStmt)
+		if !ok {
+			continue
+		}
+		seen := make(map[*types.Var]bool, len(assign.Lhs))
+		for _, l := range assign.Lhs {
+			id, ok := unparenExpr(l).(*ast.Ident)
+			if !ok {
+				continue
+			}
+			v, ok := pass.TypesInfo.Uses[id].(*types.Var)
+			if !ok {
+				v, _ = pass.TypesInfo.Defs[id].(*types.Var)
+			}
+			if v == nil || seen[v] {
+				continue
+			}
+			seen[v] = true
+			rhsReads := false
+			for _, rhs := range assign.Rhs {
+				if exprReadsVar(pass, rhs, v, visits) {
+					rhsReads = true
+					break
+				}
+			}
+			if !rhsReads {
+				idx.overwrites[v] = append(idx.overwrites[v], assign.Pos())
+			}
+		}
+	}
+	// The walks run in source order, so these are already ascending; the binary searches depend
+	// on it, so state it rather than assume it.
+	for _, list := range idx.reads {
+		sort.Slice(list, func(i, j int) bool { return list[i] < list[j] })
+	}
+	for _, list := range idx.overwrites {
+		sort.Slice(list, func(i, j int) bool { return list[i] < list[j] })
+	}
+	sort.Slice(idx.bareReturns, func(i, j int) bool { return idx.bareReturns[i] < idx.bareReturns[j] })
+	return idx
+}
+
+// firstAfter returns the first position in the ascending list that is greater than after.
+func firstAfter(list []token.Pos, after token.Pos) (token.Pos, bool) {
+	i := sort.Search(len(list), func(i int) bool { return list[i] > after })
+	if i == len(list) {
+		return token.NoPos, false
+	}
+	return list[i], true
 }
 
 func outerReadAfterWithoutReassign(
@@ -628,87 +755,36 @@ func outerReadAfterWithoutReassign(
 	out outerErrScope,
 	afterPos token.Pos,
 	fnBody *ast.BlockStmt,
+	info *funcASTInfo,
 ) bool {
-	// Find earliest read of out.v after afterPos vs earliest unambiguous top-level overwrite of out.v.
-	earliestOverwrite := token.NoPos
-	for _, topStmt := range fnBody.List {
-		if topStmt.Pos() <= afterPos {
-			continue
-		}
-		if assign, ok := topStmt.(*ast.AssignStmt); ok {
-			for _, lhs := range assign.Lhs {
-				if id, ok := unparenExpr(lhs).(*ast.Ident); ok {
-					if pass.TypesInfo.Uses[id] == out.v || pass.TypesInfo.Defs[id] == out.v {
-						// Check if RHS itself reads out.v (e.g., err = wrap(err)).
-						rhsReads := false
-						for _, rhs := range assign.Rhs {
-							if exprReadsVar(pass, rhs, out.v) {
-								rhsReads = true
-								break
-							}
-						}
-						if !rhsReads {
-							earliestOverwrite = assign.Pos()
-						}
-						break
-					}
-				}
-			}
-		}
-		if earliestOverwrite.IsValid() {
-			break
+	if info.readIdx == nil {
+		info.readIdx = buildShadowReadIndex(pass, fnBody, &info.shadowVisits)
+	}
+	idx := info.readIdx
+	// The earliest unambiguous top-level overwrite after the candidate ends the read window.
+	// A statement positioned at afterPos does not count, matching a strict "after".
+	earliestOverwrite, hasOverwrite := firstAfter(idx.overwrites[out.v], afterPos)
+	inWindow := func(p token.Pos) bool { return !hasOverwrite || p < earliestOverwrite }
+
+	if p, ok := firstAfter(idx.reads[out.v], afterPos); ok && inWindow(p) {
+		return true
+	}
+	if out.isNamedResult {
+		if p, ok := firstAfter(idx.bareReturns, afterPos); ok && inWindow(p) {
+			return true
 		}
 	}
-
-	readAfter := false
-	walkNoNestedClosures(fnBody, func(n ast.Node) {
-		if readAfter {
-			return
-		}
-		switch x := n.(type) {
-		case *ast.Ident:
-			if x.Pos() <= afterPos {
-				return
-			}
-			if earliestOverwrite.IsValid() && x.Pos() >= earliestOverwrite {
-				return
-			}
-			if pass.TypesInfo.Uses[x] == out.v && !isLHSOfPlainAssign(fnBody, x) {
-				readAfter = true
-			}
-		case *ast.ReturnStmt:
-			if out.isNamedResult && len(x.Results) == 0 && x.Pos() > afterPos {
-				if !earliestOverwrite.IsValid() || x.Pos() < earliestOverwrite {
-					readAfter = true
-				}
-			}
-		}
-	})
-	return readAfter
+	return false
 }
 
-func exprReadsVar(pass *analysis.Pass, e ast.Expr, target *types.Var) bool {
+func exprReadsVar(pass *analysis.Pass, e ast.Expr, target *types.Var, visits *int) bool {
 	found := false
-	walkNoNestedClosures(e, func(n ast.Node) {
+	walkCounted(e, visits, func(n ast.Node) {
 		if id, ok := n.(*ast.Ident); ok && pass.TypesInfo.Uses[id] == target {
 			found = true
 		}
 	})
 	return found
-}
-
-func isLHSOfPlainAssign(root ast.Node, target *ast.Ident) bool {
-	isLHS := false
-	walkNoNestedClosures(root, func(n ast.Node) {
-		if as, ok := n.(*ast.AssignStmt); ok && (as.Tok == token.ASSIGN || as.Tok == token.DEFINE) {
-			for _, lhs := range as.Lhs {
-				if unparenExpr(lhs) == target {
-					isLHS = true
-				}
-			}
-		}
-	})
-	return isLHS
 }
 
 func restGuardsNonNilExit(pass *analysis.Pass, stmts []ast.Stmt, errVar *types.Var) bool {
