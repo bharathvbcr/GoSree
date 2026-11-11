@@ -27,3 +27,7 @@ func TestSameLineFallbackDoesNotMisattribute(t *testing.T) {
 func TestShadowReadWindow(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errshadowwin")
 }
+
+func TestRangeFuncBodyDeferredClose(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errrangedefer")
+}

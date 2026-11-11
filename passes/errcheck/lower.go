@@ -1354,7 +1354,13 @@ func (fl *funcLowerer) lowerTerminator(b *ssa.BasicBlock, ops *[]gusseterr.OpIR)
 			// A function that falls off its end exits through an implicit return with no source
 			// position. It is a real exit for deferred-close resolution, but it carries nothing for
 			// the return checks (no results, so no nilerr or companion uses).
-			if len(t.Results) == 0 {
+			// The synthetic yield function of a range-over-func loop falls off its end through
+			// `return true`, which has a result but is the same kind of exit. Defers inside the
+			// body are pushed onto the enclosing function's defer stack (ssa Defer.DeferStack)
+			// and run when that function returns; the body's exits stand in for that point, which
+			// sees every write made in the iteration.
+			_, isYield := fl.fn.Syntax().(*ast.RangeStmt)
+			if len(t.Results) == 0 || isYield {
 				return gusseterr.Terminator{
 					Kind:    gusseterr.TermReturn,
 					SiteID:  fl.siteForVal(token.NoPos, "return"),
