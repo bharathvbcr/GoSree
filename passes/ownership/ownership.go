@@ -129,8 +129,13 @@ type state struct {
 	guardSums      *guardState
 	globalWrites   map[*ssa.Global][]token.Pos
 	mutatedGlobals map[*ssa.Global]bool
-	// immRets caches what each callee's single-result returns trace to (see immReturns).
-	immRets map[*ssa.Function][]immRet
+	// immRets caches what each callee's single-result returns trace to (see immReturns); only
+	// results that did not depend on a function still being traced are kept here. immScratch holds
+	// the others until the outermost trace returns; immStack and immBusy are the traces in progress.
+	immRets    map[*ssa.Function][]immRet
+	immScratch map[*ssa.Function][]immRet
+	immStack   []immFrame
+	immBusy    map[*ssa.Function]int
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the

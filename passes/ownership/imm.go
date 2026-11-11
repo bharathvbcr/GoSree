@@ -222,14 +222,40 @@ type immRet struct {
 // nothing and every function is traced at most once. Tracing each return afresh at every call site,
 // with a copy of the caller's seen set, explored every ordering of a recursive function's returns:
 // exponential in the number of recursive return sites.
+//
+// A result that depended on another function still being traced (a deeper member of a recursion
+// cycle) is incomplete: it is kept only until the outermost trace returns, so a later trace that
+// starts at that function computes it whole. Caching it for the whole pass made the reported
+// findings depend on which store was checked first.
 func (st *state) immReturns(callee *ssa.Function) []immRet {
 	if rs, ok := st.immRets[callee]; ok {
 		return rs
 	}
+	if i, busy := st.immBusy[callee]; busy {
+		for j := i + 1; j < len(st.immStack); j++ {
+			st.immStack[j].incomplete = true // they read callee before its returns were known
+		}
+		return nil
+	}
+	if rs, ok := st.immScratch[callee]; ok {
+		for j := range st.immStack {
+			st.immStack[j].incomplete = true // an incomplete result makes its readers incomplete
+		}
+		return rs
+	}
 	if st.immRets == nil {
 		st.immRets = map[*ssa.Function][]immRet{}
+		st.immScratch = map[*ssa.Function][]immRet{}
+		st.immBusy = map[*ssa.Function]int{}
 	}
-	st.immRets[callee] = nil // in progress: a recursive call sees no returns
+	st.immBusy[callee] = len(st.immStack)
+	st.immStack = append(st.immStack, immFrame{fn: callee})
+	defer func() {
+		delete(st.immBusy, callee)
+		if len(st.immStack) == 0 {
+			clear(st.immScratch)
+		}
+	}()
 	var rs []immRet
 	for _, b := range callee.Blocks {
 		for _, ins := range b.Instrs {
@@ -245,8 +271,21 @@ func (st *state) immReturns(callee *ssa.Function) []immRet {
 			rs = append(rs, r)
 		}
 	}
-	st.immRets[callee] = rs
+	frame := st.immStack[len(st.immStack)-1]
+	st.immStack = st.immStack[:len(st.immStack)-1]
+	if frame.incomplete {
+		st.immScratch[callee] = rs
+	} else {
+		st.immRets[callee] = rs
+	}
 	return rs
+}
+
+// immFrame is one immReturns trace in progress; incomplete is set when it read the returns of a
+// function that was itself still being traced.
+type immFrame struct {
+	fn         *ssa.Function
+	incomplete bool
 }
 
 func (st *state) traceImmAddr(v ssa.Value, seen map[ssa.Value]bool) (types.Type, ssa.Value, token.Pos) {

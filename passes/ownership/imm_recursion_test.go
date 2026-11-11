@@ -11,6 +11,50 @@ import (
 	"github.com/bharathvbcr/gosree/passes/ownership"
 )
 
+// TestImmTraceCycleOrderIndependent: f and g call each other and f returns the address of an imm
+// field. Tracing *f(y) first computes g's returns while f is still being traced; caching that
+// partial result for the pass made the later *g(x) write go unreported. Both writes are reported
+// whichever is checked first.
+func TestImmTraceCycleOrderIndependent(t *testing.T) {
+	const head = `package immcycle
+
+//gosree:imm
+type Imm struct{ v int } // want Imm:"imm"
+
+var c bool
+
+func f(h *Imm) *int {
+	if c {
+		return g(h)
+	}
+	return &h.v
+}
+
+func g(h *Imm) *int { return f(h) }
+`
+	for name, body := range map[string]string{
+		"f first": `
+func useF(y *Imm) { *f(y) = 2 } // want "write to a field of"
+
+func useG(x *Imm) { *g(x) = 1 } // want "write to a field of"
+`,
+		"g first": `
+func useG(x *Imm) { *g(x) = 1 } // want "write to a field of"
+
+func useF(y *Imm) { *f(y) = 2 } // want "write to a field of"
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir, cleanup, err := analysistest.WriteFiles(map[string]string{"immcycle/immcycle.go": head + body})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			analysistest.Run(t, dir, ownership.Analyzer, "immcycle")
+		})
+	}
+}
+
 // TestImmTraceRecursiveReturnsTerminate: a write through the result of a recursive function with
 // many `return find(...)` sites. Tracing the written address into the callee's returns once per
 // return ordering took exponential time (k=9: 34 s, k=12: over 180 s); each callee is now traced
