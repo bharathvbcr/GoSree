@@ -142,8 +142,48 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 			})
 		}
 	}
+	st.markEscapedGlobals(fns, mutated)
 	st.globalWrites = writes
 	st.mutatedGlobals = mutated
+}
+
+// markEscapedGlobals marks as mutated every package variable whose backing memory leaves the
+// function that reads it by a route that is not a freeze: returned (from any function, since a
+// caller can hand the result on), retained by a callee, captured by a closure that retains it,
+// or stored where other code can reach it. The alias graph already records these as escape and
+// return events on the class of the variable's value and on every class that holds or is held by
+// it, so a table copied into a heap struct or a returned closure is found as well as the table
+// itself. Publishing into an atomic container is a transfer event and does not count: it is the
+// freeze the exemption exists for. A variable whose memory escapes this way can be written by
+// code gosree does not see, so it is not init-only and fails closed.
+func (st *state) markEscapedGlobals(fns []*ssa.Function, mutated map[*ssa.Global]bool) {
+	scan := fns
+	if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil {
+		scan = append(append([]*ssa.Function(nil), fns...), pkgInit)
+	}
+	for _, fn := range scan {
+		if len(fn.Blocks) == 0 {
+			continue
+		}
+		g := st.graphOf(fn)
+		for v, n := range g.nodes {
+			glob, ok := v.(*ssa.Global)
+			if !ok || n == nil || glob.Pkg != st.ssa.Pkg || mutated[glob] {
+				continue
+			}
+		region:
+			for c := range g.region(n) {
+				for _, e := range c.events {
+					// An event tied to a variable is the variable's own seed (it is "stored in"
+					// itself), not something done with its memory.
+					if e.global == nil && (e.kind == evEscape || e.kind == evReturn) {
+						mutated[glob] = true
+						break region
+					}
+				}
+			}
+		}
+	}
 }
 
 func rootsAtParam(v ssa.Value, fn *ssa.Function) bool {

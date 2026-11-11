@@ -345,3 +345,83 @@ func mutateHop(c *Config) {
 		t.Errorf("stale hatches at lines %v, want [10 27]: the verdict must not depend on call depth", staleLines)
 	}
 }
+
+// A package variable is exempt from the freeze rules only while it is provably init-only: the map
+// behind it must not escape anywhere (returned, retained by a callee, captured by a returned
+// closure). Each shape below gives the table away, so freezing it into an atomic pointer is not a
+// clean init-only freeze; the control table stays clean.
+func TestInitOnlyGlobalEscapeShapesFailClosed(t *testing.T) {
+	dir, cleanup, err := analysistest.WriteFiles(map[string]string{
+		"keeper/keeper.go": `package keeper
+
+var kept []map[string]int // want "SAFE006"
+
+func Keep(m map[string]int) { kept = append(kept, m) } // want Keep:"ownership summary"
+`,
+		"p/p.go": `package p
+
+import (
+	"keeper"
+	"sync/atomic"
+)
+
+type Config struct {
+	Limit int
+	Table map[string]int
+}
+
+var liveCfg atomic.Pointer[Config]
+
+var controlRoutes = map[string]int{"health": 1}
+
+func controlFreeze() int {
+	liveCfg.Store(&Config{Limit: 1, Table: controlRoutes})
+	return controlRoutes["health"]
+}
+
+var heapRoutes = map[string]int{"a": 1}
+
+func New() *Config { return &Config{Table: heapRoutes} } // want New:"ownership summary"
+
+func freezeHeap() {
+	liveCfg.Store(&Config{Table: heapRoutes}) // want "SAFE002" "SAFE004"
+}
+
+var closureRoutes = map[string]int{"b": 2}
+
+func Make() func() *Config { // want Make:"ownership summary"
+	cfg := Config{Table: closureRoutes}
+	return func() *Config { return &cfg }
+}
+
+func freezeClosure() {
+	liveCfg.Store(&Config{Table: closureRoutes}) // want "SAFE002" "SAFE004"
+}
+
+var Exposed map[string]int // want "SAFE006"
+
+var calleeRoutes = map[string]int{"c": 3}
+
+func Setup() { expose(calleeRoutes) } // want Setup:"ownership summary"
+
+func expose(m map[string]int) { Exposed = m }
+
+func freezeCallee() {
+	liveCfg.Store(&Config{Table: calleeRoutes}) // want "SAFE002" "SAFE004"
+}
+
+var otherPkgRoutes = map[string]int{"d": 4}
+
+func SetupOther() { keeper.Keep(otherPkgRoutes) } // want SetupOther:"ownership summary"
+
+func freezeOther() {
+	liveCfg.Store(&Config{Table: otherPkgRoutes}) // want "SAFE002" "SAFE004"
+}
+`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	analysistest.Run(t, dir, ownership.Analyzer, "p")
+}
