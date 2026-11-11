@@ -15,3 +15,7 @@ func TestRangeOverFuncBodies(t *testing.T) {
 func TestDeferredCloseOnImplicitReturn(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errdeferend")
 }
+
+func TestNilerrConcreteErrorPointerObserved(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errnilerrptr")
+}

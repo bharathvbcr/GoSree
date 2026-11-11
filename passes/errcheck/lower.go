@@ -280,6 +280,20 @@ func (fl *funcLowerer) emitObserveErr(ops *[]gusseterr.OpIR, val ssa.Value) {
 	fl.emitObserveErrVarsOnly(ops, val)
 }
 
+// emitObserveConcreteErrPtr records that a concrete error pointer (a `*T` implementing error) was
+// dereferenced or had a field read. Reading the pointee inspects the error, so a prior `p != nil`
+// check is not an ignored error: nilerr must not fire on a later `return nil`.
+func (fl *funcLowerer) emitObserveConcreteErrPtr(ops *[]gusseterr.OpIR, val ssa.Value) {
+	if val == nil || !isConcreteErrPtr(val.Type()) {
+		return
+	}
+	*ops = append(*ops, gusseterr.OpIR{
+		Kind:   gusseterr.OpObserveErr,
+		SiteID: 0,
+		SlotA:  fl.rootSlot(val),
+	})
+}
+
 func (fl *funcLowerer) emitObserveErrVarsOnly(ops *[]gusseterr.OpIR, val ssa.Value) {
 	for _, v := range fl.valErrVars[val] {
 		if vs, ok := fl.mem2regErrSlots[v]; ok {
@@ -805,6 +819,7 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 						fl.propagateBlankedMeta(x, alloc)
 					} else {
 						fl.emitUseCompanion(&ops, x.Pos(), x.X)
+						fl.emitObserveConcreteErrPtr(&ops, x.X)
 					}
 				} else if x.Op != token.NOT {
 					fl.emitUseCompanion(&ops, x.Pos(), x.X)
@@ -812,8 +827,10 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 
 			case *ssa.FieldAddr:
 				fl.emitUseCompanion(&ops, x.Pos(), x.X)
+				fl.emitObserveConcreteErrPtr(&ops, x.X)
 			case *ssa.Field:
 				fl.emitUseCompanion(&ops, x.Pos(), x.X)
+				fl.emitObserveConcreteErrPtr(&ops, x.X)
 			case *ssa.IndexAddr:
 				fl.emitUseCompanion(&ops, x.Pos(), x.X)
 				fl.emitUseCompanion(&ops, x.Pos(), x.Index)
