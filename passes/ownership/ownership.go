@@ -21,6 +21,7 @@
 package ownership
 
 import (
+	"go/ast"
 	"go/token"
 	"go/types"
 	"reflect"
@@ -137,6 +138,11 @@ type state struct {
 	immRound   int
 	immStack   []immFrame
 	immBusy    map[*ssa.Function]int
+
+	// litBindings and litBorrows memoise the closure lookups of findBorrowsInLitInSyntax, so the
+	// enclosing function is walked once, not once per identifier.
+	litBindings map[ast.Node]map[*types.Var][]*ast.FuncLit
+	litBorrows  map[litKey][]capturedBorrow
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the

@@ -793,9 +793,63 @@ func (st *state) findBorrowsInLit(fl *ast.FuncLit) []capturedBorrow {
 	return st.findBorrowsInLitInSyntax(fl, nil, 0)
 }
 
+// litKey identifies one findBorrowsInLitInSyntax query; depth is part of the key because the
+// nested-closure recursion is bounded by it.
+type litKey struct {
+	fl    *ast.FuncLit
+	outer ast.Node
+	depth int
+}
+
+// closureBindings maps each variable of the function syntax to the function literals assigned to
+// it (`f := func(){...}`, `f = func(){...}`, `var f = func(){...}`), in source order. Variables
+// are identified by their *types.Var, so a shadowing variable of the same name and a struct field
+// selector are different keys. The syntax is walked once and the result memoised.
+func (st *state) closureBindings(syntax ast.Node) map[*types.Var][]*ast.FuncLit {
+	if m, ok := st.litBindings[syntax]; ok {
+		return m
+	}
+	m := map[*types.Var][]*ast.FuncLit{}
+	bind := func(id *ast.Ident, rhs ast.Expr) {
+		fl, ok := unparen(rhs).(*ast.FuncLit)
+		if !ok {
+			return
+		}
+		if v, ok := st.pass.TypesInfo.ObjectOf(id).(*types.Var); ok && v != nil && !v.IsField() {
+			m[v] = append(m[v], fl)
+		}
+	}
+	ast.Inspect(syntax, func(n ast.Node) bool {
+		switch stmt := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range stmt.Lhs {
+				if id, ok := unparen(lhs).(*ast.Ident); ok && i < len(stmt.Rhs) {
+					bind(id, stmt.Rhs[i])
+				}
+			}
+		case *ast.ValueSpec:
+			for i, name := range stmt.Names {
+				if i < len(stmt.Values) {
+					bind(name, stmt.Values[i])
+				}
+			}
+		}
+		return true
+	})
+	if st.litBindings == nil {
+		st.litBindings = map[ast.Node]map[*types.Var][]*ast.FuncLit{}
+	}
+	st.litBindings[syntax] = m
+	return m
+}
+
 func (st *state) findBorrowsInLitInSyntax(fl *ast.FuncLit, outerSyntax ast.Node, depth int) []capturedBorrow {
 	if fl == nil || fl.Body == nil || depth > 4 {
 		return nil
+	}
+	key := litKey{fl: fl, outer: outerSyntax, depth: depth}
+	if res, ok := st.litBorrows[key]; ok {
+		return res
 	}
 	var res []capturedBorrow
 	seen := map[*types.Var]bool{}
@@ -816,40 +870,18 @@ func (st *state) findBorrowsInLitInSyntax(fl *ast.FuncLit, outerSyntax ast.Node,
 					res = append(res, capturedBorrow{vr: vr, name: vr.Name(), kindStr: kStr})
 				}
 			} else if outerSyntax != nil {
-				// Check if vr is bound to a FuncLit in outerSyntax (nested closure capture)
-				ast.Inspect(outerSyntax, func(sub ast.Node) bool {
-					switch stmt := sub.(type) {
-					case *ast.AssignStmt:
-						for i, lhs := range stmt.Lhs {
-							if i < len(stmt.Rhs) {
-								if lid := rootIdent(lhs); lid != nil && lid.Name == vr.Name() {
-									if innerFl, ok := unparen(stmt.Rhs[i]).(*ast.FuncLit); ok && innerFl != fl {
-										for _, b := range st.findBorrowsInLitInSyntax(innerFl, outerSyntax, depth+1) {
-											if !seen[b.vr] {
-												seen[b.vr] = true
-												res = append(res, b)
-											}
-										}
-									}
-								}
-							}
-						}
-					case *ast.ValueSpec:
-						for i, name := range stmt.Names {
-							if name.Name == vr.Name() && i < len(stmt.Values) {
-								if innerFl, ok := unparen(stmt.Values[i]).(*ast.FuncLit); ok && innerFl != fl {
-									for _, b := range st.findBorrowsInLitInSyntax(innerFl, outerSyntax, depth+1) {
-										if !seen[b.vr] {
-											seen[b.vr] = true
-											res = append(res, b)
-										}
-									}
-								}
-							}
+				// vr is bound to a FuncLit in outerSyntax (nested closure capture)
+				for _, innerFl := range st.closureBindings(outerSyntax)[vr] {
+					if innerFl == fl {
+						continue
+					}
+					for _, b := range st.findBorrowsInLitInSyntax(innerFl, outerSyntax, depth+1) {
+						if !seen[b.vr] {
+							seen[b.vr] = true
+							res = append(res, b)
 						}
 					}
-					return true
-				})
+				}
 			}
 		}
 		return true
@@ -857,6 +889,10 @@ func (st *state) findBorrowsInLitInSyntax(fl *ast.FuncLit, outerSyntax ast.Node,
 	sort.Slice(res, func(i, j int) bool {
 		return res[i].vr.Pos() < res[j].vr.Pos()
 	})
+	if st.litBorrows == nil {
+		st.litBorrows = map[litKey][]capturedBorrow{}
+	}
+	st.litBorrows[key] = res
 	return res
 }
 
@@ -913,37 +949,13 @@ func (st *state) identifyCapturedBorrowsSpawn(g *graph, sp spawnSite) []captured
 			}
 			// Case 2b: Variable-bound closure (go fn())
 			if id, ok := unparen(node.Call.Fun).(*ast.Ident); ok {
-				ast.Inspect(syntax, func(sub ast.Node) bool {
-					switch stmt := sub.(type) {
-					case *ast.AssignStmt:
-						for i, lhs := range stmt.Lhs {
-							if lid := rootIdent(lhs); lid != nil && lid.Name == id.Name {
-								if i < len(stmt.Rhs) {
-									if fl, ok := unparen(stmt.Rhs[i]).(*ast.FuncLit); ok {
-										if borrows := st.findBorrowsInLitInSyntax(fl, syntax, 0); len(borrows) > 0 {
-											addBorrows(borrows)
-											return false
-										}
-									}
-								}
-							}
-						}
-					case *ast.ValueSpec:
-						for i, name := range stmt.Names {
-							if name.Name == id.Name && i < len(stmt.Values) {
-								if fl, ok := unparen(stmt.Values[i]).(*ast.FuncLit); ok {
-									if borrows := st.findBorrowsInLitInSyntax(fl, syntax, 0); len(borrows) > 0 {
-										addBorrows(borrows)
-										return false
-									}
-								}
-							}
+				if v, ok := st.pass.TypesInfo.ObjectOf(id).(*types.Var); ok {
+					for _, fl := range st.closureBindings(syntax)[v] {
+						if borrows := st.findBorrowsInLitInSyntax(fl, syntax, 0); len(borrows) > 0 {
+							addBorrows(borrows)
+							break
 						}
 					}
-					return true
-				})
-				if len(foundBorrows) > 0 {
-					return false
 				}
 			}
 			return false
