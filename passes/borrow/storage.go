@@ -87,6 +87,9 @@ func allPackageFuncs(ssaProg *buildssa.SSA) []*ssa.Function {
 }
 
 func (sc *storageChecker) report(pos token.Pos, cat, msg string) {
+	if !pos.IsValid() {
+		pos = fallbackPos(sc.pass, nil)
+	}
 	if !pos.IsValid() || sc.ix.Mute(pos) {
 		return
 	}
@@ -464,7 +467,7 @@ func resolveInstructionPos(ins ssa.Instruction, fn *ssa.Function) token.Pos {
 			}
 		}
 	}
-	return token.NoPos
+	return fallbackPos(nil, fn)
 }
 
 func (sc *storageChecker) varEscapes(v *types.Var, syntax ast.Node) bool {
