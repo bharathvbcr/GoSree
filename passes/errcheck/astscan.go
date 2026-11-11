@@ -100,6 +100,10 @@ func scanFuncAST(pass *analysis.Pass, syntax ast.Node) *funcASTInfo {
 		fnType, body = n.Type, n.Body
 	case *ast.FuncLit:
 		fnType, body = n.Type, n.Body
+	case *ast.RangeStmt:
+		// The synthetic yield function of a range-over-func loop has the loop statement as its
+		// syntax. Its body is scanned exactly like a func literal body without result names.
+		body = n.Body
 	}
 	if body == nil {
 		return info
