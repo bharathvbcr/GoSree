@@ -97,6 +97,9 @@ func DecodePackage(frame []byte) ([]FuncIR, error) {
 		if numBlocks > MaxBlocks {
 			return nil, errors.New("GSE1 limit exceeded: num_blocks")
 		}
+		if err := checkStateCells(uint64(numBlocks), uint64(numSlots)); err != nil {
+			return nil, err
+		}
 
 		if pos+int(numSlots) > len(frame) {
 			return nil, errors.New("truncated GSE1 frame")
@@ -714,8 +717,165 @@ type deferCloseRec struct {
 // SolveOracle runs the pure-Go reference abstract-interpretation solver,
 // matching rust/gosree-errsolve bit-for-bit.
 func SolveOracle(ctx context.Context, funcs []FuncIR) (PackageResult, error) {
+	return solveOracle(ctx, funcs, MaxCallgraphIters)
+}
+
+// maxCanonClass mirrors MAX_CANON_CLASS in rust/gosree-errsolve/src/lib.rs.
+const maxCanonClass = 64
+
+// canonicalTuples mirrors canonical_tuples in rust/gosree-errsolve/src/lib.rs: it maps every
+// tuple to the smallest id of its logical call result. Tuples merge only when their error
+// slots are connected through phis, their flags agree, and their bind blocks are pairwise
+// unreachable from one another, so one check after a join promotes the companions of whichever
+// call ran, but two binds on one path (`a, err := f(); if retry { _, err = g() }`) stay
+// separate. It returns nil when nothing changes.
+func canonicalTuples(fn *FuncIR) []uint32 {
+	nTuples := len(fn.Tuples)
+	if nTuples < 2 {
+		return nil
+	}
+	anyPhi := false
+	for i := range fn.Blocks {
+		if len(fn.Blocks[i].Phis) > 0 {
+			anyPhi = true
+			break
+		}
+	}
+	if !anyPhi {
+		return nil
+	}
+	parent := make([]uint32, len(fn.SlotFlags))
+	for i := range parent {
+		parent[i] = uint32(i)
+	}
+	find := func(x uint32) uint32 {
+		for parent[x] != x {
+			parent[x] = parent[parent[x]]
+			x = parent[x]
+		}
+		return x
+	}
+	for i := range fn.Blocks {
+		for _, phi := range fn.Blocks[i].Phis {
+			for _, inc := range phi.Incoming {
+				a, b := find(phi.DstSlot), find(inc.SrcSlot)
+				if a != b {
+					parent[max(a, b)] = min(a, b)
+				}
+			}
+		}
+	}
+	bindBlocks := make([][]uint32, nTuples)
+	for bb := range fn.Blocks {
+		for oi := range fn.Blocks[bb].Ops {
+			op := &fn.Blocks[bb].Ops[oi]
+			if op.Kind != OpBindTuple {
+				continue
+			}
+			v := bindBlocks[op.TupleID]
+			if n := len(v); n == 0 || v[n-1] != uint32(bb) {
+				bindBlocks[op.TupleID] = append(v, uint32(bb))
+			}
+		}
+	}
+	type classKey struct {
+		root  uint32
+		flags uint8
+	}
+	classes := make(map[classKey][]uint32)
+	for t, meta := range fn.Tuples {
+		if meta.ErrSlot != NoneU32 && len(bindBlocks[t]) > 0 {
+			key := classKey{find(meta.ErrSlot), meta.Flags}
+			classes[key] = append(classes[key], uint32(t))
+		}
+	}
+	canon := make([]uint32, nTuples)
+	for t := range canon {
+		canon[t] = uint32(t)
+	}
+	changed := false
+	for _, members := range classes {
+		if len(members) < 2 || len(members) > maxCanonClass {
+			continue
+		}
+		reach := make(map[uint32][]bool)
+		for _, t := range members {
+			for _, bb := range bindBlocks[t] {
+				if _, ok := reach[bb]; !ok {
+					reach[bb] = reachableBlocksFromOracle(fn, bb)
+				}
+			}
+		}
+		exclusive := func(t, u uint32) bool {
+			for _, bt := range bindBlocks[t] {
+				for _, bu := range bindBlocks[u] {
+					if bt == bu || reach[bt][bu] || reach[bu][bt] {
+						return false
+					}
+				}
+			}
+			return true
+		}
+		var groups [][]uint32
+		for _, t := range members {
+			placed := false
+			for gi, g := range groups {
+				if slices.ContainsFunc(g, func(u uint32) bool { return !exclusive(t, u) }) {
+					continue
+				}
+				canon[t] = g[0]
+				changed = true
+				groups[gi] = append(g, t)
+				placed = true
+				break
+			}
+			if !placed {
+				groups = append(groups, []uint32{t})
+			}
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return canon
+}
+
+// withCanonicalTuples returns fn with every BindTuple rewritten to its canonical tuple id,
+// copying only the blocks it changes; fn itself is never modified.
+func withCanonicalTuples(fn FuncIR) FuncIR {
+	canon := canonicalTuples(&fn)
+	if canon == nil {
+		return fn
+	}
+	blocks := slices.Clone(fn.Blocks)
+	for bi := range blocks {
+		ops := blocks[bi].Ops
+		cloned := false
+		for oi := range ops {
+			if ops[oi].Kind != OpBindTuple || canon[ops[oi].TupleID] == ops[oi].TupleID {
+				continue
+			}
+			if !cloned {
+				ops = slices.Clone(ops)
+				blocks[bi].Ops = ops
+				cloned = true
+			}
+			ops[oi].TupleID = canon[ops[oi].TupleID]
+		}
+	}
+	fn.Blocks = blocks
+	return fn
+}
+
+// solveOracle is SolveOracle with an explicit call-graph iteration cap (tests pass a small cap
+// to reach it).
+func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (PackageResult, error) {
 	if ctx == nil {
 		return PackageResult{}, errors.New("gusseterr: nil context")
+	}
+	funcs := make([]FuncIR, len(funcsIn))
+	for i := range funcsIn {
+		funcs[i] = withCanonicalTuples(funcsIn[i])
 	}
 	nFuncs := len(funcs)
 	mayReturnNil := make([]bool, nFuncs)
@@ -728,7 +888,11 @@ func SolveOracle(ctx context.Context, funcs []FuncIR) (PackageResult, error) {
 	}
 
 	// Phase 1: Interprocedural call-graph fixpoint.
-	for range MaxCallgraphIters {
+	// The summaries only flip false -> true, so this converges in at most one sweep per
+	// function; a chain longer than the cap fails the package rather than exporting
+	// optimistic summaries that would hide ERR004 findings.
+	converged := false
+	for range maxCallgraphIters {
 		if err := ctx.Err(); err != nil {
 			return PackageResult{}, err
 		}
@@ -752,8 +916,12 @@ func SolveOracle(ctx context.Context, funcs []FuncIR) (PackageResult, error) {
 			}
 		}
 		if !anyChanged {
+			converged = true
 			break
 		}
+	}
+	if !converged {
+		return PackageResult{}, fmt.Errorf("gusseterr: call-graph summary fixpoint did not converge within %d iterations", maxCallgraphIters)
 	}
 
 	// Phase 2: Intraprocedural CFG fixpoint + diagnostic extraction.

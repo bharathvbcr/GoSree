@@ -25,7 +25,24 @@ const (
 	MaxCompanions        = 256
 	MaxIterationsPerFunc = 250_000
 	MaxCallgraphIters    = 4_096
+
+	// MaxStateCells bounds blocks x slots for one function. The solver holds four full
+	// abstract states per block (entry, exit and up to two outgoing edges): 4 x 28 = 112 bytes
+	// per (block, slot) cell in Rust, about 150 bytes per cell measured in the Go oracle. So
+	// 2^23 = 8,388,608 cells is at most 896 MiB of Rust state (about 1.2 GiB in the oracle) for
+	// the largest single function; states are freed between functions, so the bound does not
+	// multiply with MaxFuncs. Mirrors MAX_STATE_CELLS_PER_FUNC in rust/gosree-errsolve/src/lib.rs.
+	MaxStateCells = 8_388_608
 )
+
+// checkStateCells enforces MaxStateCells for one function; every encoder and decoder uses it so
+// both engines apply the identical rule.
+func checkStateCells(nBlocks, nSlots uint64) error {
+	if nBlocks*nSlots > MaxStateCells {
+		return fmt.Errorf("gusseterr: GSE1 limit exceeded: state cells (blocks x slots) %d x %d exceeds %d", nBlocks, nSlots, MaxStateCells)
+	}
+	return nil
+}
 
 // Function flags.
 const (
@@ -214,6 +231,9 @@ func EncodePackage(funcs []FuncIR) ([]byte, error) {
 		}
 		if len(fn.Blocks) > MaxBlocks {
 			return nil, fmt.Errorf("gusseterr: func %d blocks %d exceeds %d", fi, len(fn.Blocks), MaxBlocks)
+		}
+		if err := checkStateCells(uint64(len(fn.Blocks)), uint64(len(fn.SlotFlags))); err != nil {
+			return nil, fmt.Errorf("func %d: %w", fi, err)
 		}
 		buf = append(buf, fn.Flags)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(fn.SlotFlags)))
