@@ -293,11 +293,13 @@ func (fl *funcLowerer) emitObserveConcreteErrPtr(ops *[]gusseterr.OpIR, val ssa.
 	if val == nil || !isConcreteErrPtr(val.Type()) {
 		return
 	}
-	*ops = append(*ops, gusseterr.OpIR{
-		Kind:   gusseterr.OpObserveErr,
-		SiteID: 0,
-		SlotA:  fl.rootSlot(val),
-	})
+	// A pointer loaded from a variable cell (a captured variable lives in one) is a copy of the
+	// cell's slot, and the nil-check refinement can sit on either; observe both.
+	root := fl.rootSlot(val)
+	*ops = append(*ops, gusseterr.OpIR{Kind: gusseterr.OpObserveErr, SiteID: 0, SlotA: root})
+	if own := fl.slot(val); own != root {
+		*ops = append(*ops, gusseterr.OpIR{Kind: gusseterr.OpObserveErr, SiteID: 0, SlotA: own})
+	}
 }
 
 func (fl *funcLowerer) emitObserveErrVarsOnly(ops *[]gusseterr.OpIR, val ssa.Value) {
