@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"slices"
+	"testing"
+)
 
 // TestUnitcheckerMode: go vet runs the tool with flags and exactly one .cfg file. A command line that
 // merely ends in a .cfg argument, after other package arguments, is a standalone run: treating it as
@@ -52,5 +56,28 @@ func TestFlagEndAgreesWithParse(t *testing.T) {
 				t.Errorf("%q: positional tail %q, parse kept %q", args, rest, p.args)
 			}
 		}
+	}
+}
+
+func TestCfgDirAsPattern(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.MkdirAll("x.cfg", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("v.cfg", []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ in, want []string }{
+		{[]string{"-json", "./x.cfg"}, []string{"-json", "./x.cfg/."}},
+		{[]string{"v.cfg"}, []string{"v.cfg"}},
+		{[]string{"./a", "./x.cfg"}, []string{"./a", "./x.cfg"}},
+	} {
+		if got := cfgDirAsPattern(tc.in); !slices.Equal(got, tc.want) {
+			t.Errorf("cfgDirAsPattern(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if unitcheckerMode([]string{"./x.cfg"}) || !unitcheckerMode([]string{"v.cfg"}) {
+		t.Error("unitcheckerMode must be false for a directory and true for a file")
 	}
 }

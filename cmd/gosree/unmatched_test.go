@@ -9,12 +9,14 @@ import (
 )
 
 func TestUnmatchedWildcards(t *testing.T) {
-	matches := map[string][]string{"./a": {"m/a"}, "./a/...": {"m/a"}, "./empty/...": nil, "./also/...": nil}
-	list := func(p string) ([]string, error) {
-		if p == "./broken/..." {
-			return nil, errors.New("go list failed")
+	matched := map[string]bool{"./a": true, "./a/...": true}
+	list := func(pats []string) (map[string]bool, error) {
+		for _, p := range pats {
+			if p == "./broken/..." {
+				return nil, errors.New("go list failed or timed out")
+			}
 		}
-		return matches[p], nil
+		return matched, nil
 	}
 	for _, tc := range []struct {
 		args []string
@@ -49,10 +51,8 @@ func TestGoListOnThisModule(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(dir)
-	if got, err := goList("./a/..."); err != nil || len(got) != 1 {
-		t.Errorf("a wildcard with a package: %v, %v", got, err)
-	}
-	if got, err := goList("./empty/..."); err != nil || len(got) != 0 {
-		t.Errorf("a wildcard over a directory with no package: %v, %v", got, err)
+	got, err := goListMatches([]string{"./a", "./empty/...", "./a/..."})
+	if err != nil || !got["./a"] || !got["./a/..."] || got["./empty/..."] {
+		t.Errorf("one go list over three patterns: %v, %v", got, err)
 	}
 }

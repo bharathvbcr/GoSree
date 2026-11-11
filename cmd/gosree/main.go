@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -56,14 +57,15 @@ func main() {
 				fmt.Fprintln(os.Stderr, "gosree: WARNING: "+w)
 			}
 		}
-		os.Args = append(os.Args[:1:1], p.args...)
-		if !unitcheckerMode(p.args) {
-			for _, pat := range unmatchedWildcards(p.args, goList) {
-				fmt.Fprintf(os.Stderr, "gosree: WARNING: %s matched no packages, so nothing was checked for it\n", pat)
-			}
-		}
+		os.Args = append(os.Args[:1:1], cfgDirAsPattern(p.args)...)
 		if !unitcheckerMode(p.args) && p.goflags != "" {
 			os.Setenv("GOFLAGS", strings.TrimSpace(os.Getenv("GOFLAGS")+p.goflags))
+		}
+		if !unitcheckerMode(p.args) {
+			// After GOFLAGS carries -tags, so go list resolves patterns as the driver will.
+			for _, pat := range unmatchedWildcards(p.args, goListMatches) {
+				fmt.Fprintf(os.Stderr, "gosree: WARNING: %s matched no packages, so nothing was checked for it\n", pat)
+			}
 		}
 		if p.json && !unitcheckerMode(p.args) {
 			os.Exit(runJSON(p.args))
@@ -74,10 +76,30 @@ func main() {
 
 // unitcheckerMode reports whether go vet is driving: it runs the tool once per package with flags
 // and the path of one .cfg file as the only positional argument. Package patterns before a trailing
-// .cfg argument make it a standalone run, whatever the last argument looks like.
+// .cfg argument make it a standalone run, and so does a .cfg that is not a regular file (a package
+// directory named x.cfg).
 func unitcheckerMode(args []string) bool {
 	rest := args[flagEnd(args):]
-	return len(rest) == 1 && strings.HasSuffix(rest[0], ".cfg")
+	if len(rest) != 1 || !strings.HasSuffix(rest[0], ".cfg") {
+		return false
+	}
+	fi, err := os.Stat(rest[0])
+	return err != nil || fi.Mode().IsRegular() // a missing file is vet's error to report, not a pattern
+}
+
+// cfgDirAsPattern keeps multichecker from mistaking a package directory named x.cfg for go vet's
+// config file: it decides by the name alone when that is the only argument, so the directory is
+// given as "x.cfg/." (the same package).
+func cfgDirAsPattern(args []string) []string {
+	end := flagEnd(args)
+	rest := args[end:]
+	if len(rest) != 1 || !strings.HasSuffix(rest[0], ".cfg") || unitcheckerMode(args) {
+		return args
+	}
+	if fi, err := os.Stat(rest[0]); err != nil || !fi.IsDir() {
+		return args
+	}
+	return append(slices.Clone(args[:end]), strings.TrimSuffix(rest[0], "/")+"/.")
 }
 
 // vetxOnly reports whether go vet runs the tool on a dependency only to collect facts: the package
