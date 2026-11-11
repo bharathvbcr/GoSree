@@ -2,7 +2,9 @@
   FeatherweightGoSree.lean
   Formal Capability Calculus & Contracted Function-Hook Specification for GoSree
 
-  Inspired by Google DeepMind's AlphaProof Code §3.3 (Verification with Function Hooks):
+  Not machine-checked: no Lean toolchain runs in this repository. The Go reference model in
+  internal/formal mirrors it, and its test only checks that this file names the four hooks.
+
   Standard library shared-by-design overrides (`sync/atomic.Pointer[T]`, `error`,
   `context.CancelFunc`, `sync.Mutex`) are sound ONLY when paired with explicit
   capability preconditions on their boundaries rather than unverified blanket `Shareable`
@@ -26,7 +28,7 @@ inductive Ty where
   | slice2Word   : Ty                 -- `(ptr, len)` 2-word slice header (`rs_torn_slice`)
   | iface2Word   : Ty                 -- `(itab, data)` 2-word interface header (`rs_torn_iface`)
   | rawMap       : Ty                 -- unsynchronized runtime `hmap` (`rs_w_mapwrites`)
-  | structImm    : List Ty → Ty       -- `//safe:imm` struct whose fields are never mutated post-init
+  | structImm    : List Ty → Ty       -- `//gosree:imm` struct whose fields are never mutated post-init
   | structMut    : List Ty → Ty       -- mutable struct (`Router`, `Route`, `mutErr`)
   | atomicPtr    : Ty → Ty            -- `sync/atomic.Pointer[T]`
   | errorIface   : Ty                 -- `error` interface

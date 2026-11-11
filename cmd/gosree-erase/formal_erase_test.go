@@ -22,7 +22,7 @@ func init() {
 	panic("untrusted target init must never execute during translation validation")
 }
 
-//safe:imm
+//gosree:imm
 type Config struct {
 	Port int
 }

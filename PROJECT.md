@@ -113,7 +113,7 @@ Every feature is listed with the milestone it belongs to and the command that ch
 | 35 | `cmd/gosree` Preflight | Exit codes 0 clean, 1 failed, 2 usage, 3 findings; refuses `-fix` and `-diff`; forwards `-tags`; warns when a flag switches passes off | M5 | `go test ./cmd/gosree` |
 | 36 | Stdlib Concurrent Container Contracts (`capContracts`) | `passes/ownership/contracts.go` models `atomic.Pointer`, `atomic.Value`, `sync.Map`, `sync.Pool`, and `context.WithValue` as capability transfers (`Store`/`Put` consumes ownership, `Load`/`Get` yields `\imm`) | M2 | `go test ./passes/ownership` |
 | 37 | AST Erasure Equivalence Verification (`-verify`) | `cmd/gosree-erase -verify` validates exported API type equivalence and disassembled `.text` instruction equivalence against unannotated Go (`verify_equiv.go`) | M3 | `go test ./cmd/gosree-erase` |
-| 38 | Featherweight GoSree Formal Calculus | Executable small-step concurrent operational semantics and model checker (`internal/formal`) with Lean 4 formal capability specification (`specs/FeatherweightGoSree.lean`) | M2 | `go test ./internal/formal` |
+| 38 | Featherweight GoSree Formal Calculus | Go reference model of the container hook rules (`internal/formal`) and a Lean 4 sketch of them (`specs/FeatherweightGoSree.lean`, not machine-checked); not used by the analyzers | M2 | `go test ./internal/formal` |
 | 39 | Cross-Package Unsafe Ban Detection | `passes/unsafeban` detects cross-package `unsafe.Pointer` exposure via type aliases, function signatures, variables, maps, and interface methods (`SAFE001`) | M1 | `go test ./passes/unsafeban` |
 | 40 | Lockset Fixpoint Convergence & Alias Union-by-Size | `passes/ownership` implements path-prefix widening, DAG post-order worklist, and union-by-size in alias graphs, preventing self-hosting CPU hangs and nondeterminism | M2 | `go test ./passes/ownership` |
 
@@ -144,7 +144,7 @@ A milestone is complete when its check command exits 0. The stress suite takes m
 ├── cap/                    # Zero-cost generic type aliases (type Mut[T] = *T)
 ├── internal/
 │   ├── annot/              # Directive parser (//gosree: prefix); stale/ reports unused escape hatches
-│   ├── formal/             # Executable Featherweight GoSree operational semantics & model checker
+│   ├── formal/             # Go reference model of the container hook rules (not used by the analyzers)
 │   ├── gusseterr/          # Error-solver wire format, Gusset engine (unix and cgo), pure-Go oracle
 │   └── kinds/              # Type classification & immutability helpers
 ├── passes/
@@ -153,7 +153,7 @@ A milestone is complete when its check command exits 0. The stress suite takes m
 │   ├── ownership/          # Reference capabilities & concurrency pass (SAFE002-009, CAP003)
 │   └── errcheck/           # Error-discipline pass safeerr (ERR001-005)
 ├── rust/                   # Cargo workspace: gosree-errsolve (solver), gusset-engine (libgusset.a for Gusset)
-├── specs/                  # Formal Lean 4 specifications (FeatherweightGoSree.lean)
+├── specs/                  # Lean 4 sketch of the hook rules (not machine-checked)
 ├── tests/
 │   ├── e2e/                # Dual-track 4-tier acceptance test suite (12 top-level Go tests)
 │   ├── stress/             # Adversarial stress & runtime witness suite

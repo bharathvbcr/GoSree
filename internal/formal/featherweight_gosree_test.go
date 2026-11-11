@@ -19,7 +19,7 @@ func hasFaultKind(faults []formal.SafetyFault, want formal.SafetyFaultKind) bool
 }
 
 // TestUncontractedOverridesConvictedAndContractedHooksRestoreSoundness proves both halves
-// of the AlphaProof Code §3.3 Function Hook analysis on GoSree's concurrency witnesses:
+// of the contracted function-hook model on GoSree's concurrency witnesses:
 //  1. Under uncontracted stdlib overrides, all 5 witness shapes typecheck yet exhibit
 //     concrete data races / torn 2-word slice OOB / torn 2-word interface type confusion /
 //     concurrent map write crashes in the small-step concurrent operational semantics.
@@ -183,7 +183,7 @@ func TestContractedWellTypedConcurrentProgramsAreDataRaceFree(t *testing.T) {
 
 	wellTypedPrograms := []formal.Program{
 		{
-			// 1. Copy-on-write publication of //safe:imm Router via atomic.Pointer[ImmRouter]:
+			// 1. Copy-on-write publication of //gosree:imm Router via atomic.Pointer[ImmRouter]:
 			//    writers publish freshly allocated immutable snapshots (`Store`), readers `Load()` `CapImm`.
 			Name:        "cow_immutable_atomic_router",
 			AtomicTypes: map[int]formal.TypeDesc{1: immRouterTy},
@@ -242,7 +242,7 @@ func TestContractedWellTypedConcurrentProgramsAreDataRaceFree(t *testing.T) {
 			},
 		},
 		{
-			// 4. Contracted `//safe:imm` concrete error boxed into `error` and read concurrently.
+			// 4. Contracted `//gosree:imm` concrete error boxed into `error` and read concurrently.
 			Name: "contracted_immutable_error_broadcast",
 			Main: []formal.Stmt{
 				{Kind: formal.StmtAlloc, DstVar: "ie", AllocType: immErrTy, InitVal: formal.TwoWordValue{Word0: 404}},

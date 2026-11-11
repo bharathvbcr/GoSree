@@ -10,8 +10,8 @@ import (
 )
 
 // Regime selects whether stdlib overrides (`atomic.Pointer[T]`, `error`,
-// `context.CancelFunc`) are checked under uncontracted blanket overrides or
-// AlphaProof Code §3.3 contracted Function Hooks.
+// `context.CancelFunc`) are checked under uncontracted blanket overrides or under
+// contracted function hooks (capability preconditions at each call boundary).
 type Regime int
 
 const (
@@ -63,7 +63,7 @@ const (
 // TypeDesc describes the static layout and immutability annotation of a heap object.
 type TypeDesc struct {
 	Name      string
-	SafeImm   bool // marked //safe:imm and verified transitively free of mutable fields
+	SafeImm   bool // marked //gosree:imm and verified transitively free of mutable fields
 	FieldKind FieldKind
 }
 
@@ -210,7 +210,7 @@ func checkBlock(
 					addErr(i, "HookAtomicStore: publishing %q requires iso or imm capability, have %s", s.SrcVar, b.Cap)
 				}
 				if !deeplyShareablePointee(b.Type) {
-					addErr(i, "HookAtomicStore: pointee type %s is not //safe:imm (unsafe to share across AtomicPointer.Load without synchronization)", b.Type.Name)
+					addErr(i, "HookAtomicStore: pointee type %s is not //gosree:imm (unsafe to share across AtomicPointer.Load without synchronization)", b.Type.Name)
 				}
 				if b.Cap == CapIso {
 					b.Moved = true
@@ -269,7 +269,7 @@ func checkBlock(
 			}
 			if regime == RegimeContractedHooks {
 				if b.Cap != CapImm || !deeplyShareablePointee(b.Type) {
-					addErr(i, "HookBoxError: concrete error %q (%s, cap=%s) must be //safe:imm to satisfy Shareable(error)", s.SrcVar, b.Type.Name, b.Cap)
+					addErr(i, "HookBoxError: concrete error %q (%s, cap=%s) must be //gosree:imm to satisfy Shareable(error)", s.SrcVar, b.Type.Name, b.Cap)
 				}
 			}
 			env[s.DstVar] = Binding{

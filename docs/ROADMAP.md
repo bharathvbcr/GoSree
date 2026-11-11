@@ -20,7 +20,7 @@ Done:
 - lockset fixpoint convergence with path-prefix widening and DAG post-order worklist, eliminating self-hosting CPU hangs;
 - alias graph union-by-size and deterministic SSA value tie-breaking (`compareSSAValOrder`), resolving `RB-ORDER`;
 - NLL same-line, loop-carried back-edge, and backward-`goto` borrow tracking;
-- translation validation via `cmd/gosree-erase -verify`, and Featherweight GoSree formalization (`specs/FeatherweightGoSree.lean`, `internal/formal`);
+- translation validation via `cmd/gosree-erase -verify`, and a reference model of the container hook rules (`internal/formal`; the Lean sketch in `specs/` is not machine-checked);
 - items 1, 2 and 3 below;
 - item 4, closed with the reference service failing the thesis at its pin.
 
