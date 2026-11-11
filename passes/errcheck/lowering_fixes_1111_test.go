@@ -11,3 +11,7 @@ import (
 func TestRangeOverFuncBodies(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errrangefunc")
 }
+
+func TestDeferredCloseOnImplicitReturn(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errdeferend")
+}

@@ -1328,6 +1328,16 @@ func (fl *funcLowerer) lowerTerminator(b *ssa.BasicBlock, ops *[]gusseterr.OpIR)
 
 	case *ssa.Return:
 		if !t.Pos().IsValid() {
+			// A function that falls off its end exits through an implicit return with no source
+			// position. It is a real exit for deferred-close resolution, but it carries nothing for
+			// the return checks (no results, so no nilerr or companion uses).
+			if len(t.Results) == 0 {
+				return gusseterr.Terminator{
+					Kind:    gusseterr.TermReturn,
+					SiteID:  fl.siteForVal(token.NoPos, "return"),
+					RetSlot: gusseterr.NoneU32,
+				}
+			}
 			return gusseterr.Terminator{Kind: gusseterr.TermStop}
 		}
 		returnsErr := sigReturnsErrorLast(fl.fn.Signature)
