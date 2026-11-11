@@ -260,10 +260,11 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 		}
 	}
 
-	for len(queue) > 0 {
-		fn := queue[0]
-		queue = queue[1:]
-		enqueued[fn] = false
+	// Findings are emitted only after the origins reach their fixpoint: a hatch is recorded as used
+	// by a muted finding, and a muted finding made while an unhatched origin was still on its way
+	// (it arrives later through a longer call chain) would count the hatch as used for a write
+	// that is then reported anyway.
+	process := func(fn *ssa.Function, emitting bool) {
 		origins := shared[fn]
 		roots := make(map[ssa.Value]string, len(origins))
 		unmuted := make(map[ssa.Value]string, len(origins))
@@ -291,10 +292,12 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 					return
 				}
 				if root, ok := rootOf(w.addr); ok {
-					orig := origins[root]
-					emit(ins, orig, fmt.Sprintf(
-						"write through shared value loaded from %s%s; published atomic values are read-only once shared",
-						orig.desc, st.at(orig.pos)))
+					if emitting {
+						orig := origins[root]
+						emit(ins, orig, fmt.Sprintf(
+							"write through shared value loaded from %s%s; published atomic values are read-only once shared",
+							orig.desc, st.at(orig.pos)))
+					}
 				}
 				return
 			}
@@ -314,7 +317,7 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 				if mc := resolveClosureVal(a, 0); mc != nil {
 					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
 						for j, b := range mc.Bindings {
-							if root, ok := rootOf(b); ok && j < len(argFn.FreeVars) {
+							if root, ok := rootOf(b); ok && j < len(argFn.FreeVars) && !emitting {
 								add(argFn, argFn.FreeVars[j], origins[root])
 							}
 						}
@@ -334,10 +337,12 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 						continue
 					}
 					if root, ok := rootOf(a); ok {
-						orig := origins[root]
-						emit(ins, orig, fmt.Sprintf(
-							"shared value loaded from %s%s is passed to %s, which writes it; published atomic values are read-only once shared",
-							orig.desc, st.at(orig.pos), calleeName(callee)))
+						if emitting {
+							orig := origins[root]
+							emit(ins, orig, fmt.Sprintf(
+								"shared value loaded from %s%s is passed to %s, which writes it; published atomic values are read-only once shared",
+								orig.desc, st.at(orig.pos), calleeName(callee)))
+						}
 						return
 					}
 				}
@@ -347,16 +352,28 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 				if i >= len(callee.Params) {
 					break
 				}
-				if root, ok := rootOf(a); ok {
+				if root, ok := rootOf(a); ok && !emitting {
 					add(callee, callee.Params[i], origins[root])
 				}
 			}
 			for j, b := range bindings {
-				if root, ok := rootOf(b); ok && j < len(callee.FreeVars) {
+				if root, ok := rootOf(b); ok && j < len(callee.FreeVars) && !emitting {
 					add(callee, callee.FreeVars[j], origins[root])
 				}
 			}
 		})
+	}
+
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		enqueued[fn] = false
+		process(fn, false)
+	}
+	for _, fn := range fns {
+		if shared[fn] != nil {
+			process(fn, true)
+		}
 	}
 }
 

@@ -2,11 +2,16 @@ package ownership_test
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
+	"golang.org/x/tools/go/analysis"
+	"golang.org/x/tools/go/analysis/checker"
+
 	"golang.org/x/tools/go/analysis/analysistest"
 
+	"github.com/bharathvbcr/gosree/internal/annot/stale"
 	"github.com/bharathvbcr/gosree/passes/ownership"
 )
 
@@ -263,5 +268,80 @@ func TestLocksetReleaseWorkIsLinearOnCallDiamonds(t *testing.T) {
 	t.Logf("work = %d", work)
 	if work > 40*depth {
 		t.Fatalf("release summaries did %d units of work on a %d-deep call diamond, want at most %d", work, depth, 40*depth)
+	}
+}
+
+// Whether a //gosree:unsafe on one of two Loads that reach the same write is used must not depend
+// on how many calls separate the unhatched Load from the write: with a direct call and through a
+// hop, the write is reported (the unhatched Load reaches it) and the hatch, which muted nothing in
+// the end, is reported stale.
+func TestSharedLoadHatchVerdictIndependentOfCallDepth(t *testing.T) {
+	pkgs := loadTempModule(t, "1.27", map[string]string{"p/p.go": `package p
+
+import "sync/atomic"
+
+type Config struct{ Limit int }
+
+var liveDirect atomic.Pointer[Config]
+
+func aDirect() {
+	//gosree:unsafe reviewed for this caller only
+	c := liveDirect.Load()
+	mutateDirect(c)
+}
+
+func bDirect() {
+	c := liveDirect.Load()
+	mutateDirect(c)
+}
+
+func mutateDirect(c *Config) {
+	c.Limit = 1
+}
+
+var liveHop atomic.Pointer[Config]
+
+func aHop() {
+	//gosree:unsafe reviewed for this caller only
+	c := liveHop.Load()
+	mutateHop(c)
+}
+
+func bHop() {
+	c := liveHop.Load()
+	hop(c)
+}
+
+func hop(c *Config) { mutateHop(c) }
+
+func mutateHop(c *Config) {
+	c.Limit = 1
+}
+`})
+	g, err := checker.Analyze([]*analysis.Analyzer{ownership.Analyzer, stale.Analyzer}, pkgs, nil)
+	if err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	var writes, staleLines []int
+	for _, act := range g.Roots {
+		for _, d := range act.Diagnostics {
+			line := act.Package.Fset.Position(d.Pos).Line
+			switch {
+			case strings.Contains(d.Message, "write through shared value"):
+				writes = append(writes, line)
+			case strings.Contains(d.Message, "stale escape hatch"):
+				staleLines = append(staleLines, line)
+			}
+		}
+	}
+	sort.Ints(writes)
+	sort.Ints(staleLines)
+	// The writes are in mutateDirect (line 21) and mutateHop (line 40); the hatches on lines 10
+	// and 27 mute nothing in either shape.
+	if fmt.Sprint(writes) != "[21 40]" {
+		t.Errorf("reported writes at lines %v, want [21 40]", writes)
+	}
+	if fmt.Sprint(staleLines) != "[10 27]" {
+		t.Errorf("stale hatches at lines %v, want [10 27]: the verdict must not depend on call depth", staleLines)
 	}
 }
