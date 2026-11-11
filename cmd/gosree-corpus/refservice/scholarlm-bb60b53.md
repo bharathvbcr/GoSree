@@ -542,3 +542,9 @@ a production run (no `-tests`) on a `git archive` of `bb60b53` with this ledger,
   dependencies: 0 of 333 directives mute nothing. On the commit before it, that run died with a stack
   overflow in `passes/borrow.canHoldBorrow` on a type that contains a slice of itself.
 - Run time on `f9b5915`: 134 s wall, 7.8 GB peak RSS, under a load average near 200.
+- `-tests` is not re-measured. No `-tests` run has finished since the merge: the two `-tests` runs
+  in the item-4 worktree with binaries built after it (12:10 and 16:17) left empty logs, and a run on `f9b5915` stopped at a 60-minute cap with
+  no output (826 s CPU, 8.7 GB peak RSS). A stack sample of that run sat in
+  `passes/ownership.(*state).releaseSummaries` under `exportFacts`, in the equality checks of its
+  release set: the fixpoint appends release paths whose steps grow through recursive calls, for up
+  to 16 rounds. The `-tests` figures above (1,798 transfers, 25.1%) are from before the merge.
