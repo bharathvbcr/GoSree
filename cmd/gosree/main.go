@@ -12,7 +12,8 @@
 // Flags that would make a run cover less or pass what it should not are handled before the driver
 // sees them: -fix and -diff are refused; -tags is passed to the go command (the driver ignores
 // it); -json keeps the findings exit status (the driver exits 0 with findings in this mode);
-// -test=false and -NAME=false (or -NAME, which runs only that pass) print a warning on stderr.
+// -test=false and -NAME=false (or -NAME, which runs only that pass) print a warning on stderr, as
+// does a wildcard pattern that matches no package when another pattern does (exit status unchanged).
 package main
 
 import (
@@ -56,6 +57,11 @@ func main() {
 			}
 		}
 		os.Args = append(os.Args[:1:1], p.args...)
+		if !unitcheckerMode(p.args) {
+			for _, pat := range unmatchedWildcards(p.args, goList) {
+				fmt.Fprintf(os.Stderr, "gosree: WARNING: %s matched no packages, so nothing was checked for it\n", pat)
+			}
+		}
 		if !unitcheckerMode(p.args) && p.goflags != "" {
 			os.Setenv("GOFLAGS", strings.TrimSpace(os.Getenv("GOFLAGS")+p.goflags))
 		}
@@ -66,10 +72,12 @@ func main() {
 	multichecker.Main(analyzers...)
 }
 
-// unitcheckerMode reports whether go vet is driving: it runs the tool once per package with the
-// path of a .cfg file as the only argument.
+// unitcheckerMode reports whether go vet is driving: it runs the tool once per package with flags
+// and the path of one .cfg file as the only positional argument. Package patterns before a trailing
+// .cfg argument make it a standalone run, whatever the last argument looks like.
 func unitcheckerMode(args []string) bool {
-	return len(args) > 0 && strings.HasSuffix(args[len(args)-1], ".cfg")
+	rest := args[flagEnd(args):]
+	return len(rest) == 1 && strings.HasSuffix(rest[0], ".cfg")
 }
 
 // vetxOnly reports whether go vet runs the tool on a dependency only to collect facts: the package
@@ -78,7 +86,7 @@ func vetxOnly(args []string) bool {
 	if !unitcheckerMode(args) {
 		return false
 	}
-	data, err := os.ReadFile(args[len(args)-1])
+	data, err := os.ReadFile(args[len(args)-1]) // the one positional argument, the .cfg path
 	if err != nil {
 		return false
 	}
