@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/analysistest"
@@ -277,14 +276,20 @@ func callerChild(n *Node, c []bool) {
 }
 ` + diamond.String()
 	pkgs := loadTempModule(t, "1.27", map[string]string{"p/p.go": src})
-	start := time.Now()
 	g, err := checker.Analyze([]*analysis.Analyzer{ownership.Analyzer}, pkgs, nil)
-	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("Analyze: %v", err)
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("recursive releaseSummaries + closure phi diamond took %s (want < 2s)", elapsed)
+	// A work bound instead of a wall clock: the release summaries of this package do a few hundred
+	// units of work (call-graph visits, propagations, additions); an exponential walk does millions.
+	for _, act := range g.Roots {
+		if st, ok := act.Result.(*ownership.Stats); ok {
+			work, _, _ := ownership.ReleaseMetrics(st)
+			t.Logf("release summary work = %d", work)
+			if work > 500 {
+				t.Fatalf("recursive releaseSummaries did %d units of work (want <= 500)", work)
+			}
+		}
 	}
 	safe009 := map[int]bool{}
 	hasSafe003 := false

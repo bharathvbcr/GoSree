@@ -184,3 +184,84 @@ func register(mux *http.ServeMux) {
 	defer cleanup()
 	analysistest.Run(t, dir, ownership.Analyzer, "p")
 }
+
+func releaseMetricsOf(t *testing.T, src string) (work, stepCaps, countCaps int) {
+	t.Helper()
+	dir, cleanup, err := analysistest.WriteFiles(map[string]string{"p/p.go": src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	results := analysistest.Run(t, dir, ownership.Analyzer, "p")
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	stats, ok := results[0].Result.(*ownership.Stats)
+	if !ok {
+		t.Fatalf("result is %T, want *ownership.Stats", results[0].Result)
+	}
+	return ownership.ReleaseMetrics(stats)
+}
+
+// A release path longer than the step cap is widened to a prefix, and the widening is counted.
+func TestLocksetReleaseStepCapIsReached(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("package p\n\nimport \"sync\"\n\n")
+	b.WriteString("type L10 struct {\n\tmu sync.Mutex\n\t//gosree:guarded_by mu\n\tv int\n}\n\n")
+	for i := 9; i >= 0; i-- {
+		fmt.Fprintf(&b, "type L%d struct{ x L%d }\n\n", i, i+1)
+	}
+	b.WriteString("func unlockDeep(l *L0) { l.x.x.x.x.x.x.x.x.x.x.mu.Unlock() }\n\n")
+	b.WriteString("func unlockShallow(l *L9) { l.x.mu.Unlock() }\n")
+	_, stepCaps, countCaps := releaseMetricsOf(t, b.String())
+	if stepCaps == 0 {
+		t.Fatalf("the 11-step release never reached the step cap (stepCaps=%d)", stepCaps)
+	}
+	if countCaps != 0 {
+		t.Fatalf("countCaps = %d, want 0: no function has more than 32 releases", countCaps)
+	}
+}
+
+// A function with more than 32 distinct releases has the rest widened to its whole parameter. A
+// //gosree:holds helper that calls it is then reported as unlocking its mutex although it never
+// does: the widened release covers every mutex under t. This pins today's behaviour; whether a
+// widened release should say "may unlock" instead is an owner decision.
+func TestLocksetReleaseCountCapIsReached(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("package p\n\nimport \"sync\"\n\ntype Big struct {\n\tmu sync.Mutex\n\t//gosree:guarded_by mu\n\tv int\n")
+	for i := range 40 {
+		fmt.Fprintf(&b, "\tm%d sync.Mutex\n", i)
+	}
+	b.WriteString("}\n\nfunc unlockAll(t *Big) {\n")
+	for i := range 40 {
+		fmt.Fprintf(&b, "\tt.m%d.Unlock()\n", i)
+	}
+	b.WriteString("}\n\nfunc unlockTwo(t *Big) {\n\tt.m0.Unlock()\n\tt.m1.Unlock()\n}\n\n")
+	b.WriteString("//gosree:holds mu\nfunc (t *Big) viaWide() {\n\tunlockAll(t) // want \"SAFE007: viaWide is //gosree:holds mu but unlocks it here\"\n}\n\n")
+	b.WriteString("//gosree:holds mu\nfunc (t *Big) viaNarrow() {\n\tunlockTwo(t)\n}\n")
+	_, stepCaps, countCaps := releaseMetricsOf(t, b.String())
+	if countCaps == 0 {
+		t.Fatalf("40 releases never reached the 32-release cap (countCaps=%d)", countCaps)
+	}
+	if stepCaps != 0 {
+		t.Fatalf("stepCaps = %d, want 0", stepCaps)
+	}
+}
+
+// The release summaries of a call DAG are computed in work proportional to its size. A diamond of
+// depth 20 has 2^20 call paths; an implementation that walks paths, or that forgets which
+// functions it has visited, does about a million units of work where this one does a few hundred.
+func TestLocksetReleaseWorkIsLinearOnCallDiamonds(t *testing.T) {
+	const depth = 20
+	var b strings.Builder
+	b.WriteString("package p\n\nimport \"sync\"\n\ntype T struct {\n\tmu sync.Mutex\n\t//gosree:guarded_by mu\n\tv int\n}\n\n")
+	for i := range depth {
+		fmt.Fprintf(&b, "func d%d(t *T) { d%d(t); d%d(t) }\n\n", i, i+1, i+1)
+	}
+	fmt.Fprintf(&b, "func d%d(t *T) { t.mu.Unlock() }\n", depth)
+	work, _, _ := releaseMetricsOf(t, b.String())
+	t.Logf("work = %d", work)
+	if work > 40*depth {
+		t.Fatalf("release summaries did %d units of work on a %d-deep call diamond, want at most %d", work, depth, 40*depth)
+	}
+}

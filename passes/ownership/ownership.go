@@ -98,6 +98,18 @@ type Stats struct {
 	// named by //gosree:iso. Both are checked claims too.
 	Imm int `json:"imm_types"`
 	Iso int `json:"iso_params"`
+
+	// release records how much work the release summaries did and how often a cap widened one; it
+	// is read by tests and is not part of the JSON the corpus census writes.
+	release releaseMetrics
+}
+
+// releaseMetrics measures releaseSummaries. work counts its call-graph visits, propagations and
+// additions, which a linear algorithm keeps proportional to the call graph; stepCaps and countCaps
+// count the releases widened to a prefix because their path passed maxReleaseSteps steps or their
+// function had maxReleasesPerFn releases already.
+type releaseMetrics struct {
+	work, stepCaps, countCaps int
 }
 
 type state struct {
