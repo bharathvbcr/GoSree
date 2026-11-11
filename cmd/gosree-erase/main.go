@@ -401,11 +401,8 @@ func (o *options) verifyTargets(targets []target) error {
 				}
 			}
 		}
-		if _, err := VerifyDirectoryEquivalence(dir, files, o.erase); err != nil {
-			return fmt.Errorf("%s: %w", dir, err)
-		}
 	}
-	return nil
+	return VerifyDirectoriesEquivalence(byDir, o.erase)
 }
 
 // processFile erases one file, delivering the result as the options would for

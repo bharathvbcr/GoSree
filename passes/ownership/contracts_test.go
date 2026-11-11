@@ -43,7 +43,14 @@ var (
 	bufPool      = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 	initOnlyRoutes = map[string]int{"health": 1}
 	mutableRoutes  = map[string]int{"mut": 1} // want "SAFE006"
+	escapedRoutes  = map[string]int{"esc": 1}
+	appendBuf      = make([]int, 0, 4)
+	liveSlice      atomic.Pointer[SliceSnap]
 )
+
+type SliceSnap struct {
+	Items []int
+}
 
 type ctxKey struct{}
 
@@ -165,6 +172,19 @@ func initOnlyGlobalOuterStructStillKilled() {
 func mutatedGlobalInAtomicFreezeFailsClosed() {
 	mutableRoutes["mut"] = 2
 	liveCfg.Store(&Config{Limit: 1, Table: mutableRoutes}) // want "SAFE002" "SAFE004"
+}
+
+func ExportedRoutes() map[string]int { // want ExportedRoutes:"ownership summary"
+	return escapedRoutes
+}
+
+func escapedGlobalInAtomicFreezeFailsClosed() {
+	liveCfg.Store(&Config{Limit: 1, Table: escapedRoutes}) // want "SAFE002" "SAFE004"
+}
+
+func appendMutatedGlobalInAtomicFreezeFailsClosed() {
+	_ = append(appendBuf, 99)
+	liveSlice.Store(&SliceSnap{Items: appendBuf}) // want "SAFE002" "SAFE004"
 }
 `,
 	})

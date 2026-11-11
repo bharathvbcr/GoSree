@@ -28,15 +28,15 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 		}
 		forEachInstr(fn, func(ins ssa.Instruction) {
 			if w, ok := writeOf(ins); ok {
-				if w.grows {
-					return // append changes a package variable only through the store of its result
-				}
 				addr := w.addr
 				g, ok := globalRoot(addr)
 				if !ok || g.Pkg != st.ssa.Pkg {
 					return
 				}
 				mutated[g] = true
+				if w.grows {
+					return // append changes a package variable only through the store of its result
+				}
 				if _, guarded := st.slotOf(addr); guarded {
 					return // SAFE009 checks guarded variables and fields at every access
 				}
@@ -88,8 +88,92 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 			}
 		})
 	}
+	// In non-main packages, an unexported non-shareable package variable whose backing
+	// state escapes across an exported boundary (returned from an exported function/method,
+	// stored into an exported package variable or exported function parameter, or sent on a
+	// channel) can be mutated concurrently by external callers and is not init-only immutable.
+	if st.ssa.Pkg != nil && (st.ssa.Pkg.Pkg == nil || st.ssa.Pkg.Pkg.Name() != "main") {
+		scanFns := fns
+		if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil {
+			scanFns = append(append([]*ssa.Function(nil), fns...), pkgInit)
+		}
+		for _, fn := range scanFns {
+			exportedFn := fn.Parent() == nil && token.IsExported(fn.Name())
+			forEachInstr(fn, func(ins ssa.Instruction) {
+				switch x := ins.(type) {
+				case *ssa.Return:
+					if !exportedFn {
+						return
+					}
+					for _, r := range x.Results {
+						if g, ok := st.globalMutArg(r); ok {
+							mutated[g] = true
+						}
+					}
+				case *ssa.Store:
+					g, ok := st.globalMutArg(x.Val)
+					if !ok {
+						return
+					}
+					if dstG, ok := globalRoot(x.Addr); ok && dstG.Pkg == st.ssa.Pkg && token.IsExported(dstG.Name()) {
+						mutated[g] = true
+						return
+					}
+					if exportedFn && rootsAtParam(x.Addr, fn) {
+						mutated[g] = true
+					}
+				case *ssa.MapUpdate:
+					g, ok := st.globalMutArg(x.Value)
+					if !ok {
+						return
+					}
+					if dstG, ok := globalRoot(x.Map); ok && dstG.Pkg == st.ssa.Pkg && token.IsExported(dstG.Name()) {
+						mutated[g] = true
+						return
+					}
+					if exportedFn && rootsAtParam(x.Map, fn) {
+						mutated[g] = true
+					}
+				case *ssa.Send:
+					if g, ok := st.globalMutArg(x.X); ok {
+						mutated[g] = true
+					}
+				}
+			})
+		}
+	}
 	st.globalWrites = writes
 	st.mutatedGlobals = mutated
+}
+
+func rootsAtParam(v ssa.Value, fn *ssa.Function) bool {
+	for range 16 {
+		for _, p := range fn.Params {
+			if v == p {
+				return true
+			}
+		}
+		switch x := v.(type) {
+		case *ssa.UnOp:
+			if x.Op != token.MUL {
+				return false
+			}
+			v = x.X
+		case *ssa.FieldAddr:
+			v = x.X
+		case *ssa.IndexAddr:
+			v = x.X
+		case *ssa.Slice:
+			v = x.X
+		case *ssa.ChangeType:
+			v = x.X
+		case *ssa.Convert:
+			v = x.X
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func (st *state) checkGlobals() {
