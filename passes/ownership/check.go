@@ -200,7 +200,14 @@ func (st *state) checkDeferredUse(g *graph, t transfer, reg map[*node]bool, afte
 }
 
 func earliest(es []event) event {
-	sort.SliceStable(es, func(i, j int) bool { return es[i].pos < es[j].pos })
+	// Events come from a map walk, so equal positions are ordered by description to keep the
+	// diagnostic text the same from run to run.
+	sort.SliceStable(es, func(i, j int) bool {
+		if es[i].pos != es[j].pos {
+			return es[i].pos < es[j].pos
+		}
+		return es[i].desc < es[j].desc
+	})
 	for _, e := range es {
 		if e.pos.IsValid() {
 			return e
@@ -329,6 +336,18 @@ func (st *state) checkBorrowEscape(g *graph, t transfer) bool {
 	}
 
 	return false
+}
+
+// varAtPos returns the variable of set declared at pos, the one with the smallest name if several
+// are, so a map walk cannot choose between them.
+func varAtPos(set map[*types.Var]bool, pos token.Pos) *types.Var {
+	var best *types.Var
+	for v := range set {
+		if v.Pos().IsValid() && v.Pos() == pos && (best == nil || v.Name() < best.Name()) {
+			best = v
+		}
+	}
+	return best
 }
 
 func (st *state) borrowKind(v *types.Var) (string, bool) {
@@ -520,15 +539,11 @@ func (st *state) borrowFromValSeen(v ssa.Value, seen map[ssa.Value]bool) (*types
 			}
 			return nil, "", ""
 		case *ssa.Alloc:
-			for mv := range st.ix.MubVars {
-				if mv.Pos().IsValid() && mv.Pos() == x.Pos() {
-					return mv, mv.Name(), `\mub`
-				}
+			if mv := varAtPos(st.ix.MubVars, x.Pos()); mv != nil {
+				return mv, mv.Name(), `\mub`
 			}
-			for rv := range st.ix.RobVars {
-				if rv.Pos().IsValid() && rv.Pos() == x.Pos() {
-					return rv, rv.Name(), `\rob`
-				}
+			if rv := varAtPos(st.ix.RobVars, x.Pos()); rv != nil {
+				return rv, rv.Name(), `\rob`
 			}
 			if refs := x.Referrers(); refs != nil {
 				for _, ref := range *refs {
@@ -548,15 +563,11 @@ func (st *state) borrowFromValSeen(v ssa.Value, seen map[ssa.Value]bool) (*types
 						kStr = `\mub`
 					}
 					if alloc, ok := x.Call.Args[0].(*ssa.Alloc); ok {
-						for mv := range st.ix.MubVars {
-							if mv.Pos().IsValid() && mv.Pos() == x.Pos() {
-								return mv, mv.Name(), kStr
-							}
+						if mv := varAtPos(st.ix.MubVars, x.Pos()); mv != nil {
+							return mv, mv.Name(), kStr
 						}
-						for rv := range st.ix.RobVars {
-							if rv.Pos().IsValid() && rv.Pos() == x.Pos() {
-								return rv, rv.Name(), kStr
-							}
+						if rv := varAtPos(st.ix.RobVars, x.Pos()); rv != nil {
+							return rv, rv.Name(), kStr
 						}
 						if alloc.Comment != "" {
 							dummyVar := types.NewVar(x.Pos(), st.pass.Pkg, alloc.Comment, x.Type())
