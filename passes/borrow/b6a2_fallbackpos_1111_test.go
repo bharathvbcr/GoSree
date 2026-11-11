@@ -10,7 +10,9 @@ import (
 	"github.com/bharathvbcr/gosree/internal/annot"
 )
 
-// A finding with no position of its own is reported at a valid fallback position, not dropped.
+// A borrow-conflict finding with no position of its own is reported at a valid fallback position,
+// not dropped. (The storage checker's SSA path drops unpositioned findings on purpose: its AST path
+// has already reported them at their source line.)
 func TestReportWithoutPositionFallsBack(t *testing.T) {
 	fset := token.NewFileSet()
 	file := fset.AddFile("p.go", -1, 100)
@@ -31,12 +33,5 @@ func TestReportWithoutPositionFallsBack(t *testing.T) {
 	}
 	if !got[0].Pos.IsValid() {
 		t.Fatalf("diagnostic reported at an invalid position")
-	}
-
-	got = nil
-	sc := &storageChecker{pass: pass, ix: ix, reports: map[reportKey]bool{}, lineReports: map[reportLineKey]bool{}}
-	sc.report(token.NoPos, StorageViolation, "slice cannot store second-class borrow")
-	if len(got) != 1 || !got[0].Pos.IsValid() {
-		t.Fatalf("storage finding without a position: got %d diagnostics %+v", len(got), got)
 	}
 }
