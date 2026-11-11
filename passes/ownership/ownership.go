@@ -129,6 +129,8 @@ type state struct {
 	guardSums      *guardState
 	globalWrites   map[*ssa.Global][]token.Pos
 	mutatedGlobals map[*ssa.Global]bool
+	// immRets caches what each callee's single-result returns trace to (see immReturns).
+	immRets map[*ssa.Function][]immRet
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the

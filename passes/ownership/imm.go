@@ -207,6 +207,48 @@ func (st *state) checkImmWrite(ins ssa.Instruction, addr ssa.Value) {
 	st.report(pos, Imm, fmt.Sprintf("write to a field of %s, which is %s; imm values are only written by their composite literal", typeName(immType), prefix))
 }
 
+// immRet is what one single-result return of a function traces to: the imm type met on the way,
+// if any, and the value the trace stopped at. isParam is set when that value is a parameter, and
+// param is its index in the function's Params (-1 if it is another function's parameter).
+type immRet struct {
+	immType types.Type
+	root    ssa.Value
+	isParam bool
+	param   int
+}
+
+// immReturns traces each single-result return of callee once per pass and caches the result. While
+// a callee's returns are being traced it has no cached returns, so a recursive call contributes
+// nothing and every function is traced at most once. Tracing each return afresh at every call site,
+// with a copy of the caller's seen set, explored every ordering of a recursive function's returns:
+// exponential in the number of recursive return sites.
+func (st *state) immReturns(callee *ssa.Function) []immRet {
+	if rs, ok := st.immRets[callee]; ok {
+		return rs
+	}
+	if st.immRets == nil {
+		st.immRets = map[*ssa.Function][]immRet{}
+	}
+	st.immRets[callee] = nil // in progress: a recursive call sees no returns
+	var rs []immRet
+	for _, b := range callee.Blocks {
+		for _, ins := range b.Instrs {
+			ret, ok := ins.(*ssa.Return)
+			if !ok || len(ret.Results) != 1 {
+				continue
+			}
+			it, root, _ := st.traceImmAddr(ret.Results[0], map[ssa.Value]bool{})
+			r := immRet{immType: it, root: root, param: -1}
+			if p, ok := root.(*ssa.Parameter); ok {
+				r.isParam, r.param = true, slices.Index(callee.Params, p)
+			}
+			rs = append(rs, r)
+		}
+	}
+	st.immRets[callee] = rs
+	return rs
+}
+
 func (st *state) traceImmAddr(v ssa.Value, seen map[ssa.Value]bool) (types.Type, ssa.Value, token.Pos) {
 	var immType types.Type
 	x := v
@@ -247,40 +289,29 @@ func (st *state) traceImmAddr(v ssa.Value, seen map[ssa.Value]bool) (types.Type,
 			x = a.X
 		case *ssa.Call:
 			if callee := a.Call.StaticCallee(); callee != nil && len(callee.Blocks) > 0 {
-				for _, b := range callee.Blocks {
-					for _, ins := range b.Instrs {
-						ret, ok := ins.(*ssa.Return)
-						if !ok || len(ret.Results) != 1 {
+				for _, r := range st.immReturns(callee) {
+					switch {
+					case r.isParam:
+						if r.param < 0 || r.param >= len(a.Call.Args) {
 							continue
 						}
-						subSeen := make(map[ssa.Value]bool, len(seen))
-						for k, val := range seen {
-							subSeen[k] = val
-						}
-						it, root, _ := st.traceImmAddr(ret.Results[0], subSeen)
-						if p, ok := root.(*ssa.Parameter); ok {
-							for pi, cp := range callee.Params {
-								if cp == p && pi < len(a.Call.Args) {
-									if it != nil {
-										if !firstPos.IsValid() {
-											firstPos = a.Pos()
-										}
-										return it, a.Call.Args[pi], firstPos
-									}
-									if argIt, argRoot, _ := st.traceImmAddr(a.Call.Args[pi], seen); argIt != nil {
-										if !firstPos.IsValid() {
-											firstPos = a.Pos()
-										}
-										return argIt, argRoot, firstPos
-									}
-								}
-							}
-						} else if it != nil {
+						if r.immType != nil {
 							if !firstPos.IsValid() {
 								firstPos = a.Pos()
 							}
-							return it, root, firstPos
+							return r.immType, a.Call.Args[r.param], firstPos
 						}
+						if argIt, argRoot, _ := st.traceImmAddr(a.Call.Args[r.param], seen); argIt != nil {
+							if !firstPos.IsValid() {
+								firstPos = a.Pos()
+							}
+							return argIt, argRoot, firstPos
+						}
+					case r.immType != nil:
+						if !firstPos.IsValid() {
+							firstPos = a.Pos()
+						}
+						return r.immType, r.root, firstPos
 					}
 				}
 			}
