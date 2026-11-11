@@ -230,6 +230,8 @@ type ServerConfig struct {
 ### Semantics
 Package-level global variables must not be mutated outside package `init()` functions unless protected by a declared mutex guard (`//gosree:guarded_by <mu>`). The diagnostic is reported once at the global variable's declaration, with all mutation sites listed as related positions.
 
+A package variable written only during initialisation can be published in a composite literal through a concurrent container (`liveCfg.Store(&Config{Table: routes})`) without `SAFE002`/`SAFE004`. This holds only while the variable stays init-only: if its memory escapes anywhere outside `init` (returned, stored in another package variable, or passed to a callee that may keep it), it is treated as mutable and the publish is reported (`markEscapedGlobals` in `passes/ownership/globals.go`). Passing it to a `fmt` or `log` printing call does not count as an escape, unless a type the call would reach has a `String`, `Error`, `Format`, `GoString` or `Write` method, or is an interface. Fmt could run such a method, and the method could keep the value.
+
 ### Failing Example
 ```go
 package example
