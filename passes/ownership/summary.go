@@ -604,11 +604,23 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 			// What a publishing call hands back (a container returns what it holds) joins the
 			// memory of what was published. That is the publish too, not something else done
 			// with the parameter.
+			//
+			// Nor is what a forward does with another of its arguments: the call that hands this
+			// parameter to a function this function was given hands the others to it too, each
+			// accounted to its own parameter and decided at each call of this function. Where the
+			// called function joins them (a key and the value stored under it), the other
+			// argument's event is in this parameter's region.
 			publishedAt := map[ssa.Instruction]bool{}
+			forwardedAt := map[ssa.Instruction]bool{}
 			for c := range g.region(n) {
 				for _, e := range c.events {
-					if e.kind == evTransfer && e.accountedTo(i) && e.instr != nil {
-						publishedAt[e.instr] = true
+					if e.accountedTo(i) && e.instr != nil {
+						switch e.kind {
+						case evTransfer:
+							publishedAt[e.instr] = true
+						case evEscape:
+							forwardedAt[e.instr] = true
+						}
 					}
 				}
 			}
@@ -617,7 +629,7 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 				if !leak(e) {
 					return false
 				}
-				if !e.accountedTo(i) && !(e.kind == evForeign && publishedAt[e.instr]) {
+				if !e.accountedTo(i) && !(e.kind == evForeign && publishedAt[e.instr]) && !(e.kind == evEscape && e.byContract != 0 && forwardedAt[e.instr]) {
 					s.leakBesides[i] = true
 				}
 				return true
