@@ -21,6 +21,7 @@
 package ownership
 
 import (
+	"go/ast"
 	"go/token"
 	"go/types"
 	"reflect"
@@ -114,6 +115,18 @@ type Stats struct {
 	Iso int `json:"iso_params"`
 }
 
+// observeRelease, when set (by tests only), receives the metrics of each package's release
+// summaries. They are not part of Stats: the corpus census sums every Stats field.
+var observeRelease func(pkg *types.Package, m releaseMetrics)
+
+// releaseMetrics measures releaseSummaries. work counts its call-graph visits, propagations and
+// additions, which a linear algorithm keeps proportional to the call graph; stepCaps and countCaps
+// count the releases widened to a prefix because their path passed maxReleaseSteps steps or their
+// function had maxReleasesPerFn releases already.
+type releaseMetrics struct {
+	work, stepCaps, countCaps int
+}
+
 type state struct {
 	pass    *analysis.Pass
 	ix      *annot.Index
@@ -164,6 +177,11 @@ type state struct {
 	// clear it before a trace and read it after, to report a call whose callees could not all be
 	// found.
 	originCut bool
+
+	// litBindings and litBorrows memoise the closure lookups of findBorrowsInLitInSyntax, so the
+	// enclosing function is walked once, not once per identifier.
+	litBindings map[ast.Node]map[*types.Var][]*ast.FuncLit
+	litBorrows  map[litKey][]capturedBorrow
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the

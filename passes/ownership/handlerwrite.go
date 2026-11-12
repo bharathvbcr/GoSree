@@ -70,17 +70,22 @@ func (fr frame) into(callee *ssa.Function, ins ssa.Instruction, last token.Pos) 
 
 // checkHandlerWrites reports SAFE008 for the handler registered at sp.
 func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
-	body, roots := handlerRoots(st.ssa.Pkg.Prog, sp)
-	if body == nil || len(roots) == 0 {
-		return
-	}
 	walk := newRootWalk(st.summary)
-	start := frame{fn: body}
-	shared := map[frame]map[ssa.Value]string{start: roots}
+	shared := map[frame]map[ssa.Value]string{}
 	// A frame waits in the queue once however many values are added to it meanwhile: queueing it
 	// per value scanned a function with a hundred shared parameters a hundred times.
-	queue := []frame{start}
-	queued := map[frame]bool{start: true}
+	var queue []frame
+	queued := map[frame]bool{}
+	for _, h := range handlerRoots(st.ssa.Pkg.Prog, sp) {
+		if start := (frame{fn: h.fn}); len(h.roots) > 0 {
+			shared[start] = h.roots
+			queue = append(queue, start)
+			queued[start] = true
+		}
+	}
+	if len(queue) == 0 {
+		return
+	}
 	add := func(fr frame, v ssa.Value, desc string) {
 		if shared[fr] == nil {
 			shared[fr] = map[ssa.Value]string{}
@@ -240,66 +245,79 @@ func (st *state) followable(fn *ssa.Function) bool {
 	return fn.Pkg == nil && fn.Synthetic != "" && !strings.HasPrefix(fn.Synthetic, "from type information")
 }
 
-// handlerRoots returns the function a repeated spawner runs and the values in it that every
-// invocation shares, each with its description. Handlers that do not resolve to a function body of
-// this program give nothing.
-func handlerRoots(prog *ssa.Program, sp spawnSite) (*ssa.Function, map[ssa.Value]string) {
+// handlerBody is a function a repeated spawner may run and the values in it that every invocation
+// shares, each with its description.
+type handlerBody struct {
+	fn    *ssa.Function
+	roots map[ssa.Value]string
+}
+
+// handlerRoots returns the functions a repeated spawner may run, each with its shared roots.
+// Handlers that do not resolve to a function body of this program give nothing. A factory is
+// followed through every one of its returns, so an early `return nil` guard does not hide the
+// handler it builds further down; a result that is not a function (nil, an error) adds nothing.
+// Each value is looked at once, so the walk ends without a count: a constructor that leads back
+// to a value already visited (one that only ever returns its own result) builds no handler.
+func handlerRoots(prog *ssa.Program, sp spawnSite) []handlerBody {
 	if !sp.repeated {
-		return nil, nil
+		return nil
 	}
-	// Each turn moves to a value not seen before, so the walk ends without a count: at a handler, at
-	// a value it cannot see through, or where a constructor leads back to a value already visited (one
-	// that only ever returns its own result builds no handler).
-	v := sp.fn
-	for seen := map[ssa.Value]bool{}; !seen[v]; {
+	var out []handlerBody
+	index := map[*ssa.Function]int{}
+	add := func(fn *ssa.Function, roots map[ssa.Value]string) {
+		if i, ok := index[fn]; ok {
+			for v, d := range roots {
+				if _, dup := out[i].roots[v]; !dup {
+					out[i].roots[v] = d
+				}
+			}
+			return
+		}
+		index[fn] = len(out)
+		out = append(out, handlerBody{fn, roots})
+	}
+	seen := map[ssa.Value]bool{}
+	var resolve func(v ssa.Value)
+	resolve = func(v ssa.Value) {
+		if v == nil || seen[v] {
+			return
+		}
 		seen[v] = true
 		switch x := v.(type) {
 		case *ssa.ChangeType:
-			v = x.X
-			continue
+			resolve(x.X)
 		case *ssa.Call:
 			if callee := x.Call.StaticCallee(); callee != nil && len(callee.Blocks) > 0 {
-				var retVal ssa.Value
+				returned := false
 				for _, b := range callee.Blocks {
 					for _, ins := range b.Instrs {
 						if ret, ok := ins.(*ssa.Return); ok && len(ret.Results) == 1 {
-							retVal = ret.Results[0]
-							break
+							returned = true
+							resolve(ret.Results[0])
 						}
 					}
-					if retVal != nil {
-						break
-					}
 				}
-				if retVal != nil {
-					v = retVal
-					continue
+				if returned {
+					return
 				}
 			}
-			var innerArg ssa.Value
 			for _, a := range x.Call.Args {
 				if spawnedFunc(prog, a, true) != nil {
-					innerArg = a
-					break
+					resolve(a)
+					return
 				}
 			}
-			if innerArg != nil {
-				v = innerArg
-				continue
-			}
-			return nil, nil
 		case *ssa.MakeInterface:
 			if fn := spawnedFunc(prog, x, true); fn != nil {
 				if _, isClosure := unwrapToClosure(x); !isClosure {
 					// A handler value: ServeHTTP shares its receiver.
-					if len(fn.Params) == 0 {
-						return nil, nil
+					if len(fn.Params) > 0 {
+						add(fn, map[ssa.Value]string{fn.Params[0]: "receiver " + fn.Params[0].Name()})
 					}
-					return fn, map[ssa.Value]string{fn.Params[0]: "receiver " + fn.Params[0].Name()}
+					return
 				}
 			}
-			v = x.X
-			continue
+			resolve(x.X)
 		case *ssa.MakeClosure:
 			fn := x.Fn.(*ssa.Function)
 			roots := map[ssa.Value]string{}
@@ -310,11 +328,11 @@ func handlerRoots(prog *ssa.Program, sp spawnSite) (*ssa.Function, map[ssa.Value
 					roots[fv] = "captured variable " + fv.Name()
 				}
 			}
-			return fn, roots
+			add(fn, roots)
 		}
-		return nil, nil
 	}
-	return nil, nil
+	resolve(sp.fn)
+	return out
 }
 
 // unwrapToClosure reports whether a boxed handler is a converted function value (http.HandlerFunc).

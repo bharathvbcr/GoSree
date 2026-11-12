@@ -5,7 +5,8 @@
 # Every number it prints is measured on this run: top-level tests passed, failed and
 # skipped per tier come from `go test -v`, and expectations are the `// want` lines in
 # each tier's testdata. The status is PASSED only when go test exits 0 and reported no
-# failure; otherwise the go test output is printed and the script exits non-zero.
+# failure and every requested tier ran at least one test (a tier that ran nothing fails the run);
+# otherwise the go test output is printed and the script exits non-zero.
 # ==============================================================================
 set -uo pipefail
 
@@ -21,7 +22,12 @@ usage() {
   echo ""
   echo "  --tier <1|2|3|4|all>  run one acceptance tier (default: all)"
   echo "  -v, --verbose         stream go test -v output"
-  echo "  --json                print the summary as JSON"
+  echo "  --json                print the summary as JSON (stdout is only the JSON; go test output"
+  echo "                        from -v goes to stderr)"
+  echo ""
+  echo "Environment:"
+  echo "  GOSREE_ACCEPTANCE_FILTER  override the go test -run filter of the chosen tiers (for testing"
+  echo "                            this script); a tier that then runs no test fails the run"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -44,6 +50,8 @@ case "${TIER}" in
   *) echo "invalid tier '${TIER}': choose 1, 2, 3, 4 or all" >&2; exit 2 ;;
 esac
 
+TEST_FILTER="${GOSREE_ACCEPTANCE_FILTER:-${TEST_FILTER}}"
+
 cd "${REPO_DIR}"
 OUT="$(mktemp -t gosree-e2e.XXXXXX)"
 trap 'rm -f "${OUT}"' EXIT
@@ -62,7 +70,12 @@ count() { grep -c -E "$1" "${OUT}" || true; }
 
 SECONDS=0
 if [[ "${VERBOSE}" == true ]]; then
-  go test -count=1 -v -run "${TEST_FILTER}" ./tests/e2e 2>&1 | tee "${OUT}"
+  # With --json, stdout carries only the JSON, so the stream goes to stderr.
+  if [[ "${JSON_OUTPUT}" == true ]]; then
+    go test -count=1 -v -run "${TEST_FILTER}" ./tests/e2e 2>&1 | tee "${OUT}" >&2
+  else
+    go test -count=1 -v -run "${TEST_FILTER}" ./tests/e2e 2>&1 | tee "${OUT}"
+  fi
   TEST_EXIT_CODE=${PIPESTATUS[0]}
 else
   go test -count=1 -v -run "${TEST_FILTER}" ./tests/e2e > "${OUT}" 2>&1
@@ -72,17 +85,20 @@ DURATION_S=${SECONDS}
 
 TOTAL_PASS=0; TOTAL_FAIL=0; TOTAL_SKIP=0; TOTAL_WANT=0
 declare -a ROWS=()
+EMPTY_TIERS=""
 for t in "${TIERS[@]}"; do
   p=$(count "^--- PASS: TestTier${t}_")
   f=$(count "^--- FAIL: TestTier${t}_")
   s=$(count "^--- SKIP: TestTier${t}_")
   w=$(want_lines "$t")
   ROWS+=("$t $p $f $s $w")
+  # A tier that ran nothing proved nothing, whatever the other tiers did.
+  if [[ $((p + f + s)) -eq 0 ]]; then EMPTY_TIERS="${EMPTY_TIERS:+${EMPTY_TIERS} }${t}"; fi
   TOTAL_PASS=$((TOTAL_PASS + p)); TOTAL_FAIL=$((TOTAL_FAIL + f))
   TOTAL_SKIP=$((TOTAL_SKIP + s)); TOTAL_WANT=$((TOTAL_WANT + w))
 done
 
-if [[ "${TEST_EXIT_CODE}" -eq 0 && "${TOTAL_FAIL}" -eq 0 && "${TOTAL_PASS}" -gt 0 ]]; then
+if [[ "${TEST_EXIT_CODE}" -eq 0 && "${TOTAL_FAIL}" -eq 0 && "${TOTAL_PASS}" -gt 0 && -z "${EMPTY_TIERS}" ]]; then
   STATUS="PASSED"
 else
   STATUS="FAILED"
@@ -117,6 +133,10 @@ if [[ "${STATUS}" == "PASSED" ]]; then
   echo "PASSED"
   exit 0
 fi
-echo "FAILED (go test exit code ${TEST_EXIT_CODE})"
+if [[ -n "${EMPTY_TIERS}" ]]; then
+  echo "FAILED (tier(s) ${EMPTY_TIERS} ran no tests; go test exit code ${TEST_EXIT_CODE})"
+else
+  echo "FAILED (go test exit code ${TEST_EXIT_CODE})"
+fi
 [[ "${VERBOSE}" == true ]] || cat "${OUT}"
 exit 1

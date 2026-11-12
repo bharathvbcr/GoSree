@@ -143,8 +143,10 @@ func (f *FuncFact) GobDecode(data []byte) error {
 	if f.Writes, rest, err = readBoolBits(rest); err != nil {
 		return err
 	}
+	// Every link takes at least four bytes and every acquire four, so a count larger than the
+	// remaining bytes allow is corrupt, and no allocation is sized from an unchecked count.
 	nLinks, r := binary.Uvarint(rest)
-	if r <= 0 || nLinks > 1<<20 {
+	if r <= 0 || nLinks > 1<<20 || nLinks > uint64(len(rest)-r)/4 {
 		return errors.New("corrupt FuncFact links length")
 	}
 	rest = rest[r:]
@@ -166,7 +168,7 @@ func (f *FuncFact) GobDecode(data []byte) error {
 		f.Links = nil
 	}
 	nAcq, r := binary.Uvarint(rest)
-	if r <= 0 || nAcq > 1<<20 {
+	if r <= 0 || nAcq > 1<<20 || nAcq > uint64(len(rest)-r)/4 {
 		return errors.New("corrupt FuncFact acquires length")
 	}
 	rest = rest[r:]
@@ -184,7 +186,8 @@ func (f *FuncFact) GobDecode(data []byte) error {
 			}
 			rest = rest[nr:]
 			sLen, nr := binary.Uvarint(rest)
-			if nr <= 0 || int(sLen) > len(rest)-nr-1 {
+			// The steps and the mode byte after them must both fit in what is left.
+			if nr <= 0 || len(rest)-nr < 1 || sLen > uint64(len(rest)-nr-1) {
 				return errors.New("truncated FuncFact acquire steps")
 			}
 			rest = rest[nr:]

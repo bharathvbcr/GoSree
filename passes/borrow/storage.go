@@ -62,17 +62,23 @@ type reportLineKey struct {
 
 // locate returns where a finding is reported and what it says. A finding with no position used to be
 // dropped, which is how a defect comes to read as clean. It is reported at the function it is in
-// (fn, where the caller has one), else at the package clause, and its message says so; located is
-// false then.
+// (fn, where the caller has one, or the nearest function around fn that has a position), else at
+// the package clause, and its message says so; located is false then.
 func locate(pass *analysis.Pass, pos token.Pos, fn *ssa.Function, msg string) (at token.Pos, text string, located bool) {
 	if pos.IsValid() {
 		return pos, msg, true
 	}
+	in := enclosingFuncPos(fn)
 	switch {
-	case fn != nil && fn.Pos().IsValid():
-		return fn.Pos(), msg + "; the code this is about has no source position, so it is reported at the function it is in", false
+	case in.IsValid():
+		return in, msg + "; the code this is about has no source position, so it is reported at the function it is in", false
 	case len(pass.Files) > 0:
-		return pass.Files[0].Name.Pos(), msg + "; the code this is about has no source position, so it is reported at the package clause", false
+		// The package name, else the package keyword: a file built in memory may carry only one.
+		at := pass.Files[0].Name.Pos()
+		if !at.IsValid() {
+			at = pass.Files[0].Package
+		}
+		return at, msg + "; the code this is about has no source position, so it is reported at the package clause", false
 	}
 	return pos, msg, false
 }
@@ -1176,10 +1182,10 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 				isBorrowVal[fv] = true
 			}
 		}
-		for v, fld := range structVarHoldsBorrow {
-			if (fv.Pos().IsValid() && v.Pos().IsValid() && fv.Pos() == v.Pos()) || fv.Name() == v.Name() {
-				structHoldsBorrow[fv] = fld
-			}
+		if fld, ok := heldVarField(structVarHoldsBorrow, func(v *types.Var) bool {
+			return (fv.Pos().IsValid() && v.Pos().IsValid() && fv.Pos() == v.Pos()) || fv.Name() == v.Name()
+		}); ok {
+			structHoldsBorrow[fv] = fld
 		}
 	}
 
@@ -1272,10 +1278,10 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 				isBorrowVal[l] = true
 			}
 		}
-		for v, fld := range structVarHoldsBorrow {
-			if (l.Pos().IsValid() && v.Pos().IsValid() && l.Pos() == v.Pos()) || v.Name() == l.Comment {
-				structHoldsBorrow[l] = fld
-			}
+		if fld, ok := heldVarField(structVarHoldsBorrow, func(v *types.Var) bool {
+			return (l.Pos().IsValid() && v.Pos().IsValid() && l.Pos() == v.Pos()) || v.Name() == l.Comment
+		}); ok {
+			structHoldsBorrow[l] = fld
 		}
 	}
 
@@ -1288,10 +1294,10 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 						isBorrowVal[alloc] = true
 					}
 				}
-				for v, fld := range structVarHoldsBorrow {
-					if (alloc.Pos().IsValid() && v.Pos().IsValid() && alloc.Pos() == v.Pos()) || (alloc.Comment != "" && alloc.Comment == v.Name()) {
-						structHoldsBorrow[alloc] = fld
-					}
+				if fld, ok := heldVarField(structVarHoldsBorrow, func(v *types.Var) bool {
+					return (alloc.Pos().IsValid() && v.Pos().IsValid() && alloc.Pos() == v.Pos()) || (alloc.Comment != "" && alloc.Comment == v.Name())
+				}); ok {
+					structHoldsBorrow[alloc] = fld
 				}
 			}
 		}
@@ -1340,12 +1346,10 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 							"borrow stored in struct field '%s' escapes stack frame", fld))
 						return
 					}
-					for sVal, fld := range structHoldsBorrow {
-						if isDerivedFrom(ins.Val, sVal) {
-							sc.report(pos, StorageViolation, fmt.Sprintf(
-								"borrow stored in struct field '%s' escapes stack frame", fld))
-							return
-						}
+					if fld, ok := derivedHolderField(structHoldsBorrow, ins.Val); ok {
+						sc.report(pos, StorageViolation, fmt.Sprintf(
+							"borrow stored in struct field '%s' escapes stack frame", fld))
+						return
 					}
 				}
 				if valIsBorrow {
@@ -1413,12 +1417,11 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 					"borrow stored in struct field '%s' escapes stack frame", fld))
 				return
 			}
-			for sVal, fld := range structHoldsBorrow {
-				if isDerivedFrom(ins.Value, sVal) || isDerivedFrom(ins.Key, sVal) {
-					sc.report(pos, StorageViolation, fmt.Sprintf(
-						"borrow stored in struct field '%s' escapes stack frame", fld))
-					break
-				}
+			if fld, ok := heldFieldMatching(structHoldsBorrow, func(sVal ssa.Value) bool {
+				return isDerivedFrom(ins.Value, sVal) || isDerivedFrom(ins.Key, sVal)
+			}); ok {
+				sc.report(pos, StorageViolation, fmt.Sprintf(
+					"borrow stored in struct field '%s' escapes stack frame", fld))
 			}
 
 		case *ssa.Call:
@@ -1459,12 +1462,9 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 						sc.report(pos, StorageViolation, fmt.Sprintf(
 							"borrow stored in struct field '%s' escapes stack frame", fld))
 					}
-					for sVal, fld := range structHoldsBorrow {
-						if isDerivedFrom(arg, sVal) {
-							sc.report(pos, StorageViolation, fmt.Sprintf(
-								"borrow stored in struct field '%s' escapes stack frame", fld))
-							break
-						}
+					if fld, ok := derivedHolderField(structHoldsBorrow, arg); ok {
+						sc.report(pos, StorageViolation, fmt.Sprintf(
+							"borrow stored in struct field '%s' escapes stack frame", fld))
 					}
 				}
 			}
@@ -1503,12 +1503,7 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 						valIsBorrow := isBorrowVal[arg]
 						fld := structHoldsBorrow[arg]
 						if fld == "" {
-							for sVal, fName := range structHoldsBorrow {
-								if isDerivedFrom(arg, sVal) {
-									fld = fName
-									break
-								}
-							}
+							fld, _ = derivedHolderField(structHoldsBorrow, arg)
 						}
 						if !valIsBorrow && fld == "" {
 							continue
@@ -1596,12 +1591,9 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 				isBorrowVal[ins] = true
 				structHoldsBorrow[ins] = fld
 			}
-			for sVal, fld := range structHoldsBorrow {
-				if isDerivedFrom(ins.X, sVal) {
-					isBorrowVal[ins] = true
-					structHoldsBorrow[ins] = fld
-					break
-				}
+			if fld, ok := derivedHolderField(structHoldsBorrow, ins.X); ok {
+				isBorrowVal[ins] = true
+				structHoldsBorrow[ins] = fld
 			}
 
 		case *ssa.MakeInterface:
@@ -1654,12 +1646,9 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 						"borrow stored in struct field '%s' escapes stack frame", fld))
 					continue
 				}
-				for sVal, fld := range structHoldsBorrow {
-					if isDerivedFrom(r, sVal) {
-						sc.report(pos, StorageViolation, fmt.Sprintf(
-							"borrow stored in struct field '%s' escapes stack frame", fld))
-						break
-					}
+				if fld, ok := derivedHolderField(structHoldsBorrow, r); ok {
+					sc.report(pos, StorageViolation, fmt.Sprintf(
+						"borrow stored in struct field '%s' escapes stack frame", fld))
 				}
 			}
 
@@ -1676,12 +1665,9 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 				sc.report(pos, StorageViolation, fmt.Sprintf(
 					"borrow stored in struct field '%s' escapes stack frame", fld))
 			}
-			for sVal, fld := range structHoldsBorrow {
-				if isDerivedFrom(ins.X, sVal) {
-					sc.report(pos, StorageViolation, fmt.Sprintf(
-						"borrow stored in struct field '%s' escapes stack frame", fld))
-					break
-				}
+			if fld, ok := derivedHolderField(structHoldsBorrow, ins.X); ok {
+				sc.report(pos, StorageViolation, fmt.Sprintf(
+					"borrow stored in struct field '%s' escapes stack frame", fld))
 			}
 
 		case *ssa.Select:
@@ -1705,12 +1691,9 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 					sc.report(sPos, StorageViolation, fmt.Sprintf(
 						"borrow stored in struct field '%s' escapes stack frame", fld))
 				}
-				for sVal, fld := range structHoldsBorrow {
-					if isDerivedFrom(st.Send, sVal) {
-						sc.report(sPos, StorageViolation, fmt.Sprintf(
-							"borrow stored in struct field '%s' escapes stack frame", fld))
-						break
-					}
+				if fld, ok := derivedHolderField(structHoldsBorrow, st.Send); ok {
+					sc.report(sPos, StorageViolation, fmt.Sprintf(
+						"borrow stored in struct field '%s' escapes stack frame", fld))
 				}
 			}
 
@@ -1824,6 +1807,36 @@ func isStackLocalAddr(addr ssa.Value) bool {
 		return isStackLocalAddr(a.X)
 	}
 	return false
+}
+
+// heldFieldMatching returns the field recorded for the borrow-holding values that match. Several
+// recorded values can match one query (a value derived through two holders), each with its own
+// field; the smallest field name wins, so the diagnostic text does not depend on map order.
+func heldFieldMatching(held map[ssa.Value]string, match func(ssa.Value) bool) (string, bool) {
+	best, found := "", false
+	for sVal, fld := range held {
+		if (!found || fld < best) && match(sVal) {
+			best, found = fld, true
+		}
+	}
+	return best, found
+}
+
+// heldVarField is heldFieldMatching for the struct variables of the syntax walk: two variables of
+// one name (shadowing) can both match one SSA value, and the smallest field name wins.
+func heldVarField(held map[*types.Var]string, match func(*types.Var) bool) (string, bool) {
+	best, found := "", false
+	for v, fld := range held {
+		if (!found || fld < best) && match(v) {
+			best, found = fld, true
+		}
+	}
+	return best, found
+}
+
+// derivedHolderField is heldFieldMatching for the values v derives from.
+func derivedHolderField(held map[ssa.Value]string, v ssa.Value) (string, bool) {
+	return heldFieldMatching(held, func(sVal ssa.Value) bool { return isDerivedFrom(v, sVal) })
 }
 
 func isDerivedFrom(v, root ssa.Value) bool {

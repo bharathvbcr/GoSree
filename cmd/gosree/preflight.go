@@ -21,6 +21,24 @@ var valueFlags = map[string]bool{
 	"tags": true, "c": true, "debug": true, "cpuprofile": true, "memprofile": true, "trace": true,
 }
 
+// flagEnd returns the index of the first positional argument: where the driver's flags stop. It
+// follows the rule parseCommandLine uses (a flag package stops at the first non-flag or "--", and a
+// value flag may take the next argument).
+func flagEnd(args []string) int {
+	i := 0
+	for ; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || len(arg) < 2 || arg[0] != '-' {
+			break
+		}
+		name := strings.TrimLeft(arg, "-")
+		if !strings.Contains(name, "=") && valueFlags[name] && i+1 < len(args) {
+			i++
+		}
+	}
+	return i
+}
+
 // plan is what gosree does with its command line before the driver sees it.
 type plan struct {
 	args     []string // the arguments the driver gets (without argv[0])

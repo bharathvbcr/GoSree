@@ -36,8 +36,10 @@ func (st *state) validateImm() {
 			var f ImmFact
 			return st.pass.ImportObjectFact(tn, &f) && f.Imm
 		})
-		for tn, ok := range st.imm {
-			if !ok {
+		for _, tn := range slices.SortedFunc(maps.Keys(st.imm), func(a, b *types.TypeName) int {
+			return cmp.Or(cmp.Compare(st.ix.ImmTypes[a], st.ix.ImmTypes[b]), strings.Compare(a.Name(), b.Name()))
+		}) {
+			if !st.imm[tn] {
 				continue
 			}
 			if msg := immShapeProblem(tn, cls, st.ix.Guarded); msg != "" {

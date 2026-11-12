@@ -1,6 +1,6 @@
 # GoSree stress findings
 
-What the adversarial suite finds, as of 2026-11-10 (re-counted 2026-11-10). Every finding below is
+What the adversarial suite finds, as of 2026-11-10 (re-counted 2026-11-11 on the build run's integration branch). Every finding below is
 locked into a fixture or a test; the paths are given so each can be read and re-run. Counts come
 from the harness's own ledger (`go test ./tests/stress -run '^TestStress$' -v`), not from the text of
 an earlier version of this file.
@@ -10,9 +10,9 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `d87a17d` (no uncommitted checker edits) |
-| Checker fingerprint | `990800f814fac8d4`: `bash tests/stress/fingerprint.sh` |
-| Run | 2026-11-10: `go test ./...` with and without cgo, every package `ok`; the suites that ran are listed under [What was run](#what-was-run) |
+| Git HEAD | `25779ca` on `run/integ-1111` (no uncommitted checker edits) |
+| Checker fingerprint | `77f03b52f18b13af`: `bash tests/stress/fingerprint.sh` |
+| Run | 2026-11-11 16:12-16:18, load average 55-84: `go vet ./...`, `cargo test --release`, `go test ./... -count=1` with and without cgo (all 15 packages with tests `ok` in both), the ledger below, and the acceptance tiers (12/12). The 2026-11-10 suites are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
 is expected and is the suite working: each failure names the marker to promote or the lock that
@@ -23,7 +23,7 @@ then. They were not re-derived afterwards, and the line numbers drift as the che
 
 ## Ledger
 
-Fixture suite (`tests/stress`), 143 packages in 133 roots:
+Fixture suite (`tests/stress`), 144 packages in 134 roots:
 
 | Rule | Hits locked | Known misses | Known false positives |
 |---|---|---|---|
@@ -45,9 +45,16 @@ Fixture suite (`tests/stress`), 143 packages in 133 roots:
 | ERR002 companion result unchecked | 12 | 0 | 0 |
 | ERR003 shadowed, overwritten or inverted error | 8 | 0 | 0 |
 | ERR004 typed nil boxed into error | 11 | 1 | 0 |
-| ERR005 writable resource Close error discarded | 5 | 0 | 0 |
+| ERR005 writable resource Close error discarded | 7 | 1 | 1 |
 | NORULE (no rule claims it) | 0 | 63 | 0 |
-| **Total** | **610** | **187** | **45** |
+| **Total** | **612** | **188** | **46** |
+
+The ERR005 row changed on 2026-11-11, and every change is in the new root `er_w_rangecapture`:
+- Two hits: a deferred `Close` on a resource captured by a closure, and a deferred `Close` in a range-over-func body with the write in the body.
+- One miss: a `defer Close` in a range-over-func body, with the write after the loop. The defer runs at the enclosing function's return, but the close is resolved at the yield function's synthetic return.
+- One false positive: a captured resource reassigned by another closure (`replacedByCall`). The written flag is not reset across that call.
+
+The fixes that day touched errcheck, ownership, borrow and the corpus tools. No existing marker changed.
 
 Runtime witnesses: 58 programs carry a `WITNESS` marker, 45 for the race detector and 13 for a panic
 or fatal error, and `TestWitnesses` passes on all 58 (the runtime convicts every one). For 37 of

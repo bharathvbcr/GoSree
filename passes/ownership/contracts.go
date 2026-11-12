@@ -2261,6 +2261,7 @@ type sharedLoadOrigin struct {
 // and interface dispatch.
 func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 	shared := map[*ssa.Function]map[ssa.Value]sharedLoadOrigin{}
+	var order []*ssa.Function // the functions that hold shared values, as they first did
 	var queue []*ssa.Function
 	enqueued := map[*ssa.Function]bool{}
 
@@ -2274,6 +2275,7 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 		}
 		if shared[fn] == nil {
 			shared[fn] = map[ssa.Value]sharedLoadOrigin{}
+			order = append(order, fn)
 		}
 		if prev, exists := shared[fn][v]; exists && (!prev.muted || orig.muted) {
 			return
@@ -2374,10 +2376,21 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 		}
 	}
 
-	for len(queue) > 0 {
-		fn := queue[0]
-		queue = queue[1:]
-		enqueued[fn] = false
+	// Findings are emitted only after the origins reach their fixpoint: a hatch is recorded as used
+	// by a muted finding, and a muted finding made while an unhatched origin was still on its way
+	// (it arrives later through a longer call chain) would count the hatch as used for a write
+	// that is then reported anyway. So a function is processed in two passes, and each does one
+	// thing: the first hands shared values on (add) and reports nothing, the second reports (emit)
+	// and hands nothing on. Everything process calls takes the two as arguments, so the helpers in
+	// forward.go follow the pass they are called in.
+	process := func(fn *ssa.Function, emitting bool) {
+		add, emit, seedCallResult := add, emit, seedCallResult
+		if emitting {
+			add = func(*ssa.Function, ssa.Value, sharedLoadOrigin) {}
+			seedCallResult = func(*ssa.Function, *ssa.Call, sharedLoadOrigin) {}
+		} else {
+			emit = func(ssa.Instruction, sharedLoadOrigin, string) {}
+		}
 		origins := shared[fn]
 		roots := make(map[ssa.Value]string, len(origins))
 		unmuted := make(map[ssa.Value]string, len(origins))
@@ -2472,6 +2485,18 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 				}
 			}
 		})
+	}
+
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		enqueued[fn] = false
+		process(fn, false)
+	}
+	// Every function that holds shared values is reported on, in the order they first held one:
+	// that includes closures and the like that are not in fns.
+	for _, fn := range order {
+		process(fn, true)
 	}
 }
 

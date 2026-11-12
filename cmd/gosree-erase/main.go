@@ -20,11 +20,13 @@
 //
 // Exit status: 0 when everything requested was done (a file that needs no
 // erasure counts as done); 1 when any file could not be erased or written, a
-// path could not be used, or the options are inconsistent; 2 for invalid flags.
+// path could not be used, or the options are inconsistent; 2 for invalid flags,
+// which includes -w or -o together with -l or -d (those only report).
 package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -33,9 +35,11 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // eraseFunc is the signature of Erase; tests substitute their own.
@@ -51,10 +55,15 @@ type options struct {
 	stdout  io.Writer
 	stderr  io.Writer
 	erase   eraseFunc
+	// ctx cancels a -verify run (Ctrl-C, SIGTERM); nil means never.
+	ctx context.Context
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := runContext(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, Erase)
+	stop()
+	os.Exit(code)
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -62,7 +71,11 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 }
 
 func runWith(args []string, stdin io.Reader, stdout, stderr io.Writer, erase eraseFunc) int {
-	o := &options{stdin: stdin, stdout: stdout, stderr: stderr, erase: erase}
+	return runContext(context.Background(), args, stdin, stdout, stderr, erase)
+}
+
+func runContext(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, erase eraseFunc) int {
+	o := &options{stdin: stdin, stdout: stdout, stderr: stderr, erase: erase, ctx: ctx}
 	flags := flag.NewFlagSet("gosree-erase", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.BoolVar(&o.write, "w", false, "write result to (source) file instead of stdout")
@@ -85,7 +98,7 @@ erased successfully. Each file is replaced atomically (temp file and rename).
 
 Exit status: 0 everything requested was done; 1 a file could not be erased or
 written, a path could not be used, or the options conflict (with -w, nothing
-was written); 2 invalid flags.
+was written); 2 invalid flags, including -w or -o together with -l or -d.
 `)
 	}
 	if err := flags.Parse(args); err != nil {
@@ -98,6 +111,22 @@ was written); 2 invalid flags.
 	if o.write && o.outPath != "" {
 		o.errorf("error: cannot use both -w and -o")
 		return 1
+	}
+	// -l and -d only report; -w and -o say where a result goes. Taken together they used to report
+	// and write nothing (and -o was ignored), which looks like success, so they are invalid flags.
+	for _, report := range []struct {
+		on   bool
+		name string
+	}{{o.list, "-l"}, {o.diff, "-d"}} {
+		for _, dest := range []struct {
+			on   bool
+			name string
+		}{{o.write, "-w"}, {o.outPath != "", "-o"}} {
+			if report.on && dest.on {
+				o.errorf("error: cannot use %s with %s: %s only reports and writes nothing", dest.name, report.name, report.name)
+				return 2
+			}
+		}
 	}
 
 	rest := flags.Args()
@@ -144,6 +173,14 @@ was written); 2 invalid flags.
 		return 1
 	}
 	return 0
+}
+
+// context returns the run's cancellation context.
+func (o *options) context() context.Context {
+	if o.ctx == nil {
+		return context.Background()
+	}
+	return o.ctx
 }
 
 func (o *options) errorf(format string, args ...any) {
@@ -345,7 +382,14 @@ func (o *options) emit(name string, src, out []byte) error {
 	return err
 }
 
-func (o *options) processStream() error {
+// processStream erases standard input. A panic while erasing becomes an error (exit 1), as it does
+// for a file: left alone it would unwind past run and exit 2, the status for invalid flags.
+func (o *options) processStream() (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("internal error while erasing standard input (nothing was written): %v", p)
+		}
+	}()
 	src, err := io.ReadAll(o.stdin)
 	if err != nil {
 		return fmt.Errorf("reading input: %w", err)
@@ -355,21 +399,26 @@ func (o *options) processStream() error {
 		return err
 	}
 	if o.verify {
-		if _, verr := VerifyCompiledTextEquivalence(map[string][]byte{"stdin.go": src}, o.erase); verr != nil {
+		if _, verr := VerifyCompiledTextEquivalenceContext(o.context(), map[string][]byte{"stdin.go": src}, o.erase); verr != nil {
 			return fmt.Errorf("equivalence verification failed: %w", verr)
 		}
+		// Say so: a verification that ran and passed must not look like one that never ran.
+		o.errorf("gosree-erase: <stdin>: equivalence verified")
 	}
 	return o.emit("<stdin>", src, out)
 }
 
+// verifyTargets verifies equivalence for the selected files, directory by directory. Every selected
+// file takes part, _test.go files included: one the build cannot compile here is erased and parsed
+// instead, and named on stderr as not compile-verified. A sibling file that cannot be read fails the
+// run: verifying a package without part of it proves nothing about it.
 func (o *options) verifyTargets(targets []target) error {
 	byDir := map[string]map[string][]byte{}
+	hasCode := map[string]bool{}
+	selected := map[string]bool{}
 	var dirs []string
 	for _, t := range targets {
 		base := filepath.Base(t.real)
-		if strings.HasSuffix(base, "_test.go") {
-			continue
-		}
 		src, err := os.ReadFile(t.real)
 		if err != nil {
 			return fmt.Errorf("%s: %w", t.display, err)
@@ -380,29 +429,50 @@ func (o *options) verifyTargets(targets []target) error {
 			dirs = append(dirs, dir)
 		}
 		byDir[dir][base] = src
+		selected[filepath.Join(dir, base)] = true
+		if !strings.HasSuffix(base, "_test.go") {
+			hasCode[dir] = true
+		}
 	}
 	sort.Strings(dirs)
 	for _, dir := range dirs {
+		if !hasCode[dir] {
+			continue
+		}
 		files := byDir[dir]
 		// Include any unselected sibling regular non-test .go files in the same
 		// package directory so `gosree-erase -verify pkg/one.go` resolves package-local
 		// declarations across sibling files of `pkg`.
-		if entries, err := os.ReadDir(dir); err == nil {
-			for _, ent := range entries {
-				name := ent.Name()
-				if !ent.Type().IsRegular() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-					continue
-				}
-				if _, exists := files[name]; exists {
-					continue
-				}
-				if sibSrc, rerr := os.ReadFile(filepath.Join(dir, name)); rerr == nil {
-					files[name] = sibSrc
-				}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return fmt.Errorf("%s: reading the package directory: %w", dir, err)
+		}
+		for _, ent := range entries {
+			name := ent.Name()
+			if !ent.Type().IsRegular() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
 			}
+			if _, exists := files[name]; exists {
+				continue
+			}
+			sibSrc, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				return fmt.Errorf("%s: reading sibling file for verification: %w", filepath.Join(dir, name), err)
+			}
+			files[name] = sibSrc
 		}
 	}
-	return VerifyDirectoriesEquivalence(byDir, o.erase)
+	unverified, err := VerifyDirectoriesEquivalence(o.context(), byDir, o.erase)
+	var notCompiled []string
+	for _, name := range unverified {
+		if selected[name] {
+			notCompiled = append(notCompiled, name)
+		}
+	}
+	if len(notCompiled) > 0 {
+		o.errorf("gosree-erase: note: %d file(s) were erased and parsed but not compile-verified (build-constrained out here, or _test.go): %s", len(notCompiled), strings.Join(notCompiled, ", "))
+	}
+	return err
 }
 
 // processFile erases one file, delivering the result as the options would for
@@ -536,9 +606,39 @@ func writeAtomic(path string, data []byte, mode fs.FileMode) (err error) {
 	return os.Rename(tmp.Name(), path)
 }
 
+// span is a byte range of the source to replace. A directive comment that shares its line with
+// code is a block comment between two tokens (inline) or a line comment at the end of one; deleting
+// an inline block comment outright could join the tokens on either side (`return /*gosree:mut*/x`
+// would become `returnx`), so its replacement is decided once neighbouring spans are merged.
 type span struct {
-	start int
-	end   int
+	start, end int
+	inline     bool // a block comment with code on its line: replaced by repl, or by a separator
+	multiline  bool // an inline comment containing a newline, which the compiler reads as one
+	repl       string
+}
+
+func isBlank(b byte) bool { return b == ' ' || b == '\t' || b == '\n' || b == '\r' }
+
+// resolveInline fixes the replacement of an inline block comment from the bytes around it, so that
+// the token before and the token after stay apart. A comment that held a newline keeps one (a
+// newline after a statement's last token is a semicolon to the compiler). Otherwise, when blank
+// space follows, the comment goes with one blank before it; when code follows directly, the
+// comment is replaced by a single space unless a blank already precedes it.
+func (sp *span) resolveInline(src []byte) {
+	next := byte('\n')
+	if sp.end < len(src) {
+		next = src[sp.end]
+	}
+	switch {
+	case sp.multiline:
+		sp.repl = "\n"
+	case isBlank(next):
+		if sp.start > 0 && (src[sp.start-1] == ' ' || src[sp.start-1] == '\t') {
+			sp.start--
+		}
+	case sp.start > 0 && !isBlank(src[sp.start-1]):
+		sp.repl = " "
+	}
 }
 
 // isDirective reports whether text is a //gosree: or /*gosree: directive comment.
@@ -562,6 +662,24 @@ func stripDirectives(src []byte) []byte {
 			if isDirective(c.Text) {
 				start := fset.Position(c.Pos()).Offset
 				end := fset.Position(c.End()).Offset
+				if strings.HasPrefix(c.Text, "/*") {
+					// c.Text has its carriage returns stripped, so Slash+len(Text) falls short of a
+					// CRLF comment's real end; the closing */ is in the source.
+					if k := bytes.Index(src[start+2:], []byte("*/")); k >= 0 {
+						end = start + 2 + k + 2
+					}
+				}
+				if strings.HasPrefix(c.Text, "//") {
+					// Likewise a line comment holding a lone \r: it runs to the newline, less the \r of
+					// a CRLF terminator.
+					end = len(src)
+					if k := bytes.IndexByte(src[start:], '\n'); k >= 0 {
+						end = start + k
+					}
+					if end > start && src[end-1] == '\r' {
+						end--
+					}
+				}
 
 				isBlock := strings.HasPrefix(strings.TrimSpace(c.Text), "/*")
 				lineStart := start
@@ -595,16 +713,15 @@ func stripDirectives(src []byte) []byte {
 					start = lineStart
 					end = lineEnd
 				} else if isBlock {
-					if start > 0 && (src[start-1] == ' ' || src[start-1] == '\t') {
-						start--
-					}
+					spans = append(spans, span{start: start, end: end, inline: true, multiline: bytes.IndexByte(src[start:end], '\n') >= 0})
+					continue
 				} else {
 					// Inline line comment
 					for start > lineStart && (src[start-1] == ' ' || src[start-1] == '\t') {
 						start--
 					}
 				}
-				spans = append(spans, span{start, end})
+				spans = append(spans, span{start: start, end: end})
 			}
 		}
 	}
@@ -631,21 +748,32 @@ func stripDirectives(src []byte) []byte {
 			if s.end > last.end {
 				last.end = s.end
 			}
+			last.inline = last.inline && s.inline
+			last.multiline = last.multiline || s.multiline
+			if !last.inline && last.multiline {
+				last.repl = "\n"
+			}
 		} else {
 			merged = append(merged, s)
 		}
 	}
 
-	res := make([]byte, len(src))
-	copy(res, src)
-	// Delete backwards to keep preceding offsets valid
-	for i := len(merged) - 1; i >= 0; i-- {
-		s := merged[i]
-		if s.start <= len(res) && s.end <= len(res) && s.start <= s.end {
-			res = append(res[:s.start], res[s.end:]...)
+	for i := range merged {
+		if merged[i].inline {
+			merged[i].resolveInline(src)
 		}
 	}
-	return res
+	res := make([]byte, 0, len(src))
+	at := 0
+	for _, sp := range merged {
+		if sp.start < at || sp.end > len(src) || sp.start > sp.end {
+			continue
+		}
+		res = append(res, src[at:sp.start]...)
+		res = append(res, sp.repl...)
+		at = sp.end
+	}
+	return append(res, src[at:]...)
 }
 
 func printUnifiedDiff(orig, newStr string) { writeUnifiedDiff(os.Stdout, orig, newStr) }

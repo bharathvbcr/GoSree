@@ -182,6 +182,21 @@ func CheckBorrows(pass *analysis.Pass, ix *annot.Index, ssaProg *buildssa.SSA) {
 	}
 }
 
+// enclosingFuncPos is the position of the nearest function around fn that has one, fn included: a
+// synthetic function has none, its parent may. It is where locate reports a finding that has no
+// position of its own.
+func enclosingFuncPos(fn *ssa.Function) token.Pos {
+	for f := fn; f != nil; f = f.Parent() {
+		if p := f.Pos(); p.IsValid() {
+			return p
+		}
+		if syn := f.Syntax(); syn != nil && syn.Pos().IsValid() {
+			return syn.Pos()
+		}
+	}
+	return token.NoPos
+}
+
 func (bc *borrowChecker) report(pos token.Pos, cat, msg string) {
 	pos, msg, located := locate(bc.pass, pos, bc.fn, msg)
 	if bc.ix.Mute(pos) {
@@ -1884,7 +1899,8 @@ func (bc *borrowChecker) fallbackReturnPos(origin *ssa.Alloc) token.Pos {
 	if origin != nil && origin.Pos().IsValid() {
 		return origin.Pos()
 	}
-	return bc.fn.Pos()
+	// No position of its own: report places it, and says in the message that it did (locate).
+	return token.NoPos
 }
 
 func isStackVarAlloc(a *ssa.Alloc) bool {
