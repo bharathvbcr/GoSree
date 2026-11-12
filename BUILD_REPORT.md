@@ -249,7 +249,7 @@ On 2026-11-12 you asked Fable (the advisor) to rule on items 2–10. Each ruling
      - The remaining escape-hatch items.
      - Write-side-only race accounting.
 9. **The +6.2% CPU regression. Ruled accepted.** It pays for a soundness fix, and the only cheaper version lost findings. It does not gate a push. ft-1f84 goes into the next wave, starting with a profile at `e34e37c`.
-10. **This report's branch. Ruled merge,** after this commit. Before merging, the main checkout must have no staged or modified tracked file, and the collision check for BUILD_REPORT.md must be clear. The merge is fast-forward only, or an ordinary merge if `main` has moved, and it is aborted if any file other than BUILD_REPORT.md would change.
+10. **This report's branch. Ruled merge,** after this commit. Before merging, the main checkout must have no staged or modified tracked file, and the collision check for BUILD_REPORT.md must be clear. The merge is fast-forward only, or an ordinary merge if `main` has moved, and it is aborted if any file other than BUILD_REPORT.md would change. **Not merged (2026-11-12, about 00:50):** the main checkout had modified tracked files (`.github/workflows/ci.yml`, `.gitignore`, `PROJECT.md`, `README.md`, `docs/ERROR_DISCIPLINE.md`, `docs/TOOLING_AND_ERASURE.md`, `go.mod`, `go.sum`; another session at work), and `main` had moved to `ae6f578`, so the first condition failed. Merge `run/report-1111` once the main checkout is clean; `git diff main run/report-1111 -- BUILD_REPORT.md` is the whole change.
 
 ## 8. Storage
 
