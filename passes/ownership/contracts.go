@@ -450,8 +450,13 @@ type contractIndex struct {
 	callForwards      map[*ssa.Function][]callForwardRule
 	retForwards       map[*ssa.Function][]retForwardRule
 	directPublish     map[*ssa.Function][]pubArgSpec
-	directSharedRet   map[*ssa.Function]string
-	directFreshRet    map[*ssa.Function]bool
+	// freePublish holds, for a closure, the captured variables whose value it publishes when it
+	// is called, by itself or through a closure it makes and calls. argIdx is the index of the
+	// free variable. A call of the closure is a publish of the variable, in the function that
+	// made the closure (graph.call).
+	freePublish     map[*ssa.Function][]pubArgSpec
+	directSharedRet map[*ssa.Function]string
+	directFreshRet  map[*ssa.Function]bool
 	// retFreshButForwards holds the functions whose every returned value is fresh or the result
 	// of one of their retForwards (retFreshness). A function in directFreshRet needs no entry.
 	retFreshButForwards map[*ssa.Function]bool
@@ -502,6 +507,7 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 		callForwards:      map[*ssa.Function][]callForwardRule{},
 		retForwards:       map[*ssa.Function][]retForwardRule{},
 		directPublish:     map[*ssa.Function][]pubArgSpec{},
+		freePublish:       map[*ssa.Function][]pubArgSpec{},
 		directSharedRet:   map[*ssa.Function]string{},
 		directFreshRet:    map[*ssa.Function]bool{},
 
@@ -664,8 +670,8 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 		ci.retForwards[fn] = append(ci.retForwards[fn], r)
 		return true
 	}
-	addDirectPublish := func(fn *ssa.Function, spec pubArgSpec) bool {
-		specs := ci.directPublish[fn]
+	addPublish := func(into map[*ssa.Function][]pubArgSpec, fn *ssa.Function, spec pubArgSpec) bool {
+		specs := into[fn]
 		for i := range specs {
 			if specs[i].argIdx == spec.argIdx {
 				if specs[i].freezesToImm && !spec.freezesToImm {
@@ -675,12 +681,15 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 				return false
 			}
 		}
-		ci.directPublish[fn] = append(specs, pubArgSpec{
+		into[fn] = append(specs, pubArgSpec{
 			argIdx:       spec.argIdx,
 			what:         spec.what,
 			freezesToImm: spec.freezesToImm,
 		})
 		return true
+	}
+	addDirectPublish := func(fn *ssa.Function, spec pubArgSpec) bool {
+		return addPublish(ci.directPublish, fn, spec)
 	}
 
 	// Base forwarding rules inside each function body.
@@ -802,6 +811,10 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 							}) {
 								changed = true
 							}
+						} else if free := capturedVariableRead(unwrapPublishedArg(cc.Args[spec.argIdx]), bodyFn); free >= 0 {
+							if addPublish(ci.freePublish, bodyFn, pubArgSpec{argIdx: free, what: spec.what, freezesToImm: spec.freezesToImm}) {
+								changed = true
+							}
 						}
 					}
 					if isRetCall && !targetIsParam && rc.sharedReadOnlyLoad && ci.directSharedRet[bodyFn] == "" {
@@ -817,6 +830,29 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 					return
 				}
 				calleeBody := canonicalBodyFn(callee)
+				// A closure called here, or deferred, that publishes a variable it captures
+				// publishes what this function gave it, before this function returns: a
+				// variable this function captures itself, or one that may hold a parameter of
+				// this function.
+				if mc, ok := cc.Value.(*ssa.MakeClosure); ok {
+					for _, fp := range ci.freePublish[calleeBody] {
+						if fp.argIdx >= len(mc.Bindings) {
+							continue
+						}
+						switch b := mc.Bindings[fp.argIdx].(type) {
+						case *ssa.FreeVar:
+							if free := slices.Index(bodyFn.FreeVars, b); free >= 0 && addPublish(ci.freePublish, bodyFn, pubArgSpec{argIdx: free, what: fp.what, freezesToImm: fp.freezesToImm}) {
+								changed = true
+							}
+						case *ssa.Alloc:
+							for _, p := range parametersHeld(b, bodyFn) {
+								if addDirectPublish(bodyFn, pubArgSpec{argIdx: p, what: fp.what, freezesToImm: fp.freezesToImm}) {
+									changed = true
+								}
+							}
+						}
+					}
+				}
 				for _, cf := range ci.callForwards[calleeBody] {
 					if cf.targetParam >= len(cc.Args) || cf.argParam >= len(cc.Args) {
 						continue
@@ -1129,6 +1165,37 @@ func paramFlowIndexSeen(v ssa.Value, fn *ssa.Function, depth int, seen map[ssa.V
 			return -1
 		}
 	}
+}
+
+// capturedVariableRead is the index of the free variable of fn that v is a read of, or -1. A
+// closure captures a variable by its address, so the variable's value is a load of the free
+// variable.
+func capturedVariableRead(v ssa.Value, fn *ssa.Function) int {
+	load, ok := v.(*ssa.UnOp)
+	if !ok || load.Op != token.MUL {
+		return -1
+	}
+	fv, ok := load.X.(*ssa.FreeVar)
+	if !ok {
+		return -1
+	}
+	return slices.Index(fn.FreeVars, fv)
+}
+
+// parametersHeld lists the parameters of fn that a local variable of fn may hold: each one that
+// some store to the variable, made by fn itself, stores. What else the variable may hold does
+// not matter to who asks: publishing the variable may publish each of them.
+func parametersHeld(cell *ssa.Alloc, fn *ssa.Function) []int {
+	var held []int
+	for _, st := range usesOfCell(cell).stores {
+		if st.Parent() != fn {
+			continue
+		}
+		if p := paramFlowIndex(st.Val, fn); p >= 0 && !slices.Contains(held, p) {
+			held = append(held, p)
+		}
+	}
+	return held
 }
 
 type valVisitKey struct {

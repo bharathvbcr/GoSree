@@ -97,7 +97,9 @@ func (st *state) checkTransfer(g *graph, t transfer) {
 			}
 		}
 	}
-	if !borrowEscaped && !isForwardedCallback && len(foreign) > 0 {
+	// A variable published by a closure that captured it (t.held): whether it was the closure's
+	// to publish is said in the closure, where the publish is, and not a second time here.
+	if !borrowEscaped && !isForwardedCallback && !t.held && len(foreign) > 0 {
 		e := st.earliest(foreign)
 		why := "it may alias " + e.desc + st.at(e.pos)
 		if e.desc == what {

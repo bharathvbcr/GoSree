@@ -80,6 +80,10 @@ type transfer struct {
 	opPos        token.Pos
 	index        int
 	freezesToImm bool
+	// held: v is the address of a variable, and what is transferred is the variable's value: a
+	// closure that captured the variable publishes it (transferHeld). The variable and its
+	// value are one region, so the checks read v's as for any transfer.
+	held bool
 }
 
 type graph struct {
@@ -528,6 +532,46 @@ func (g *graph) transferFull(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Valu
 	e := ev(evTransfer, ins, what)
 	e.byContract = byContract
 	g.add(g.val(v), e)
+}
+
+// transferHeld records that ins publishes the value of the variable at cell: a closure called at
+// ins captured the variable and publishes it. cell is the variable's address as this function
+// has it, its own or one it captured itself.
+func (g *graph) transferHeld(ins ssa.Instruction, cell ssa.Value, what string, freezesToImm bool) {
+	cn := g.val(cell)
+	if cn == nil {
+		return
+	}
+	g.transfers = append(g.transfers, transfer{
+		instr:        ins,
+		v:            cell,
+		pos:          ins.Pos(),
+		what:         what,
+		index:        -1,
+		freezesToImm: freezesToImm,
+		held:         true,
+	})
+	e := ev(evTransfer, ins, what)
+	e.byContract = g.publishedHeld(cell)
+	g.add(g.pointee(cn), e)
+}
+
+// publishedHeld is 1 + the index of a parameter that the variable at cell may hold and that the
+// index records this function to publish, or 0. What a closure's publish of the variable does to
+// the parameter is then accounted to the parameter's contract (event.byContract), as it is where
+// the parameter itself is published.
+func (g *graph) publishedHeld(cell ssa.Value) int {
+	alloc, ok := cell.(*ssa.Alloc)
+	if !ok || g.st.contracts == nil {
+		return 0
+	}
+	body := canonicalBodyFn(g.fn)
+	for _, p := range parametersHeld(alloc, body) {
+		if slices.ContainsFunc(g.st.contracts.directPublish[body], func(s pubArgSpec) bool { return s.argIdx == p }) {
+			return p + 1
+		}
+	}
+	return 0
 }
 
 func selectCaseBlock(sel *ssa.Select, stateIdx int) *ssa.BasicBlock {
@@ -1256,9 +1300,30 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		}
 	}
 	if mc, ok := cc.Value.(*ssa.MakeClosure); ok {
+		// What the closure publishes of what it captured is published here, by this call, and the
+		// publish stands for what the closure does with that variable (what else it does with
+		// it is reported in the closure, where the publish is). A deferred closure runs when
+		// the function returns, not here: it stays a closure that may keep its captures, and
+		// what it publishes is still accounted to the parameter the variable holds.
+		var publishes []pubArgSpec
+		if g.st.contracts != nil {
+			publishes = g.st.contracts.freePublish[canonicalBodyFn(fn)]
+		}
+		_, deferred := ins.(*ssa.Defer)
 		for j, b := range mc.Bindings {
-			if sum.freeLeaks(j) {
-				g.add(g.val(b), ev(evEscape, ins, "captured by a closure that may retain or share it"))
+			published := false
+			for _, spec := range publishes {
+				if spec.argIdx == j && !deferred {
+					g.transferHeld(ins, b, spec.what, spec.freezesToImm)
+					published = true
+				}
+			}
+			if sum.freeLeaks(j) && !published {
+				e := ev(evEscape, ins, "captured by a closure that may retain or share it")
+				if slices.ContainsFunc(publishes, func(s pubArgSpec) bool { return s.argIdx == j }) {
+					e.byContract = g.publishedHeld(b)
+				}
+				g.add(g.val(b), e)
 			}
 			if sum.writesFree(j) {
 				g.written(ins, b, "captured by a closure that may write it")
