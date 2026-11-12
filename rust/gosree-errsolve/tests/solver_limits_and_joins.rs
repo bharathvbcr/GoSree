@@ -339,3 +339,149 @@ fn decoder_never_panics_on_arbitrary_frames() {
     }
     assert!(accepted < 20_000);
 }
+
+/// A package of `n` functions in two call chains laid out in a scattered index order
+/// (`k -> k * 7_919 mod n`), so a callee is sometimes ahead of its caller and sometimes behind
+/// it. Each chain function calls the next one in its chain, boxes the concrete error pointer it
+/// got into an `error` (site 3) and returns it. Chain A (the first half) ends in an external
+/// function that may return nil, so every function in it may return nil and every box in it is
+/// ERR004; chain B ends in a function that returns a fresh non-nil pointer, so nothing in it is.
+/// Returns the package and, per index, whether it is in chain A.
+fn scattered_two_chain_package(n: usize) -> (Vec<FuncIR>, Vec<bool>) {
+    assert_eq!(n % 2, 0);
+    // 7,919 is prime, so `k -> k * 7_919 mod n` is a permutation unless 7,919 divides n.
+    assert_ne!(n % 7_919, 0);
+    let pos = |k: usize| (k * 7_919) % n;
+    let half = n / 2;
+    let mut funcs: Vec<Option<FuncIR>> = vec![None; n];
+    let mut in_a = vec![false; n];
+    for k in 0..n {
+        let (chain_end, is_a) = if k < half {
+            (half - 1, true)
+        } else {
+            (n - 1, false)
+        };
+        in_a[pos(k)] = is_a;
+        funcs[pos(k)] = Some(if k == chain_end && is_a {
+            FuncIR {
+                flags: FUNC_RETURNS_CONCRETE_ERR_PTR | FUNC_EXTERNAL_MAY_NIL,
+                slot_flags: vec![],
+                tuples: vec![],
+                blocks: vec![],
+            }
+        } else if k == chain_end {
+            FuncIR {
+                flags: FUNC_RETURNS_CONCRETE_ERR_PTR,
+                slot_flags: vec![0],
+                tuples: vec![],
+                blocks: vec![block(
+                    vec![OpIR::AssignSlot {
+                        site_id: 1,
+                        dst_slot: 0,
+                        src_slot: NONE_U32,
+                        nil_hint: ASSIGN_NIL_NON_NIL,
+                        writable_hint: 0,
+                    }],
+                    ret(2, 0),
+                )],
+            }
+        } else {
+            FuncIR {
+                flags: FUNC_RETURNS_CONCRETE_ERR_PTR,
+                slot_flags: vec![0],
+                tuples: vec![],
+                blocks: vec![block(
+                    vec![
+                        OpIR::CallConcretePtr {
+                            site_id: 1,
+                            dst_slot: 0,
+                            callee_idx: pos(k + 1) as u32,
+                        },
+                        OpIR::BoxConcreteErr {
+                            site_id: 3,
+                            ptr_slot: 0,
+                        },
+                    ],
+                    ret(2, 0),
+                )],
+            }
+        });
+    }
+    (
+        funcs
+            .into_iter()
+            .map(|f| f.expect("every index placed"))
+            .collect(),
+        in_a,
+    )
+}
+
+/// More functions than the 16,384 the solver used to accept (ScholarLM's `internal/wisdev` with
+/// its tests has 18,973), with errors propagated across functions in both index directions.
+/// Before the limit was raised the decoder refused the frame (`LimitExceeded("num_funcs")`);
+/// now the frame decodes and every summary and finding is the exact expected one.
+#[test]
+fn package_over_the_old_function_limit_solves_with_cross_function_errors() {
+    let n = 20_480;
+    let (funcs, in_a) = scattered_two_chain_package(n);
+    let frame = encode_package(&funcs);
+    let resp = solve_frame(&frame, || true).expect("a 20,480-function package solves");
+    assert_eq!(&resp[0..4], b"GSR1");
+    let res = solve(&funcs);
+    assert_eq!(
+        res.may_return_nil, in_a,
+        "chain A may return nil, chain B never"
+    );
+    let mut want: Vec<Finding> = (0..n)
+        .filter(|&i| in_a[i] && !funcs[i].blocks.is_empty())
+        .map(|i| Finding {
+            func_idx: i as u32,
+            site_id: 3,
+            rule_code: RULE_ERR004,
+            sub_kind: SUB_ERR004_MAY_NIL,
+        })
+        .collect();
+    want.sort_unstable();
+    assert_eq!(want.len(), n / 2 - 1);
+    assert_eq!(res.findings, want);
+    assert_eq!(
+        resp,
+        encode_result(&res),
+        "frame and direct solves agree byte for byte"
+    );
+}
+
+#[test]
+fn function_count_limit_is_exact() {
+    let leaf = FuncIR {
+        flags: 0,
+        slot_flags: vec![],
+        tuples: vec![],
+        blocks: vec![],
+    };
+    let at = vec![leaf.clone(); MAX_FUNCS];
+    assert_eq!(
+        decode_package(&encode_package(&at)).map(|f| f.len()),
+        Ok(MAX_FUNCS)
+    );
+    let over = vec![leaf; MAX_FUNCS + 1];
+    assert_eq!(
+        decode_package(&encode_package(&over)).err(),
+        Some(SolveError::LimitExceeded("num_funcs"))
+    );
+}
+
+/// A frame larger than gusset can hand the linked engine is refused by the decoder before any
+/// byte of it is read (the zeroed allocation is not touched, so this costs no resident memory).
+#[test]
+fn frame_over_max_frame_bytes_is_refused() {
+    let frame = vec![0u8; MAX_FRAME_BYTES + 1];
+    assert_eq!(
+        decode_package(&frame).err(),
+        Some(SolveError::LimitExceeded("frame_bytes"))
+    );
+    assert_eq!(
+        solve_frame(&frame, || true),
+        Err(SolveError::LimitExceeded("frame_bytes"))
+    );
+}

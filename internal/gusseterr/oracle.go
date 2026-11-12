@@ -13,6 +13,9 @@ import (
 // DecodePackage decodes and validates a GSE1 binary request frame (matching
 // gosree_errsolve::decode_package).
 func DecodePackage(frame []byte) ([]FuncIR, error) {
+	if len(frame) > MaxFrameBytes {
+		return nil, errors.New("GSE1 limit exceeded: frame_bytes")
+	}
 	if len(frame) < 8 {
 		return nil, errors.New("truncated GSE1 frame")
 	}
@@ -875,6 +878,47 @@ func withCanonicalTuples(ctx context.Context, fn FuncIR) (FuncIR, error) {
 	return fn, nil
 }
 
+// u32MinHeap is a binary min-heap of function indices: the phase-1 sweep queues of solveOracle.
+type u32MinHeap []uint32
+
+func (h *u32MinHeap) push(v uint32) {
+	*h = append(*h, v)
+	q := *h
+	for i := len(q) - 1; i > 0; {
+		p := (i - 1) / 2
+		if q[p] <= q[i] {
+			break
+		}
+		q[p], q[i] = q[i], q[p]
+		i = p
+	}
+}
+
+// pop removes and returns the smallest index; the heap must not be empty.
+func (h *u32MinHeap) pop() uint32 {
+	q := *h
+	top := q[0]
+	last := len(q) - 1
+	q[0] = q[last]
+	q = q[:last]
+	for i := 0; ; {
+		l, r, m := 2*i+1, 2*i+2, i
+		if l < len(q) && q[l] < q[m] {
+			m = l
+		}
+		if r < len(q) && q[r] < q[m] {
+			m = r
+		}
+		if m == i {
+			break
+		}
+		q[i], q[m] = q[m], q[i]
+		i = m
+	}
+	*h = q
+	return top
+}
+
 // solveOracle is SolveOracle with an explicit call-graph sweep cap (tests pass a small cap to
 // reach the error).
 func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (PackageResult, error) {
@@ -904,6 +948,13 @@ func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (
 	// callees flipped (its result depends on nothing else), so a long chain costs one solve per
 	// function and per call edge, not one per sweep. Missing the cap would export optimistic
 	// summaries that hide ERR004 findings, so it is an error.
+	//
+	// A sweep visits the dirty functions in index order, from two min-heaps (thisSweep: ahead of
+	// the sweep's position; nextSweep: behind it) rather than a scan of every index per sweep,
+	// which was quadratic on a chain whose callers precede their callees. The sweeps, the solves
+	// and their order are those of the scan; the cost is O((solves + call edges) x log
+	// functions). dirty[i] is true while i is queued, or when i can never be solved again, so no
+	// index is queued twice. Mirrors solve_package_capped in rust/gosree-errsolve/src/lib.rs.
 	callers := make([][]uint32, nFuncs)
 	for idx := range funcs {
 		for bi := range funcs[idx].Blocks {
@@ -920,16 +971,20 @@ func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (
 		}
 	}
 	dirty := make([]bool, nFuncs)
+	thisSweep := make(u32MinHeap, nFuncs) // ascending, so already a heap
 	for i := range dirty {
 		dirty[i] = true
+		thisSweep[i] = uint32(i)
 	}
+	var nextSweep u32MinHeap
 	converged := false
 	for range maxCallgraphIters {
 		if err := ctx.Err(); err != nil {
 			return PackageResult{}, err
 		}
 		anyChanged := false
-		for idx := range funcs {
+		for len(thisSweep) > 0 {
+			idx := thisSweep.pop()
 			if mayReturnNil[idx] || !dirty[idx] || funcs[idx].Flags&FuncReturnsConcreteErrPtr == 0 {
 				continue
 			}
@@ -939,7 +994,7 @@ func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (
 				anyChanged = true
 				continue
 			}
-			fnMayNil, _, err := solveFuncOracle(ctx, uint32(idx), &funcs[idx], mayReturnNil, false)
+			fnMayNil, _, err := solveFuncOracle(ctx, idx, &funcs[idx], mayReturnNil, false)
 			if err != nil {
 				return PackageResult{}, err
 			}
@@ -947,7 +1002,15 @@ func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (
 				mayReturnNil[idx] = true
 				anyChanged = true
 				for _, c := range callers[idx] {
+					if dirty[c] {
+						continue
+					}
 					dirty[c] = true
+					if c > idx {
+						thisSweep.push(c)
+					} else {
+						nextSweep.push(c)
+					}
 				}
 			}
 		}
@@ -955,6 +1018,7 @@ func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (
 			converged = true
 			break
 		}
+		thisSweep, nextSweep = nextSweep, thisSweep
 	}
 	if !converged {
 		return PackageResult{}, fmt.Errorf("gusseterr: call-graph summary fixpoint did not converge within %d iterations", maxCallgraphIters)
