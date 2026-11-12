@@ -1046,6 +1046,10 @@ write is not yet a `guarded_by` row that passes SAFE009.
 | the only target is `pgxpool.Pool` | 35 | `s.db.Exec`, `Query`, `QueryRow`, `Begin` |
 | another target outside the module | 20 | `resp.Body.Close()`: every `io.ReadCloser` in the build |
 
+The first row is 1 site in 3 here, against about 1 in 15 when the same question was asked of every
+interface call in production code that passes memory (805 sites, earlier in this work). The
+difference is one getter: without `Name` it is 16 of 122.
+
 As if the checker resolved each interface call to those targets and looked into the ones in the
 module:
 
