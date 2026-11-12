@@ -89,17 +89,27 @@ func keeps(x *T) { kept = x }
 var hook = reads
 
 func call(x *T) { hook(x) }
+
+type conf struct{ hook func(*T) }
+
+var cfg = conf{hook: reads}
+
+func callField(x *T) { cfg.hook(x) }
 `
 	for name, c := range map[string]struct {
 		rest    string
+		fn      string
 		leaves  int
 		mayMiss bool
 	}{
-		"assigned where it is declared":          {"", 1, false},
-		"assigned by name in another function":   {"\nfunc swap() { hook = keeps }\n", 2, false},
-		"its address is in an exported variable": {"\nvar HookP = &hook\n", 1, true},
-		"its address is returned":                {"\nfunc HookAddr() *func(*T) { return &hook }\n", 1, true},
-		"its address is handed to a call":        {"\nfunc Hand(set func(*func(*T))) { set(&hook) }\n", 1, true},
+		"assigned where it is declared":                   {"", "call", 1, false},
+		"assigned by name in another function":            {"\nfunc swap() { hook = keeps }\n", "call", 2, false},
+		"its address is in an exported variable":          {"\nvar HookP = &hook\n", "call", 1, true},
+		"its address is returned":                         {"\nfunc HookAddr() *func(*T) { return &hook }\n", "call", 1, true},
+		"its address is handed to a call":                 {"\nfunc Hand(set func(*func(*T))) { set(&hook) }\n", "call", 1, true},
+		"a field assigned where the struct is declared":   {"", "callField", 1, false},
+		"the address of the field is in another variable": {"\nvar FieldP = &cfg.hook\n", "callField", 1, true},
+		"the address of the struct is returned":           {"\nfunc CfgAddr() *conf { return &cfg }\n", "callField", 1, true},
 	} {
 		pkg := buildWalk(t, head+c.rest)
 		var fns []*ssa.Function
@@ -116,7 +126,7 @@ func call(x *T) { hook(x) }
 			sumReaders: map[*ssa.Function]map[*ssa.Function]bool{},
 		}
 		st.contracts = st.buildContractIndex(fns)
-		call := pkg.Func("call")
+		call := pkg.Func(c.fn)
 		leaves, mayMiss := st.ask().origins(call, calledValue(t, call))
 		if len(leaves) != c.leaves {
 			t.Errorf("%s: the trace found %d functions stored by name, want %d", name, len(leaves), c.leaves)

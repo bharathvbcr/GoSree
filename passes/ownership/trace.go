@@ -565,7 +565,8 @@ func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bo
 		}
 		vals := t.q.contracts.globalFieldStores[base][field]
 		wholeVals := t.q.contracts.globalStores[base]
-		incomplete := (len(vals) == 0 && len(wholeVals) == 0) || token.IsExported(base.Name())
+		// The address of the variable or of one of its fields handed on: as storedInGlobal.
+		incomplete := (len(vals) == 0 && len(wholeVals) == 0) || token.IsExported(base.Name()) || t.q.contracts.globalAddrTaken[base]
 		var out []leafValue
 		for _, sv := range vals {
 			sub, inc := t.follow(parentOf(sv), sv, ask{kind: askValue}, depth+1)
