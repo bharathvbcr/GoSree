@@ -164,7 +164,7 @@ func (st *state) propagateSharedToMethods(
 		return
 	}
 	q := st.ask()
-	concretes, _ := q.resolveInterfaceTypes(fn, cc.Value, 0, map[valVisitKey]bool{})
+	concretes, _ := q.resolveInterfaceTypes(fn, cc.Value)
 	if q.cut {
 		// The methods found are checked below; those of the types the trace did not get to are not.
 		st.report(posOf(ins, ins), ImmCut, fmt.Sprintf(

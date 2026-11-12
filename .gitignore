@@ -11,6 +11,11 @@
 coverage.*
 .gosree-erase-*.tmp
 
+# A root go.work breaks cmd/gosree-corpus on its nested test modules. Point at an
+# unpublished gusset with a temporary `go mod edit -replace` instead.
+/go.work
+/go.work.sum
+
 # Rust build artifacts (gusset engine & solver crates)
 /rust/target/
 /rust/*/target/

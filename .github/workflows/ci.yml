@@ -33,7 +33,7 @@ jobs:
           path: third_party/gusset
           persist-credentials: false
 
-      - name: Link Gusset where go.mod and rust/gusset-engine resolve ../gusset
+      - name: Link Gusset where rust/gusset-engine resolves ../../../gusset
         shell: bash
         run: |
           set -euo pipefail
@@ -56,6 +56,20 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+
+      # The Go half of gusset comes from the go.mod pin and the Rust half from the
+      # sibling checkout above; they must be the same commit. This parses a
+      # pseudo-version (v0.0.0-<date>-<12-hex>) and must change if a tag is pinned.
+      - name: Gusset go.mod pin matches the Rust checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(go list -m -f '{{.Version}}' github.com/bharathvbcr/gusset)"
+          pinned="${version##*-}"
+          checkout="$(git -C third_party/gusset rev-parse --short=12 HEAD)"
+          echo "go.mod pins gusset $version; Rust checkout is $checkout"
+          [[ "$pinned" =~ ^[0-9a-f]{12}$ ]] || { echo "gusset pin $version is not a pseudo-version"; exit 1; }
+          test "$pinned" = "$checkout"
 
       - name: Rust solver format, clippy, test, and release archive
         shell: bash

@@ -571,13 +571,299 @@ type callTarget struct {
 	mc *ssa.MakeClosure
 }
 
+// cellUses is how a piece of local memory is used: a local variable that lives in memory, a
+// struct made with &T{}, or a field of one. It has several names. A variable is an Alloc in the
+// function that declares it and a free variable in each closure that captures it. Where its
+// address is passed to a function of this package it is that function's parameter, and what that
+// function returns of it is the call's result. Where two pointers meet on a branch it is the phi,
+// and where its address is kept in a pointer variable it is each load of that variable. Whoever
+// asks what the memory may hold has to read the stores through all of them. Reading the Alloc's
+// alone takes it at what its own function stores to it.
+type cellUses struct {
+	// stores are the stores to the memory, through any of its names.
+	stores []*ssa.Store
+	// loads are the reads of the whole of it.
+	loads []*ssa.UnOp
+	// fields, elems and slices are the addresses taken of a part of it: a field of a struct, an
+	// element of an array, a slice of an array. What is written through them is written to that
+	// part, and what becomes of each is for whoever asks about that part to read (usesOfAddress
+	// again, on the part's address).
+	fields []*ssa.FieldAddr
+	elems  []*ssa.IndexAddr
+	slices []*ssa.Slice
+	// open says an address of the whole of it goes somewhere that is not read here: into a
+	// package variable, a field, a slice, a map, a channel or an interface, out of the function
+	// that made it, to a function that has no body in sight or is not known, or it has more
+	// names than cellViewLimit. Something that is not in stores may then write the memory.
+	open bool
+}
+
+// cellViewLimit is how many names of one piece of memory usesOfAddress reads. Past it the memory
+// is taken as open.
+const cellViewLimit = 64
+
+// usesOfCell reads every use of the local variable alloc.
+func usesOfCell(alloc *ssa.Alloc) cellUses {
+	return usesOfAddress(alloc)
+}
+
+// usesOfAddress reads every use of the memory at addr (an Alloc, or the address of a field of
+// one) through every name it is given in this package.
+//
+// A call is followed into the callee when the callee is one function with a body: a function or
+// a method called by name, a closure called where it is made, a method value. Any other call
+// leaves the memory open.
+func usesOfAddress(addr ssa.Value) cellUses {
+	w := &addressWalk{
+		seen:     map[ssa.Value]bool{addr: true},
+		entered:  map[*ssa.Function][]*ssa.Call{},
+		captured: map[*ssa.Function]bool{},
+		reads:    map[*ssa.Function]bool{},
+		returns:  map[*ssa.Function][]int{},
+		kept:     map[*ssa.Alloc]bool{},
+		holding:  map[*ssa.Alloc]bool{},
+	}
+	if alloc, ok := addr.(*ssa.Alloc); ok {
+		w.holding[alloc] = true
+	}
+	w.readName(addr, addr.Referrers())
+	return w.u
+}
+
+type addressWalk struct {
+	u    cellUses
+	seen map[ssa.Value]bool
+	// entered are the calls through which the address reached each function. A function that
+	// returns the address returns it to the calls it was entered by, unless it has the address
+	// some other way as well: as a free variable (captured), or by reading a pointer variable
+	// that holds it (reads). Such a function can hand it to any call of it, and those are not
+	// all read.
+	entered  map[*ssa.Function][]*ssa.Call
+	captured map[*ssa.Function]bool
+	reads    map[*ssa.Function]bool
+	returns  map[*ssa.Function][]int
+	// kept are the pointer variables the address was found stored in, each read once. holding are
+	// the variables whose uses are being read, here and in the walks that asked for this one: a
+	// variable reached again while it is being read is a cycle, and the memory is open.
+	kept    map[*ssa.Alloc]bool
+	holding map[*ssa.Alloc]bool
+}
+
+// anotherName reads one more name of the same memory, once.
+func (w *addressWalk) anotherName(v ssa.Value, refs *[]ssa.Instruction) {
+	if w.seen[v] {
+		return
+	}
+	if len(w.seen) >= cellViewLimit {
+		w.u.open = true
+		return
+	}
+	w.seen[v] = true
+	w.readName(v, refs)
+}
+
+// readName reads the uses of one name of the memory.
+func (w *addressWalk) readName(addr ssa.Value, refs *[]ssa.Instruction) {
+	if refs == nil {
+		w.u.open = true
+		return
+	}
+	for _, ref := range *refs {
+		switch r := ref.(type) {
+		case *ssa.Store:
+			if r.Addr == addr {
+				w.u.stores = append(w.u.stores, r)
+				continue
+			}
+			w.keptIn(r.Addr)
+		case *ssa.UnOp:
+			w.u.loads = append(w.u.loads, r)
+		case *ssa.DebugRef, *ssa.BinOp:
+			// A comparison of the address reads nothing through it.
+		case *ssa.FieldAddr:
+			w.u.fields = append(w.u.fields, r)
+		case *ssa.IndexAddr:
+			w.u.elems = append(w.u.elems, r)
+		case *ssa.Slice:
+			w.u.slices = append(w.u.slices, r)
+		case *ssa.Phi:
+			w.anotherName(r, r.Referrers())
+		case *ssa.ChangeType:
+			w.anotherName(r, r.Referrers())
+		case *ssa.MakeClosure:
+			fn, ok := r.Fn.(*ssa.Function)
+			if !ok {
+				w.u.open = true
+				continue
+			}
+			for j, b := range r.Bindings {
+				if b == addr && j < len(fn.FreeVars) {
+					w.captured[fn] = true
+					w.anotherName(fn.FreeVars[j], fn.FreeVars[j].Referrers())
+				}
+			}
+		case ssa.CallInstruction:
+			w.passedTo(addr, r)
+		case *ssa.Return:
+			w.handedBack(addr, r)
+		default:
+			w.u.open = true // converted, sent, put in an interface: something else may write it
+		}
+	}
+}
+
+// passedTo follows the address into the one function a call runs.
+func (w *addressWalk) passedTo(addr ssa.Value, ins ssa.CallInstruction) {
+	cc := ins.Common()
+	var body *ssa.Function
+	if !cc.IsInvoke() {
+		body = canonicalBodyFn(cc.StaticCallee())
+	}
+	if body == nil || len(body.Blocks) == 0 {
+		w.u.open = true // handed to something whose body is not in sight
+		return
+	}
+	if !slices.Contains(cc.Args, addr) {
+		w.u.open = true // used by the call in some other way than as an argument
+		return
+	}
+	if call, ok := ins.(*ssa.Call); ok && !slices.Contains(w.entered[body], call) {
+		w.entered[body] = append(w.entered[body], call)
+		for _, idx := range w.returns[body] {
+			w.resultOf(call, idx)
+		}
+	}
+	for i, a := range cc.Args {
+		if a != addr {
+			continue
+		}
+		if i >= len(body.Params) {
+			w.u.open = true
+			continue
+		}
+		w.anotherName(body.Params[i], body.Params[i].Referrers())
+	}
+}
+
+// handedBack takes an address a function returns back to the calls it was entered by. The function
+// that made the memory, a closure that captures it and a function that reads it out of a pointer
+// variable return it to callers that are not read.
+func (w *addressWalk) handedBack(addr ssa.Value, ret *ssa.Return) {
+	fn := canonicalBodyFn(ret.Parent())
+	if fn == nil || w.captured[fn] || w.reads[fn] || len(w.entered[fn]) == 0 {
+		w.u.open = true
+		return
+	}
+	for idx, res := range ret.Results {
+		if res != addr || slices.Contains(w.returns[fn], idx) {
+			continue
+		}
+		w.returns[fn] = append(w.returns[fn], idx)
+		for _, call := range w.entered[fn] {
+			w.resultOf(call, idx)
+		}
+	}
+}
+
+// resultOf reads result idx of a call as one more name of the memory.
+func (w *addressWalk) resultOf(call *ssa.Call, idx int) {
+	if call.Call.Signature().Results().Len() == 1 {
+		w.anotherName(call, call.Referrers())
+		return
+	}
+	if call.Referrers() == nil {
+		w.u.open = true
+		return
+	}
+	for _, ref := range *call.Referrers() {
+		if ext, ok := ref.(*ssa.Extract); ok && ext.Index == idx {
+			w.anotherName(ext, ext.Referrers())
+		}
+	}
+}
+
+// keptIn reads an address stored in a pointer variable: each load of that variable is one more
+// name of the memory, as long as nothing out of sight reads the variable. Stored anywhere else,
+// the memory is open.
+func (w *addressWalk) keptIn(holder ssa.Value) {
+	var cell *ssa.Alloc
+	switch h := holder.(type) {
+	case *ssa.Alloc:
+		cell = h
+	case *ssa.FreeVar:
+		cell = cellOfFreeVar(h)
+	}
+	if cell == nil {
+		w.u.open = true
+		return
+	}
+	if w.kept[cell] {
+		return
+	}
+	w.kept[cell] = true
+	if w.holding[cell] {
+		w.u.open = true // a variable that is being read holds, through others, its own address
+		return
+	}
+	hw := &addressWalk{
+		seen:     map[ssa.Value]bool{cell: true},
+		entered:  map[*ssa.Function][]*ssa.Call{},
+		captured: map[*ssa.Function]bool{},
+		reads:    map[*ssa.Function]bool{},
+		returns:  map[*ssa.Function][]int{},
+		kept:     map[*ssa.Alloc]bool{},
+		holding:  w.holding,
+	}
+	w.holding[cell] = true
+	hw.readName(cell, cell.Referrers())
+	delete(w.holding, cell)
+	if hw.u.open || len(hw.u.fields)+len(hw.u.elems)+len(hw.u.slices) > 0 {
+		w.u.open = true // the variable is read by something that is not in sight
+		return
+	}
+	for _, load := range hw.u.loads {
+		w.reads[canonicalBodyFn(load.Parent())] = true
+	}
+	for _, load := range hw.u.loads {
+		w.anotherName(load, load.Referrers())
+	}
+}
+
+// cellOfFreeVar is the local variable a closure's free variable stands for: what the closure, or
+// the closure around it, was made with.
+func cellOfFreeVar(fv *ssa.FreeVar) *ssa.Alloc {
+	for {
+		fn := fv.Parent()
+		if fn == nil || fn.Parent() == nil {
+			return nil
+		}
+		idx := slices.Index(fn.FreeVars, fv)
+		var bound ssa.Value
+		forEachInstr(fn.Parent(), func(ins ssa.Instruction) {
+			if mc, ok := ins.(*ssa.MakeClosure); ok && mc.Fn == ssa.Value(fn) && idx >= 0 && idx < len(mc.Bindings) {
+				bound = mc.Bindings[idx]
+			}
+		})
+		switch b := bound.(type) {
+		case *ssa.Alloc:
+			return b
+		case *ssa.FreeVar:
+			fv = b
+		default:
+			return nil
+		}
+	}
+}
+
 // callTargets lists the functions v may be when it is called: v itself, and what reaches it
 // through conversions, phi edges and the stores to a local cell, in this function and in the
 // closures that capture the cell. rest is what it could not resolve to a function: a value of
 // another kind on some path (a parameter, a field, a call's result), or the load of a cell that
-// can be written by something other than the stores seen (a cell whose address goes anywhere but
-// into a load, a store to it or a closure's captures). The targets are all v may be when rest is
-// empty. The stores to a cell are taken together, whatever their order.
+// can be written by something other than the stores seen (usesOfCell: its address goes somewhere
+// that is not read). The targets are all v may be when rest is empty. The stores to a cell are
+// taken together, whatever their order, and they include the stores a closure that captures the
+// cell makes and the stores a function makes that is passed its address. A cell that is called
+// holds a function, so no address of a part of it is ever taken.
 //
 // What a caller takes from the list depends on what it asks. A fact that holds if any target does
 // it (releases a lock, publishes, writes) can be taken from each target. A fact that must hold
@@ -623,45 +909,12 @@ func callTargets(v ssa.Value) (targets []callTarget, rest []ssa.Value) {
 				unresolved(v)
 				return
 			}
-			stores := 0
-			// cell follows one address of the cell: the Alloc, or the free variable a closure
-			// that captures it sees it as.
-			var cell func(addr ssa.Value, refs *[]ssa.Instruction)
-			cell = func(addr ssa.Value, refs *[]ssa.Instruction) {
-				if refs == nil {
-					unresolved(v)
-					return
-				}
-				for _, ref := range *refs {
-					switch r := ref.(type) {
-					case *ssa.Store:
-						if r.Addr != addr {
-							unresolved(v) // the cell's address is stored somewhere
-							continue
-						}
-						stores++
-						walk(r.Val)
-					case *ssa.UnOp, *ssa.DebugRef:
-					case *ssa.MakeClosure:
-						fn, ok := r.Fn.(*ssa.Function)
-						if !ok {
-							unresolved(v)
-							continue
-						}
-						for j, b := range r.Bindings {
-							if b == addr && j < len(fn.FreeVars) && !seen[fn.FreeVars[j]] {
-								seen[fn.FreeVars[j]] = true
-								cell(fn.FreeVars[j], fn.FreeVars[j].Referrers())
-							}
-						}
-					default:
-						unresolved(v) // handed on: something else may write the cell
-					}
-				}
-			}
-			cell(alloc, alloc.Referrers())
-			if stores == 0 {
+			uses := usesOfCell(alloc)
+			if uses.open || len(uses.stores) == 0 {
 				unresolved(v)
+			}
+			for _, st := range uses.stores {
+				walk(st.Val)
 			}
 		default:
 			unresolved(v)

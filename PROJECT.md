@@ -171,11 +171,11 @@ A milestone is complete when its check command exits 0. The stress suite takes m
 
 ## Build Prerequisites
 
-With cgo on a unix target, build the Rust archive before the Go binary, with the gusset checkout as a sibling directory (`../gusset`, per the `replace` in `go.mod`):
+With cgo on a unix target, build the Rust archive before the Go binary, with the gusset checkout as a sibling directory (`../gusset`, which `rust/gusset-engine` depends on by path), at the commit `go.mod` pins:
 
 ```bash
 (cd rust && cargo build --release)   # rust/target/release/libgusset.a
 go build -o build/gosree ./cmd/gosree
 ```
 
-Skipping the first step fails at link time (`Undefined symbols ... _gosree_gusset_init`). With `CGO_ENABLED=0`, or on a non-unix target, no Rust is needed and the pure-Go oracle runs instead.
+Skipping the first step fails at link time (`ld: library 'gusset' not found`). With `CGO_ENABLED=0`, or on a non-unix target, no Rust is needed and the pure-Go oracle runs instead. That build can also be installed without a checkout: `CGO_ENABLED=0 go install github.com/bharathvbcr/gosree/cmd/gosree@latest`.

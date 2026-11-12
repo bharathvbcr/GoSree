@@ -10,9 +10,9 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `b5e77e1` on `integrate/2026-11-11`, and the commit after it that carries this text and changes no checker file |
-| Checker fingerprint | `ea4d532b03a3c903`: `bash tests/stress/fingerprint.sh` |
-| Run | 2026-11-11 night, load average 10-20: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; `passes/ownership` takes about four and a half minutes at that load), and the ledger below. The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
+| Git HEAD | `1ab2fc4` on `rework/one-tracer` (seven commits on top of `78f0879`; `d921195` is the last that changes a checker file), and the commit after it that carries this text |
+| Checker fingerprint | `dad2035e4464f668`: `bash tests/stress/fingerprint.sh` |
+| Run | 2026-11-12 early morning, at `d921195`, load average 25-40: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; `passes/ownership` takes about six and a half minutes at that load). The one test case `1ab2fc4` adds was run on its own. The ledger below was not counted again: no fixture and no marker changed, the stress suite is among the 17 packages, and the fixtures give the same 677 diagnostics as at `b5e77e1`. The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
 is expected and is the suite working: each failure names the marker to promote or the lock that
@@ -759,6 +759,86 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
        in as a parameter still expects that.
     Each change has tests that fail without it, and each of its parts was taken out in turn to
     see a test fail.
+  - On 2026-11-12 five more changes went in on top of those (`0427d1e` to `d921195`, six
+    commits and one of tests), on the branch `rework/one-tracer`. Where one of them changes a
+    finding in a corpus it says which. Changes 1 to 4 are the fold and the two defects it was to be followed by. Change 5
+    was found while 3 and 4 were written, goes further than they do and changes what is
+    reported, so it can be told apart: `ff81ad1` is the head without it.
+    1. The eleven walks that follow a value backwards are one walk (`passes/ownership/trace.go`,
+       `trace.follow`). What is asked about the value is a parameter of the walk: the values
+       it may be, the allocations it may point to, a field of it, what is stored at it. The
+       limits and the visited set are in that one function, and each step (the arguments of a
+       parameter, the bindings of a captured variable, what a call returns, the stores to a
+       cell or a package variable, a field behind a pointer) is one method. Before the old
+       walks were removed they were run beside the new one and compared at every question:
+       30,248,001 questions in the package's tests and 21,619,660 in nine corpus runs at both
+       settings of the limits, no difference. No finding differs. 798 lines out, 636 in.
+    2. At a call through a method value (`g := r.second; h := g(noop, p.Store)`) the trace
+       took the argument for a parameter one place to the left, and nothing for the first. A
+       method that hands back one of its arguments was read as handing back the other
+       (`method_value_args_test.go`: 6 publishes that were not reported and 5 reported that
+       were not there). The step had been in two of the three copies. No corpus finding differs.
+    3. A local variable that a closure captures, or whose address is taken, was read at what
+       its own function stores to it: `f := noop; set := func() { f = p.Store }; set(); f(x)`
+       called `noop`. The stores are now read through every address the variable has
+       (`usesOfCell` in `graph.go`, which `callTargets` already did for itself and now shares),
+       and a variable whose address goes somewhere that is not read answers "may not be all"
+       (`cell_internal_test.go`, `cell_writes_test.go`: 8 publishes that were not reported).
+       No corpus finding differs.
+    4. The address of a variable or struct passed to a function of this package is followed
+       into that function (`set(&f)`, `s.arm()` with a pointer receiver, `arm(q)`), where the
+       parameter is one more address of the same memory. A call that runs one function with a
+       body is followed; a method of an interface, a function held in a variable and a
+       function of another package leave the memory "may not be all". One reading stops at 64
+       names of the memory it reads (`cellViewLimit`, listed in `walkBounds`, both sides
+       tested), and since change 5 each pointer variable that holds the address is read on a
+       count of its own. `callTargets` reads cells the same way, so a function variable set
+       through its address is among the targets of a call of it; the lock check takes that as
+       it takes any targets (`TestLockThroughAVariableWhoseAddressIsPassedOn`), and does not
+       match a release by a function made in the helper
+       (`TestLockReleasedByAFunctionAHelperStoresIsAKnownMiss`) (8 publishes that were not
+       reported). Standard library with tests: 5 findings
+       fewer, 13,082. They are the "could not be followed to the end" rows at the four calls
+       of `f1` in the generic compose helpers of `net/http/httptrace` (`trace.go:217`, `230`,
+       `243` twice, `256`). The chain, printed from a scratch build, ended one step over the
+       depth limit; with the address followed into `compose` a store is found one step sooner,
+       and the walk ends at a value read from a context, which it cannot follow and does not
+       claim to. The callees are no more known than before.
+    5. A struct was read through the allocation alone, so a store through another name for its
+       pointer was not read: `s := newS(); s.fn = p.Store; s.fn(x)` called what the constructor
+       had put there. The same for a pointer chosen on a branch, a pointer kept in another
+       struct or a package variable, and a pointer variable a closure captures. The reading
+       now takes as further names the phi where two pointers meet, a pointer converted to a
+       named pointer type, the result of a call when the function the address was passed to
+       returns it, and each load of a local pointer variable the address is stored in. Where
+       the address goes somewhere that is not read (returned by the function that made it,
+       stored in a field or a package variable, put in an interface, passed to a function
+       that is not known), every store the package makes to that field of that struct type
+       stands in, as it already did where a pointer leads nowhere in sight
+       (`struct_alias_test.go`: 6 publishes that were not reported). Reference service with
+       tests: one finding fewer, 7,721, the "could not be followed to the end" row at
+       `cmd/server/shutdown_handlers_test.go:123`. The struct there is held in a pointer
+       variable that closures capture; its field used to be answered by every store to that
+       field in the package, a chain that ran over the depth limit, and is now answered by
+       the stores made through the variable. With the limits turned down to 6 values and 4
+       steps the standard library gains 15 "could not be followed to the end" rows, all
+       `instr.op(instr, state, ...)` in `encoding/gob/codec_test.go`: the struct is passed to
+       the function held in its own field, which is not known, so the package's stores to
+       `encInstr.op` stand in and are more than 6 values. Nothing else differs at either
+       setting: reference service 2,037 in production code and 694 annotated, standard
+       library 13,082, fixtures 677. A review of this change found one case it answered as
+       complete that was not: a function handed both the struct and the pointer variable that
+       holds it (`pick(q, &q)`) can return the struct to a call that passed neither, and the
+       return was taken back only to the calls that passed the struct. Such a function now
+       leaves the struct "may not be all" (the sixth commit; no corpus finding differs).
+    The corpora do not say what the stand-in of change 5 costs in reports of stores made to
+    another struct of the type: almost no corpus finding rests on it at the normal limits.
+    Each of the 29 parts of the reading that changes 3 to 5 added, and the 3 added on review,
+    was taken out in turn and makes a test fail. Two guards in it have no test, because no
+    program that compiles reaches them: a call with more arguments than its callee has
+    parameters, and an address used by a call otherwise than as an argument. What the reading
+    costs in time was not measured: it is not cached, and the wall times of these runs, at a
+    load average of 30 to 65, say nothing either way.
   - The two tests that read the source (`walk_answers_test.go`) were themselves tried against
     seven planted defects: a sub-walk's answer dropped, an answer passed straight to another
     call, a counted loop, a size limit written as a number, a `for range` with a count, a new
@@ -813,6 +893,39 @@ programs are in this state: the runtime convicts them and the checker reports th
 
 ## Not covered
 
+- Found on 2026-11-12 while the walks were folded and not fixed:
+  - A method called through a method value has no call site in sight: the call is the bound
+    wrapper's, and the index reads the bodies of source functions and their closures, not of
+    wrappers. A field of its struct parameter is then answered by every store to that field in
+    the package, so `g := r.call; g(S{fn: noop}, S{fn: p.Store}, x)` reports a publish
+    whichever argument the method calls (`TestMethodValueStructArguments` pins it). A
+    publish through a method value of a method of this package is not seen at the caller
+    either (below); whether for the same reason was not looked into.
+  - Where a struct's pointer goes out of sight, the stores to the field anywhere in the
+    package stand in, so a store made to another struct of the type is taken as possible:
+    `s := newS(); u := &S{fn: p.Store}; s.fn(x)` is reported
+    (`TestStructWrittenThroughAnotherNameForItsPointer`, the case marked known). Errs toward
+    reporting. Nothing stands in for a function variable whose address goes out of sight
+    (`other.set(&f)`): the answer says it may not be all, and what was written there is not
+    found.
+  - A function that returns the result of calling a variable is not taken to return a fresh
+    value, also when every function the variable may hold returns one
+    (`mk := newA; if c { mk = newB }; return mk()`), and a call through such a variable in the
+    publishing function is "not owned" likewise. Only a function called by name is. Errs
+    toward reporting. Seen with probes; no test.
+  - An element of a local array of functions is not followed when the array is built as a
+    value (`arr := [2]func(*T){noop, p.Store}; arr[1](x)`): the step reads the stores made
+    through the array's own element addresses in its own function, and here there are none.
+    A closure that writes an element is not read either. Seen with probes; no test.
+  - A closure that publishes a variable it captures is told so in the closure (SAFE002). A use
+    of the variable after the closure is called, in the function that owns it, is not a use
+    after publish. Seen with one probe; no test.
+  - A helper that stores an unlocking function through the address of a function variable
+    (`s.setUnlock(&f); f()`): the function is among those the variable may hold, but the mutex
+    it unlocks is named by the helper's receiver, and the lock check keeps a function's locks
+    as paths from its own values, so the release is not matched
+    (`TestLockReleasedByAFunctionAHelperStoresIsAKnownMiss`).
+
 - Found on 2026-11-11 after the merge and not fixed:
   - A read of an argument after it is published, inside a helper. Written out, any use after
     the publish is SAFE003. A helper's summary says what it keeps, not in which order it does
@@ -841,9 +954,11 @@ programs are in this state: the runtime convicts them and the checker reports th
     facts are worked out, and has no test of its own.
   - The handler write check words a function read from the handler and called as "is passed to
     a dynamic function call". The finding is meant; the wording is that of an argument.
-  - The eleven walks that follow a value backwards are still separate functions that hand a
-    visited set to one another. They answer to one question type and to the tests that read
-    the source; they have not been folded into one walk.
+  - The eleven walks that follow a value backwards are one walk since 2026-11-12 (section 5).
+    Two things in it are as the separate walks had them and were not decided: a field of a
+    struct value and what is stored at an address are asked without marking what is visited
+    and without spending budget, and the second is not stopped by depth. No case was found
+    that this gets wrong; the depth limit ends the one cycle that results.
   - What is done besides a publish is judged by what a callee keeps. A receiver's method that
     has no publishing answer counts as keeping the argument without being looked into, and a
     method value used as the forwarded callable counts too; either can report a helper that is

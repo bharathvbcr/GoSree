@@ -173,7 +173,7 @@ func poolGetters(n int) string {
 
 // TestCalleeChosenAmongManyIsNotFullyKnown: a function is chosen among 100 pool getters and one
 // function that returns a package variable, called, and its result sent on a channel. Tracing what
-// the called value may be (traceSSAOrigins) has a budget of 96 values. Running out of it used to
+// the called value may be (trace.follow) has a budget of 96 values. Running out of it used to
 // answer "these are all", so the result counted as the caller's own and the send passed. It now
 // answers "incomplete", and the send is reported. That also holds where every candidate is a pool
 // getter (farFresh): past the budget the check does not know that. The call itself says that its
@@ -199,7 +199,7 @@ func TestCalleeChosenAmongManyIsNotFullyKnown(t *testing.T) {
 }
 
 // TestStructChosenAmongManyIsNotFullyKnown: the same, with the function read from a field of a
-// struct chosen among 101 (tracePtrBaseOrigins, the same budget).
+// struct chosen among 101 (the walk asked what a pointer points to, the same budget).
 func TestStructChosenAmongManyIsNotFullyKnown(t *testing.T) {
 	pick := func(name string, n int) string {
 		var b strings.Builder
@@ -276,7 +276,7 @@ func TestSharedLoadCalleeThroughManyConversions(t *testing.T) {
 const cutCall = " // want \"SAFE005: which functions the value called here may be could not be followed to the end .it comes through more than 14 steps or from more than 96 values.\" " + wantCutArg
 
 // TestSharedLoadCalleeInStructThroughManyConversions: the same, with the writer in a field of a
-// struct whose pointer was converted between two named types 16 times (tracePtrBaseOrigins, the
+// struct whose pointer was converted between two named types 16 times (what a pointer points to, the
 // same depth). The long trace is cut and says so. It also finds the writer, because a trace that
 // loses the pointer falls back on every store into that field of the struct type and of the types
 // converted to it. Where no such store exists (unset: the field is filled in somewhere the trace
@@ -300,7 +300,7 @@ func TestSharedLoadCalleeInStructThroughManyConversions(t *testing.T) {
 }
 
 // TestSharedLoadCalleeInStructThroughManyCalls: the writer is in a field of a struct value handed
-// down through 16 functions (traceStructFieldValueOrigins, the same depth). Past the depth the
+// down through 16 functions (the walk asked for a field of a struct value, the same depth). Past the depth the
 // trace falls back on every store into that field of that type, which here finds the writer, so
 // the write is reported at both lengths; the long one now also says the trace was cut.
 func TestSharedLoadCalleeInStructThroughManyCalls(t *testing.T) {
@@ -323,7 +323,7 @@ func TestSharedLoadCalleeInStructThroughManyCalls(t *testing.T) {
 
 // TestSharedLoadCalleeInUnsetStructThroughManyCalls: as above, but nothing in the package stores
 // into the field: the struct stands for one filled in where the trace cannot see. There is then no
-// store for the trace to fall back on, and the depth of traceStructFieldValueOrigins alone decides:
+// store for the trace to fall back on, and the depth of the walk asked for a field alone decides:
 // the long chain says the trace was cut. The short chain reaches the empty struct, finds no callee,
 // and like any call of a function the check cannot find for a reason other than its bounds it says
 // nothing.
