@@ -24,6 +24,7 @@ import (
 	"go/token"
 	"go/types"
 	"reflect"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
@@ -51,6 +52,20 @@ const (
 	// channel, a select, a mutex or cond, or a join shape the rule does not accept. The separate
 	// category keeps that class measurable.
 	UseAfterSynced = "SAFE003-forkjoin"
+	// HandlerWriteCut, ImmCut and GlobalCut are reported, under SAFE008, SAFE005 and SAFE006, where
+	// the check reached one of its bounds before it finished (handlerStepLimit, rootWalkBudget,
+	// immMaxRounds, globalWalkBudget): it found nothing there and did not rule anything out. A check
+	// that stopped early must not read as one that passed. The separate categories keep these apart
+	// from the findings, in the counts and in de-duplication.
+	HandlerWriteCut = "SAFE008-incomplete"
+	ImmCut          = "SAFE005-incomplete"
+	GlobalCut       = "SAFE006-incomplete"
+	// TransferCut is reported, under SAFE002, at a call whose callees could not all be found
+	// because the trace of a called value was cut (originDepth, originBudget) while it passes an
+	// argument one of them could publish: whether the call gives that argument away is known only
+	// for the callees reached, so the transfer checks (SAFE002, SAFE003, SAFE004) did not run for
+	// the others.
+	TransferCut = "SAFE002-incomplete"
 )
 
 // TransferRelated is the message of the related position a finding carries when the transfer that
@@ -127,6 +142,7 @@ type state struct {
 	// closures that capture them) to their guard.
 	localGuards    map[ssa.Value]localGuard
 	guardSums      *guardState
+	contracts      *contractIndex
 	globalWrites   map[*ssa.Global][]token.Pos
 	mutatedGlobals map[*ssa.Global]bool
 	// immRets caches what each callee's single-result returns trace to (see immReturns); only
@@ -137,6 +153,17 @@ type state struct {
 	immRound   int
 	immStack   []immFrame
 	immBusy    map[*ssa.Function]int
+	// immIn caches immInValueType: the imm type each type holds by value, or nil.
+	immIn map[types.Type]types.Type
+	// loadWalk is the walk the shared-load check follows values back with, and forwardedCalls are
+	// the calls inside synthesised wrappers that it checked at the calls entering them (forward.go).
+	loadWalk       *rootWalk
+	forwardedCalls map[ssa.Instruction]bool
+	// originCut is set when a trace of where a value comes from ran out of its budget or its depth
+	// (originBudget, originDepth, contracts.go). The shared-load check and resolveCallContractCut
+	// clear it before a trace and read it after, to report a call whose callees could not all be
+	// found.
+	originCut bool
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the
@@ -187,6 +214,7 @@ func run(pass *analysis.Pass) (any, error) {
 
 	fns := sourceFuncs(st.ssa)
 	st.localGuards = st.guardedCells(fns)
+	st.contracts = st.buildContractIndex(fns)
 	st.computeSummaries(fns)
 	st.exportFacts(fns)
 	st.collectGlobalMutations(fns)
@@ -323,11 +351,29 @@ func (st *state) report(pos token.Pos, cat, msg string) {
 // finding is keyed on its message as well, since distinct messages at one position are distinct
 // defects (two arguments moved by one call; two borrows one go statement captures; an address taken
 // and a field written).
+//
+// A finding is never reported at no position. Some instructions have none (those of a function
+// go/ssa synthesises), and a finding there could not be found, fixed or hatched, and every such
+// finding of a rule would share one key and be reported as one. The checks that follow values into
+// such functions report at the call that leads in (frame.at, forwardShared); this is the last
+// resort for any that does not: the finding is reported at the transfer that causes it, or at the
+// package clause, says so, and keeps its message in its key, since that position does not tell two
+// findings apart.
 func (st *state) reportRelated(pos token.Pos, cat, msg string, related []analysis.RelatedInformation) {
+	located := pos.IsValid()
+	if !located {
+		where := "the transfer that causes it"
+		if pos = st.transferAt; !pos.IsValid() && len(st.pass.Files) > 0 {
+			pos, where = st.pass.Files[0].Name.Pos(), "the package clause"
+		}
+		msg += "; the code this is about has no source position, so it is reported at " + where
+	}
 	k := reportKey{pos, cat, msg}
 	switch cat {
 	case UseAfter, UseAfterSynced, HandlerWrite:
-		k.extra = ""
+		if located {
+			k.extra = ""
+		}
 	}
 	st.findings++
 	// A finding a transfer causes away from the transfer (a use after it, a handler's write) points
@@ -342,6 +388,9 @@ func (st *state) reportRelated(pos token.Pos, cat, msg string, related []analysi
 			st.mutedFindings++
 		}
 		sk := reportKey{pos, cat, ""}
+		if !located {
+			sk.extra = msg
+		}
 		if !st.suppressed[sk] {
 			st.suppressed[sk] = true
 			st.stats.Suppressed++
@@ -352,9 +401,8 @@ func (st *state) reportRelated(pos token.Pos, cat, msg string, related []analysi
 		return
 	}
 	st.reports[k] = true
-	ruleID := cat
-	if cat == UseAfterSynced {
-		ruleID = UseAfter
-	}
+	// A category that sets a class of a rule's findings apart (SAFE003-forkjoin, SAFE008-incomplete)
+	// is reported under the rule.
+	ruleID, _, _ := strings.Cut(cat, "-")
 	st.pass.Report(analysis.Diagnostic{Pos: pos, Category: cat, Message: ruleID + ": " + msg, Related: related})
 }

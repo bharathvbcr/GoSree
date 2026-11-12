@@ -107,7 +107,7 @@ func viaSyncMap(m *sync.Map) {
 	m.Store("k", j)
 	go func() {
 		v, _ := m.Load("k")
-		v.(*Job).ID = 2
+		v.(*Job).ID = 2 // HIT(SAFE005): m.Load returns read-only shared memory
 	}()
 	j.ID = 1 // HIT(SAFE003): Store into a *sync.Map (pointer override) publishes j to every goroutine holding the map. Witness sp_w_syncmap
 }

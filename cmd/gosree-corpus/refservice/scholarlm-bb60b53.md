@@ -591,3 +591,135 @@ a production run (no `-tests`) on a `git archive` of `bb60b53` with this ledger,
 - `-tests` no longer stalls: on `6b12630` it stops after 37 s (9.2 GB peak RSS) because `safeerr`
   fails `internal/wisdev`'s test variant, fail-closed: `gusseterr: func count 18973 exceeds 16384`.
   So `-tests` is still not re-measured; it needs a larger solver limit or per-function chunking.
+
+### Handler write check: getter results, positions and bounds (working tree on `7b739fc`, 2026-11-11)
+
+Not committed when measured. Unannotated production code of the pin unless a row says otherwise; no
+transfer was triaged, so none of this changes the recorded failure.
+
+- **Getter results and positions**, measured on `7b739fc` plus the two changes alone
+  (`gosree-corpus -module`): SAFE008 342 -> 407 once the check follows a value a getter of another
+  package returns, -> 419 once a write inside a synthesised wrapper is reported at the call that
+  enters it instead of at no position. Findings at no position: 1 -> 2 -> 0. No transfer newly
+  flagged by either. Both runs repeated with identical rows.
+- **Bounds and the remaining positions**, measured on two frozen copies of the working tree that
+  differ only in this change's files (the tree carried other uncommitted work, so its totals are
+  not comparable with the row above): 2,035 findings before and after in production code, 7,538
+  with tests; the same category, position and transfer for every finding; none at no position and
+  none in the new `SAFE008-incomplete` / `SAFE005-incomplete` categories.
+  - The old 64-value walk budget was reached 35 times in production code and 95 times with tests
+    (on `7b739fc` plus the first two changes). With the budget lifted, no walk found shared memory
+    it had not found before, and the largest visited 110 values. The 10000-scan limit and the two
+    16-step limits were not reached.
+  - Message text is not stable from run to run in that tree: the same binary run twice differs in
+    4 to 6 rows, each a SAFE006 that names a different one of the variable's write lines. On
+    `7b739fc` plus the first two changes, two runs gave identical rows.
+- **Every pass, with tests** (`gosree ./...`, the same frozen copies): 16,232 distinct findings by
+  position and rule before and after the borrow and errcheck passes stopped dropping findings
+  that have no position; none reported at its function or the package clause in their place.
+- **Annotated** (`-annotate`, production code, the frozen copy with the change): 578 transfers,
+  344 hatched, 59.5%; 693 findings remain (SAFE001 370, SAFE002 67, SAFE003 55, SAFE004 20,
+  SAFE005 20, SAFE006 118, SAFE008 6, SAFE009 37), none at no position and none in the new
+  categories. The transfer count includes the other uncommitted work in that tree (562 on
+  `6b12630`); it was not compared with a copy without this change, and nothing was triaged.
+- Not re-measured: run time (the machine's load average was 90).
+
+### The other fixed limits of the ownership pass (working tree on `7b739fc`, 2026-11-11)
+
+Not committed when measured. Twenty limits at which a walk stopped and answered "nothing here"
+were lifted or made to report (`tests/stress/FINDINGS.md`, section 5). Measured on two frozen
+copies of the working tree that differ only in that change's files; nothing was triaged, so none of
+this changes the recorded failure.
+
+- **Findings**: 2,035 before and after in production code, 7,538 with tests, 693 with the
+  annotation table applied (`-annotate`). The same position and rule for every finding in all
+  three; none at no position; none in `SAFE005-incomplete`, `SAFE006-incomplete` or
+  `SAFE008-incomplete`.
+- **How often the old limits were reached** on production code (a build with a counter at each
+  limit, counting every time a walk was turned back): 16 types in the search for an `imm` value
+  15,800 times, 64 values in the walk back to a package variable 11,335 times, the borrow lookup's
+  depth 28 times, 32 values to a closure 8 times. The other sixteen were not reached.
+- **What lifting them found**: 420 walks back to a package variable now go past 64 values; 36 of
+  them reach a package variable they did not reach before, and no finding changes (why not was
+  not looked into). One walk visits more than 1024 values; none reaches the new budget of 4096.
+  Without the annotation table the service declares no `imm` type, so the longer type searches
+  end with the answer they had. With it (66 `guarded_by`, 11 `holds`, 1 `imm`, 8 `iso` claims
+  checked) the counts are also the same before and after: 578 transfers, 344 hatched, and among
+  the 693 findings 37 SAFE009, 20 SAFE005 and 118 SAFE006.
+- **Message text** is not stable from run to run and is no measure of the change: four runs of
+  each binary give the same positions and rules and differ, pair by pair, in 1 to 6 rows before
+  and 3 to 9 after, each naming a different write line or alias. No row that is stable on both
+  sides differs between them.
+- **Run time**, as CPU time of `gosree-corpus -module` on production code (user plus system, three
+  runs of each binary taken in turn, load average 50 to 70): 54.0 s before (62.8, 60.1, 54.0),
+  57.9 s after (65.5, 63.6, 57.9), more in each of the three pairs by 3 to 4 s. About 5% on three
+  runs of a busy machine; wall time swung between 27 and 51 s for one binary and says nothing.
+- **Contract resolution** (`contracts.go`, six more limits lifted and the origin tracers' budget
+  and depth made to say when they cut a trace, measured the same way on top of the above): 2,035,
+  7,538 and 693 findings before and after, the same position and rule for every one, 578
+  transfers and 344 hatched with the annotation table, none in an `-incomplete` category.
+  The origin tracers' budget of 96 values is reached 36,554 and 35,883 times on production code
+  and their depth of 14 is reached 75,044, 28,570 and 4,022 times. Running out of the budget now
+  answers "incomplete" where it answered "complete", and no finding changes (why not was not
+  looked into); a trace cut by either is now reported where the shared-load check depends on it,
+  and no call in this tree is. The other limits were not reached.
+- **A cut callee trace said at the call** (`SAFE002-incomplete` where a callee not reached may
+  publish an argument, `SAFE005-incomplete` where the result may be loaded memory; measured the
+  same way on top of the above): production code 2,035 findings before and 2,036 after, the one
+  new report at `internal/wisdev/fulltext_backfill.go:486`, a call of a function held in a
+  struct field. With tests 7,538 and 7,705: 71 `SAFE002-incomplete` and 96 `SAFE005-incomplete`,
+  all at calls of functions held in variables, struct fields and parameters (61 at calls of
+  `ParallelSearch`, a package variable that tests assign to). Annotated 693 and 694, still 578 transfers and 344 hatched. No finding was
+  lost. A first build without the filter for interface methods gave 49 new reports on production
+  code and 622 with tests, most at `ctx.Value(...)`, a method no container contract can stand
+  behind; a build that counted cut traces before the change found 83 distinct called values on
+  production code.
+- **Three gaps closed after that** (each measured against the build before it, on frozen copies):
+  - *Which reason a message names* no longer follows the order files were loaded in. Four runs of
+    the fixed binary on production code give the same text in all 2,036 rows; before, 3 to 19 rows
+    differed between two runs. No finding changes.
+  - *Struct conversions* are followed when finding the function a struct field holds. No finding
+    changes in this tree, with or without tests.
+  - *Interface methods* are followed by the shared-load check. Production code and the annotated
+    run are unchanged (2,036 and 694 findings, 578 transfers, 344 hatched). With tests 7,705
+    become 7,719: 14 SAFE005 in `internal/usage`, at writes in the `RecordUsage` and `EmitAlert`
+    methods of nine test doubles. `(*Recorder).Record` takes the recorder from an
+    `atomic.Pointer` (`recorder.go:230`), and `persistence_outbox.go:211` calls its store, an
+    interface field. Twelve of the 14 writes are made with the double's own mutex held, which
+    the rule credits only as a `//gosree:guarded_by` claim; two (`fakeStore`) have no lock.
+  None of the three moves the hatch ratio: 578 transfers, 344 hatched, 59.5%, against the 20% of
+  the abandon criterion. Item 4 of the roadmap stands as written.
+- **A fourth gap, closed after those**: a call of an interface method took its contract from the
+  container table alone, so a method of the package that publishes its argument or returns loaded
+  memory was seen when called directly and not through an interface. It now asks the method of
+  each type the receiver is seen to be (`tests/stress/FINDINGS.md`, section 5). On this service
+  that changes no finding on production code or in the annotated run (2,036 and 694 rows, 578
+  transfers, 344 hatched, 59.5%); with tests it adds one call reported twice as not followed to
+  the end (`internal/wisdev/fulltext_version_links_run_test.go:260`), 7,719 to 7,721. No plain
+  finding appeared. The likely reason, not counted: the receivers of this service's interface
+  calls are mostly not in sight of the package that makes the call, and those calls stay silent.
+- **Message text across the contract changes** (before the fix above) follows the run, not the binary, in this tree
+  (on the standard library the later binary varied more in every comparison, unexplained;
+  `tests/stress/FINDINGS.md`). Four runs of
+  each binary taken one after the other differed, pair by pair, in 3 to 9 rows before and 6 to 18
+  after; four of each taken in turn (the binary before the contract work and the final one)
+  differed in 8 to 19 rows before and 2 to 9 after. Ten rows in `cmd/server/server.go` (lines
+  399, 533, 726, 748 and 768, SAFE002 and SAFE004 at each) named `GlobalDomainOutcomes` in four
+  runs of one binary and it, `GlobalSearchRegistry` or `GlobalUsageRecorder` in four of the
+  other. Both binaries find the same 13 package variables at those transfers (a build of each
+  that prints them); the message names the one with the lowest position, the three are declared
+  in three files of one package, and position order across files follows load order.
+- **Run time across the contract changes**, as CPU time of `gosree-corpus -module` on production
+  code (user plus system, four runs of each binary taken in turn, the order alternating, by a
+  scratch script and not a benchmark in the repository): 47.3 s
+  before (55.3, 51.8, 49.7, 47.3) and 39.1 s after (43.4, 42.2, 39.1, 39.2), less in each of the
+  four rounds by 8 to 12 s. The receiver of an interface method that no container contract can
+  stand behind is no longer traced, which is the likely reason; that was not measured on its
+  own. The four later fixes (message order, struct conversions, interface methods in the
+  shared-load check, the package's own methods behind an interface) trace receivers again where
+  a method of the package has a contract. Measured the same way, three rounds, the build after
+  the cut-trace change against the build with all four: 40.5 s before (41.3, 40.8, 40.5) and
+  38.5 s after (38.5, 40.3, 38.8) on production code, lower in each round by 0.5 to 2.8 s, which
+  is inside the spread of either build; on the standard library with tests whichever build ran
+  first in a round took about 35 s longer (149.7, 113.7, 145.5 against 109.2, 145.3, 110.0), so
+  that comparison shows the order and no difference between the builds.

@@ -60,7 +60,12 @@ type Summary struct {
 	FunctionsAnalyzed int
 	FindingsReported  int
 	FindingsMuted     int
-	UsedRustGusset    bool
+	// FindingsUnsited counts the findings the solver raised on an operation that is not a place in
+	// the source (site 0: a copy the lowering adds between two values). They are not reported,
+	// because there is nothing in the source to point at; they are counted here so that this is
+	// visible and not a finding that silently went missing.
+	FindingsUnsited int
+	UsedRustGusset  bool
 }
 
 // Analyzer is the GoSree error-discipline analyzer ("safeerr").
@@ -126,51 +131,7 @@ func run(pass *analysis.Pass) (any, error) {
 
 	// Format, deduplicate per (line, rule_code, detail), honor //gosree:unsafe,
 	// and sort deterministically.
-	type dedupKey struct {
-		file string
-		line int
-		code uint8
-		sub  uint8
-	}
-	seenLineRule := make(map[dedupKey]bool, len(res.Findings))
-	var diags []diagItem
-
-	for _, f := range res.Findings {
-		site := b.site(f.SiteID)
-		if !site.pos.IsValid() {
-			continue
-		}
-		// Blanked companion findings attribute to the tuple's assignment site once.
-		if f.RuleCode == gusseterr.RuleERR002 && f.SubKind == gusseterr.SubERR002Blanked {
-			if callPos, callDesc, ok := b.blankedCallSite(f.FuncIdx, f.SiteID); ok && callPos.IsValid() {
-				site = siteMeta{pos: callPos, detail: callDesc, aux: site.detail}
-			}
-		}
-
-		posn := pass.Fset.Position(site.pos)
-		if !posn.IsValid() || posn.Line == 0 {
-			continue
-		}
-		dk := dedupKey{file: posn.Filename, line: posn.Line, code: f.RuleCode, sub: f.SubKind}
-		if seenLineRule[dk] {
-			continue
-		}
-		seenLineRule[dk] = true
-
-		if ix.Suppressed(site.pos) {
-			ix.Mute(site.pos)
-			summary.FindingsMuted++
-			continue
-		}
-
-		cat, msg := formatDiagnostic(f.RuleCode, f.SubKind, site)
-		diags = append(diags, diagItem{
-			pos:      site.pos,
-			position: posn,
-			category: cat,
-			msg:      msg,
-		})
-	}
+	diags := b.diagnostics(res.Findings, ix, summary)
 
 	slices.SortFunc(diags, func(a, b diagItem) int {
 		if c := cmp.Compare(a.position.Filename, b.position.Filename); c != 0 {
@@ -195,6 +156,84 @@ func run(pass *analysis.Pass) (any, error) {
 	}
 
 	return summary, nil
+}
+
+// unlocatedNote ends the message of a finding reported somewhere other than where its code is.
+const unlocatedNote = "; the code this is about has no source position, so it is reported at the function it is in"
+
+// findingSite is where a finding at a site of the source is reported. A site with no position (an
+// instruction go/ssa gives none) used to drop the finding, which is how a defect comes to read as
+// clean. It is reported at the function the solver found it in, else at the package clause; located
+// is false then.
+func (b *packageBuilder) findingSite(funcIdx, siteID uint32) (site siteMeta, located bool) {
+	site = b.site(siteID)
+	if site.pos.IsValid() {
+		return site, true
+	}
+	if int(funcIdx) < len(b.funcs) && b.funcs[funcIdx].Pos().IsValid() {
+		site.pos = b.funcs[funcIdx].Pos()
+	} else if len(b.pass.Files) > 0 {
+		site.pos = b.pass.Files[0].Name.Pos()
+	}
+	return site, false
+}
+
+// diagnostics turns the solver's findings into what is reported: one per line, rule and kind, and
+// none where a //gosree:unsafe covers the site (those are counted in summary). A finding at a site of
+// the source is never left out for want of a position (findingSite): one reported at its function
+// says so, and is told from the others reported there by its message, since that position does not
+// tell two findings apart. A finding on site 0 is on no site of the source, and is counted
+// (Summary.FindingsUnsited), not reported.
+func (b *packageBuilder) diagnostics(findings []gusseterr.Finding, ix *annot.Index, summary *Summary) []diagItem {
+	type dedupKey struct {
+		file string
+		line int
+		code uint8
+		sub  uint8
+		msg  string
+	}
+	seenLineRule := make(map[dedupKey]bool, len(findings))
+	var diags []diagItem
+
+	for _, f := range findings {
+		if f.SiteID == 0 {
+			summary.FindingsUnsited++
+			continue
+		}
+		site, located := b.findingSite(f.FuncIdx, f.SiteID)
+		// Blanked companion findings attribute to the tuple's assignment site once.
+		if f.RuleCode == gusseterr.RuleERR002 && f.SubKind == gusseterr.SubERR002Blanked {
+			if callPos, callDesc, ok := b.blankedCallSite(f.FuncIdx, f.SiteID); ok && callPos.IsValid() {
+				site, located = siteMeta{pos: callPos, detail: callDesc, aux: site.detail}, true
+			}
+		}
+
+		posn := b.pass.Fset.Position(site.pos)
+		cat, msg := formatDiagnostic(f.RuleCode, f.SubKind, site)
+		dk := dedupKey{file: posn.Filename, line: posn.Line, code: f.RuleCode, sub: f.SubKind}
+		if !located {
+			dk.msg = msg
+			msg += unlocatedNote
+		}
+		if seenLineRule[dk] {
+			continue
+		}
+		seenLineRule[dk] = true
+
+		if ix.Suppressed(site.pos) {
+			ix.Mute(site.pos)
+			summary.FindingsMuted++
+			continue
+		}
+
+		diags = append(diags, diagItem{
+			pos:      site.pos,
+			position: posn,
+			category: cat,
+			msg:      msg,
+		})
+	}
+	return diags
 }
 
 func collectPackageFuncs(roots []*ssa.Function, extras ...*ssa.Function) []*ssa.Function {

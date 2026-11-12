@@ -29,7 +29,7 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 		forEachInstr(fn, func(ins ssa.Instruction) {
 			if w, ok := writeOf(ins); ok {
 				addr := w.addr
-				g, ok := globalRoot(addr)
+				g, ok := st.globalRoot(addr)
 				if !ok || g.Pkg != st.ssa.Pkg {
 					return
 				}
@@ -115,7 +115,7 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 					if !ok {
 						return
 					}
-					if dstG, ok := globalRoot(x.Addr); ok && dstG.Pkg == st.ssa.Pkg && token.IsExported(dstG.Name()) {
+					if dstG, ok := st.globalRoot(x.Addr); ok && dstG.Pkg == st.ssa.Pkg && token.IsExported(dstG.Name()) {
 						mutated[g] = true
 						return
 					}
@@ -127,7 +127,7 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 					if !ok {
 						return
 					}
-					if dstG, ok := globalRoot(x.Map); ok && dstG.Pkg == st.ssa.Pkg && token.IsExported(dstG.Name()) {
+					if dstG, ok := st.globalRoot(x.Map); ok && dstG.Pkg == st.ssa.Pkg && token.IsExported(dstG.Name()) {
 						mutated[g] = true
 						return
 					}
@@ -146,8 +146,11 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 	st.mutatedGlobals = mutated
 }
 
+// rootsAtParam reports whether v is one of fn's parameters or memory reached from one. Each step
+// goes to an operand, defined strictly earlier, so the walk runs to the end; it used to give up
+// after 16 steps.
 func rootsAtParam(v ssa.Value, fn *ssa.Function) bool {
-	for range 16 {
+	for {
 		for _, p := range fn.Params {
 			if v == p {
 				return true
@@ -173,7 +176,6 @@ func rootsAtParam(v ssa.Value, fn *ssa.Function) bool {
 			return false
 		}
 	}
-	return false
 }
 
 func (st *state) checkGlobals() {
@@ -182,10 +184,11 @@ func (st *state) checkGlobals() {
 	for g := range writes {
 		globals = append(globals, g)
 	}
-	sort.Slice(globals, func(i, j int) bool { return globals[i].Pos() < globals[j].Pos() })
+	// Source order, not the order of token.Pos (comparePos): the message names the first write.
+	sort.Slice(globals, func(i, j int) bool { return st.comparePos(globals[i].Pos(), globals[j].Pos()) < 0 })
 	for _, g := range globals {
 		ws := writes[g]
-		sort.Slice(ws, func(i, j int) bool { return ws[i] < ws[j] })
+		sort.Slice(ws, func(i, j int) bool { return st.comparePos(ws[i], ws[j]) < 0 })
 		related := make([]analysis.RelatedInformation, 0, len(ws))
 		for _, w := range ws {
 			related = append(related, analysis.RelatedInformation{Pos: w, Message: "written here"})
@@ -215,9 +218,10 @@ func (st *state) isInitOnlyImmutableGlobal(g *ssa.Global) bool {
 }
 
 // directInitOnlyGlobal reports whether v is a direct read/projection of an init-only immutable
-// package variable (never passing through a local Alloc cell).
+// package variable (never passing through a local Alloc cell). Each step goes to an operand,
+// defined strictly earlier, so the walk runs to the end; it used to give up after 32 steps.
 func (st *state) directInitOnlyGlobal(v ssa.Value) bool {
-	for range 32 {
+	for {
 		if v == nil {
 			return false
 		}
@@ -253,7 +257,6 @@ func (st *state) directInitOnlyGlobal(v ssa.Value) bool {
 			return false
 		}
 	}
-	return false
 }
 
 // initFuncs returns the functions that run only synchronously during initialisation: top-level init
@@ -373,24 +376,58 @@ func (st *state) globalMutArg(v ssa.Value) (*ssa.Global, bool) {
 	if v == nil || st.cls.Shareable(v.Type()) {
 		return nil, false
 	}
+	if u := unwrapPublishedArg(v); u != nil && st.cls.Shareable(u.Type()) {
+		return nil, false
+	}
 	if _, guarded := st.slotOf(v); guarded {
 		return nil, false
 	}
-	g, ok := globalRoot(v)
-	if !ok || g.Pkg != st.ssa.Pkg {
+	g, ok := st.globalRoot(v)
+	if !ok || g.Pkg != st.ssa.Pkg || st.cls.Shareable(g.Type()) {
 		return nil, false
 	}
 	return g, true
 }
 
-// globalRoot follows field, index, slice, phi, local cell store, and getter call steps back to a package variable.
-func globalRoot(v ssa.Value) (*ssa.Global, bool) {
-	return globalRootSeen(v, map[ssa.Value]bool{})
+// globalRoot follows field, index, slice, phi, local cell store, and getter call steps back to a
+// package variable. The walk goes into the functions it meets calls to, so it has a budget
+// (globalWalkBudget values). A walk that spends it has not shown that v is no package variable, and
+// is reported (GlobalCut) where v is computed: with the budget of 64 values this had, it stopped
+// thousands of times on one service and each time read as "not a package variable".
+func (st *state) globalRoot(v ssa.Value) (*ssa.Global, bool) {
+	w := globalWalk{seen: map[ssa.Value]bool{}}
+	g, ok := w.root(v)
+	if !ok && w.cut {
+		pos := v.Pos()
+		if ins, isIns := v.(ssa.Instruction); isIns {
+			pos = posOf(ins, ins)
+		}
+		st.report(pos, GlobalCut, fmt.Sprintf(
+			"whether the value used here comes from a package variable could not be followed to the end (more than %d values lead to it), so writes and hand-overs of a package variable through it are not checked",
+			globalWalkBudget))
+	}
+	return g, ok
 }
 
-func globalRootSeen(v ssa.Value, seen map[ssa.Value]bool) (*ssa.Global, bool) {
-	for range 64 {
-		if v == nil || seen[v] || len(seen) >= 64 {
+// globalWalkBudget is the number of values one walk back to a package variable may visit. It is a
+// variable so a test can lower it.
+var globalWalkBudget = 4096
+
+// globalWalk is one walk back to a package variable: the values visited, and whether the walk ran
+// out of budget before it was done.
+type globalWalk struct {
+	seen map[ssa.Value]bool
+	cut  bool
+}
+
+func (w *globalWalk) root(v ssa.Value) (*ssa.Global, bool) {
+	seen := w.seen
+	for {
+		if v == nil || seen[v] {
+			return nil, false
+		}
+		if len(seen) >= globalWalkBudget {
+			w.cut = true
 			return nil, false
 		}
 		seen[v] = true
@@ -419,7 +456,7 @@ func globalRootSeen(v ssa.Value, seen map[ssa.Value]bool) (*ssa.Global, bool) {
 			v = x.X
 		case *ssa.Phi:
 			for _, e := range x.Edges {
-				if g, ok := globalRootSeen(e, seen); ok {
+				if g, ok := w.root(e); ok {
 					return g, true
 				}
 			}
@@ -437,14 +474,14 @@ func globalRootSeen(v ssa.Value, seen map[ssa.Value]bool) (*ssa.Global, bool) {
 			if alloc != nil && alloc.Referrers() != nil {
 				for _, ref := range *alloc.Referrers() {
 					if st, ok := ref.(*ssa.Store); ok && st.Addr == alloc {
-						if g, ok := globalRootSeen(st.Val, seen); ok {
+						if g, ok := w.root(st.Val); ok {
 							return g, true
 						}
 					}
 					if fa, ok := ref.(*ssa.FieldAddr); ok && fa.Referrers() != nil {
 						for _, r2 := range *fa.Referrers() {
 							if st, ok := r2.(*ssa.Store); ok && st.Addr == fa {
-								if g, ok := globalRootSeen(st.Val, seen); ok {
+								if g, ok := w.root(st.Val); ok {
 									return g, true
 								}
 							}
@@ -453,7 +490,7 @@ func globalRootSeen(v ssa.Value, seen map[ssa.Value]bool) (*ssa.Global, bool) {
 					if ia, ok := ref.(*ssa.IndexAddr); ok && ia.Referrers() != nil {
 						for _, r2 := range *ia.Referrers() {
 							if st, ok := r2.(*ssa.Store); ok && st.Addr == ia {
-								if g, ok := globalRootSeen(st.Val, seen); ok {
+								if g, ok := w.root(st.Val); ok {
 									return g, true
 								}
 							}
@@ -470,11 +507,11 @@ func globalRootSeen(v ssa.Value, seen map[ssa.Value]bool) (*ssa.Global, bool) {
 			for _, b := range callee.Blocks {
 				for _, ins := range b.Instrs {
 					if ret, ok := ins.(*ssa.Return); ok && len(ret.Results) == 1 {
-						if g, ok := globalRootSeen(ret.Results[0], seen); ok {
+						if g, ok := w.root(ret.Results[0]); ok {
 							return g, true
 						}
 						if pi := paramRootIndex(ret.Results[0], callee); pi >= 0 && pi < len(x.Call.Args) {
-							if g, ok := globalRootSeen(x.Call.Args[pi], seen); ok {
+							if g, ok := w.root(x.Call.Args[pi]); ok {
 								return g, true
 							}
 						}
@@ -486,11 +523,13 @@ func globalRootSeen(v ssa.Value, seen map[ssa.Value]bool) (*ssa.Global, bool) {
 			return nil, false
 		}
 	}
-	return nil, false
 }
 
+// paramRootIndex is the index of the parameter of callee that v is, or is memory reached from, or
+// -1. Each step goes to an operand, defined strictly earlier, so the walk runs to the end; it used
+// to give up after 16 steps.
 func paramRootIndex(v ssa.Value, callee *ssa.Function) int {
-	for range 16 {
+	for {
 		for i, p := range callee.Params {
 			if v == p {
 				return i
@@ -511,5 +550,4 @@ func paramRootIndex(v ssa.Value, callee *ssa.Function) int {
 			return -1
 		}
 	}
-	return -1
 }

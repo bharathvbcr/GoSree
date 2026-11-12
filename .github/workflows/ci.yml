@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Rust solver, Go analyzer, and Lean 4 spec
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout GoSree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Checkout pinned Gusset sibling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: bharathvbcr/gusset
+          ref: 0ab48cae95fe126b94cc02189b88f47f36da19f1
+          path: third_party/gusset
+          persist-credentials: false
+
+      - name: Link Gusset where go.mod and rust/gusset-engine resolve ../gusset
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="$GITHUB_WORKSPACE/third_party/gusset"
+          dest="$(dirname "$GITHUB_WORKSPACE")/gusset"
+          test -f "$src/go.mod"
+          test -f "$src/crates/gusset/Cargo.toml"
+          if [ ! -e "$dest" ] && [ ! -L "$dest" ]; then
+            ln -s "$src" "$dest"
+          fi
+          test -f "$dest/go.mod"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Setup Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Rust solver format, clippy, test, and release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+          cargo clippy --manifest-path rust/Cargo.toml --locked --workspace --all-targets -- -D warnings
+          cargo test --manifest-path rust/Cargo.toml --locked --workspace
+          cargo build --manifest-path rust/Cargo.toml --locked --release
+          test -f rust/target/release/libgusset.a
+
+      - name: Go vet and full test suite
+        shell: bash
+        env:
+          GOWORK: "off"
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test -count=1 ./...
+
+      - name: Install pinned Lean 4 kernel and lean4checker
+        shell: bash
+        run: |
+          set -euo pipefail
+          ELAN_TAR="/tmp/elan-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL "https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz" -o "$ELAN_TAR"
+          echo "42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63  $ELAN_TAR" | sha256sum -c -
+          mkdir -p /tmp/elan-bin
+          tar -xzf "$ELAN_TAR" -C /tmp/elan-bin
+          /tmp/elan-bin/elan-init -y --default-toolchain leanprover/lean4:v4.16.0
+          export PATH="$HOME/.elan/bin:$PATH"
+          lean --version
+          LEAN4CHECKER_COMMIT="803320ef4a0948d44e56927b2d1c60c3e8c6e4e4"
+          git init /tmp/lean4checker
+          git -C /tmp/lean4checker remote add origin https://github.com/leanprover/lean4checker.git
+          git -C /tmp/lean4checker fetch --depth 1 origin "$LEAN4CHECKER_COMMIT"
+          git -C /tmp/lean4checker checkout --detach FETCH_HEAD
+          test "$(git -C /tmp/lean4checker rev-parse HEAD)" = "$LEAN4CHECKER_COMMIT"
+          (cd /tmp/lean4checker && lake build)
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          echo "/tmp/lean4checker/.lake/build/bin" >> "$GITHUB_PATH"
+
+      - name: Verify FeatherweightGoSree.lean under Lean 4 kernel and lean4checker --fresh
+        working-directory: specs
+        shell: bash
+        run: |
+          set -euo pipefail
+          lake build -- -DwarningAsError=true
+          lake env lean4checker --fresh FeatherweightGoSree
+          lake env lean --stdin <<'EOF'
+          import Lean
+          import FeatherweightGoSree
+          open Lean Elab Command in
+          #eval show CommandElabM Unit from do
+            let env ← getEnv
+            let mods := env.header.moduleNames
+            let coreRoots : List Name := [Name.mkSimple "Init", Name.mkSimple "Std", Name.mkSimple "Lean", Name.mkSimple "Lake"]
+            let allowedAx : List Name := [Name.mkSimple "propext", Name.mkStr2 "Classical" "choice", Name.mkStr2 "Quot" "sound"]
+            for (cname, cinfo) in env.constants.map₁.toList do
+              if let some modIdx := env.getModuleIdxFor? cname then
+                if h : modIdx.toNat < mods.size then
+                  let mname := mods[modIdx.toNat]
+                  if !(coreRoots.contains mname.getRoot) then
+                    let hasRange := (← Lean.findDeclarationRanges? cname).isSome
+                    let userName := (Lean.privateToUserName? cname).getD cname
+                    let isCompilerStage := match cname with
+                      | .str _ "_cstage1" | .str _ "_cstage2" => true
+                      | _ => false
+                    match cinfo with
+                    | .axiomInfo v =>
+                      if (!v.isUnsafe || (hasRange && !userName.hasMacroScopes)) && !(allowedAx.contains cname) then
+                        throwError s!"TCB non-standard axiom {cname} in {mname}"
+                    | .opaqueInfo _ =>
+                      if !userName.hasMacroScopes then
+                        throwError s!"TCB opaque constant {cname} in {mname}"
+                    | _ =>
+                      if !isCompilerStage then
+                        if cinfo.isUnsafe && hasRange && !userName.hasMacroScopes then
+                          throwError s!"TCB unsafe constant {cname} in {mname}"
+                        if Lean.isExtern env cname then
+                          throwError s!"TCB @[extern] constant {cname} in {mname}"
+                    if !cinfo.isUnsafe then
+                      let (_, st) := (CollectAxioms.collect cname).run env {}
+                      for ax in st.axioms do
+                        if !(allowedAx.contains ax) then
+                          throwError s!"TCB declaration {cname} depends on non-standard axiom {ax}"
+          EOF

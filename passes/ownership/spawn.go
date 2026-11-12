@@ -153,7 +153,9 @@ func usedAsArg(ins ssa.Instruction, v ssa.Value, skip int) bool {
 // spawnedFunc returns the function a spawned value runs: the closure or function started, or a
 // handler value's ServeHTTP method.
 func spawnedFunc(prog *ssa.Program, v ssa.Value, handler bool) *ssa.Function {
-	for range 16 {
+	// Every turn moves to the operand of a conversion or a boxing, which is defined before it, so the
+	// loop ends without a count.
+	for {
 		switch x := v.(type) {
 		case *ssa.ChangeType:
 			v = x.X
@@ -175,7 +177,6 @@ func spawnedFunc(prog *ssa.Program, v ssa.Value, handler bool) *ssa.Function {
 			return nil
 		}
 	}
-	return nil
 }
 
 func serveHTTP(prog *ssa.Program, t types.Type) *ssa.Function {

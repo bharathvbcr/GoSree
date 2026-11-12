@@ -261,7 +261,7 @@ ERR004 depends on whether a callee in *another package* can return a nil concret
 
 ### 5.3 `Summary.UsedRustGusset`
 
-The analyzer's result is a `*Summary` with `FunctionsAnalyzed`, `FindingsReported`, `FindingsMuted`, and `UsedRustGusset`, which is set from `gusseterr.NativeActive()` (`Summary` and `run` in `errcheck.go`). Harnesses use it to tell which engine produced a verdict. `TestSafeErrBasic` asserts `FunctionsAnalyzed > 0` and that `UsedRustGusset` equals `gusseterr.NativeActive()`: true on a unix cgo build, false on the oracle build (`errcheck_test.go`).
+The analyzer's result is a `*Summary` with `FunctionsAnalyzed`, `FindingsReported`, `FindingsMuted`, `FindingsUnsited` (findings the solver raised on an operation that is no place in the source, which are counted and not reported), and `UsedRustGusset`, which is set from `gusseterr.NativeActive()` (`Summary` and `run` in `errcheck.go`). Harnesses use it to tell which engine produced a verdict. `TestSafeErrBasic` asserts `FunctionsAnalyzed > 0` and that `UsedRustGusset` equals `gusseterr.NativeActive()`: true on a unix cgo build, false on the oracle build (`errcheck_test.go`).
 
 ### 5.4 Stress families
 

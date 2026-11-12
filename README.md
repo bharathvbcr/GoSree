@@ -200,7 +200,7 @@ Comprehensive guides, specifications, and reference manuals are located in [`doc
 - 🔀 **[Concurrency Model & Goroutine Boundaries](docs/CONCURRENCY_MODEL.md)**: Goroutine boundary invariants, spawner taxonomy, fork-join join points, HTTP handler self-races, and mutex locksets.
 - 🛠️ **[Tooling, Erasure & Verification Guide](docs/TOOLING_AND_ERASURE.md)**: User guide for `cmd/gosree`, `cmd/gosree-erase`, `cmd/gosree-corpus`, and the 4-tier acceptance test suite.
 - 🦀 **[Error Discipline (`safeerr`, `ERR001`–`ERR005`)](docs/ERROR_DISCIPLINE.md)**: The `passes/errcheck` pass, its binary wire format, the Rust solver hosted through Gusset, and the pure-Go reference oracle.
-- 📐 **[Featherweight GoSree](specs/FeatherweightGoSree.lean)**: a Lean 4 sketch of the container hook rules (not machine-checked) and a Go reference model of them in [`internal/formal`](internal/formal/featherweight_gosree.go); neither is used by the analyzers ([details](docs/ARCHITECTURE.md#8-formal-foundations--featherweight-gosree)).
+- 📐 **[Featherweight GoSree](specs/FeatherweightGoSree.lean)**: a machine-checked Lean 4 specification of the container hook rules (`leanprover/lean4:v4.16.0` + `lean4checker --fresh`) and a Go reference model of them in [`internal/formal`](internal/formal/featherweight_gosree.go); neither is used by the analyzers ([details](docs/ARCHITECTURE.md#8-formal-foundations--featherweight-gosree)).
 - 🗺️ **[Roadmap & Abandon Criterion](docs/ROADMAP.md)**: Build order with each item's prediction and measured result, and the hatch-ratio criterion for abandoning the project.
 - 🧪 **[Adversarial Stress Suite & Findings](tests/stress/FINDINGS.md)**: Locked regression hits, runtime race/panic witnesses, scale bounds, and distance-to-Rust ledger.
 

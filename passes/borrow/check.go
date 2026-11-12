@@ -183,10 +183,14 @@ func CheckBorrows(pass *analysis.Pass, ix *annot.Index, ssaProg *buildssa.SSA) {
 }
 
 func (bc *borrowChecker) report(pos token.Pos, cat, msg string) {
-	if !pos.IsValid() || bc.ix.Mute(pos) {
+	pos, msg, located := locate(bc.pass, pos, bc.fn, msg)
+	if bc.ix.Mute(pos) {
 		return
 	}
-	k := reportKey{pos, cat}
+	k := reportKey{pos: pos, cat: cat}
+	if !located {
+		k.msg = msg
+	}
 	if bc.reports[k] {
 		return
 	}

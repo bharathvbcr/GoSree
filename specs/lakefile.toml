@@ -1,0 +1,7 @@
+name = "FeatherweightGoSree"
+version = "0.1.0"
+defaultTargets = ["FeatherweightGoSree"]
+
+[[lean_lib]]
+name = "FeatherweightGoSree"
+srcDir = "."

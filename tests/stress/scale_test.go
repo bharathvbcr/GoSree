@@ -318,6 +318,63 @@ func scaleShapes() []scaleShape {
 		{name: "slice literal of N pointer elements", sizes: []int{500, 1000, 2000}, maxRatio: 10, gen: func(n int) map[string]string {
 			return scaleOne("func Lit(ch chan []*Job) {\n\tjs := []*Job{" + strings.Repeat("{}, ", n) + "}\n\tch <- js\n\tjs[0].ID = 1\n}\n")
 		}},
+		// The next five shapes each stretch one walk that used to stop at a fixed size (64 values, 32
+		// steps, five assignments) and now runs to its end: what it costs to finish must not blow up.
+		{name: "imm field sliced into one variable N times", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
+			var b strings.Builder
+			b.WriteString("//gosree:imm\ntype Cfg struct{ a [4]int }\n\nfunc fill(s []int) { s[0] = 1 }\n\nfunc F(c *Cfg, k int) {\n\tvar s []int\n\tp := &s\n")
+			for i := range n {
+				fmt.Fprintf(&b, "\tif k == %d {\n\t\ts = c.a[:]\n\t}\n", i)
+			}
+			b.WriteString("\tfill(*p)\n}\n")
+			return scaleOne(b.String())
+		}},
+		{name: "borrow copied through N variables, then sent", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
+			var b strings.Builder
+			b.WriteString("func F(ch chan *int) {\n\tval := 1\n\t//gosree:mut\n\tb0 := &val\n")
+			for i := 1; i <= n; i++ {
+				fmt.Fprintf(&b, "\tb%d := b%d\n", i, i-1)
+			}
+			fmt.Fprintf(&b, "\tch <- b%d\n}\n", n)
+			return scaleOne(b.String())
+		}},
+		{name: "function variable assigned N times and called N times", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
+			var b strings.Builder
+			for i := range n {
+				fmt.Fprintf(&b, "func g%d() {}\n\n", i)
+			}
+			b.WriteString("func F() int {\n\tj := &Job{}\n\tvar f func()\n\tp := &f\n")
+			for i := range n {
+				fmt.Fprintf(&b, "\tf = g%d\n\tf()\n", i)
+			}
+			b.WriteString("\tf = func() { j.ID++ }\n\t_ = p\n\tgo f()\n\treturn j.ID\n}\n")
+			return scaleOne(b.String())
+		}},
+		{name: "package variable written through N pointers", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
+			return scaleOne("func F() {\n\tsink" + strings.Repeat(".Next", n) + ".ID = 1\n}\n")
+		}},
+		{name: "guarded field written N structs deep", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
+			var b strings.Builder
+			for i := range n - 1 {
+				fmt.Fprintf(&b, "type d%d struct{ in d%d }\n\n", i, i+1)
+			}
+			fmt.Fprintf(&b, "type d%d struct{ x int }\n\ntype G struct {\n\tmu sync.Mutex\n\t//gosree:guarded_by mu\n\tdata d0\n}\n\n", n-1)
+			path := "g.data" + strings.Repeat(".in", n-1) + ".x"
+			fmt.Fprintf(&b, "func (g *G) F() {\n\tg.mu.Lock()\n\t%s = 1\n\tg.mu.Unlock()\n\t%s = 2\n}\n", path, path)
+			return map[string]string{"p/p.go": strings.Replace(scalePrelude, "\n\ntype Job", "\n\nimport \"sync\"\n\n"+b.String()+"type Job", 1)}
+		}},
+		// The held-locks analysis repeats until nothing changes (it stopped after 64 passes). Blocks
+		// laid out so that each pass gets one block further need N passes over N blocks.
+		{name: "guarded write reached through N goto blocks", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
+			var b strings.Builder
+			b.WriteString("type G struct {\n\tmu sync.Mutex\n\t//gosree:guarded_by mu\n\tn    int\n\tstop bool\n}\n\n")
+			fmt.Fprintf(&b, "func (g *G) F() {\n\tgoto L%d\nL1:\n\tg.n++\n\treturn\n", n)
+			for i := 2; i <= n; i++ {
+				fmt.Fprintf(&b, "L%d:\n\tif g.stop {\n\t\treturn\n\t}\n\tgoto L%d\n", i, i-1)
+			}
+			b.WriteString("}\n")
+			return map[string]string{"p/p.go": strings.Replace(scalePrelude, "\n\ntype Job", "\n\nimport \"sync\"\n\n"+b.String()+"\ntype Job", 1)}
+		}},
 		{name: "N small functions (baseline)", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
 			var b strings.Builder
 			for i := range n {

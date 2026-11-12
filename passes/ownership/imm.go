@@ -157,33 +157,40 @@ func (st *state) checkImmStores(fn *ssa.Function) {
 	st.checkImmBorrows(fn)
 }
 
+// immInValueType returns the first imm type a value of type t holds by value (t itself, an array
+// element, or a field that is not guarded), or nil. The answer depends on the type alone, so it is
+// kept for the pass: the search used to start again at every store and to stop after 16 types,
+// which made any struct with more field types than that look free of imm values.
 func (st *state) immInValueType(t types.Type) types.Type {
-	return st.immInValueTypeSeen(t, map[types.Type]bool{})
-}
-
-func (st *state) immInValueTypeSeen(t types.Type, seen map[types.Type]bool) types.Type {
-	if t == nil || seen[t] || len(seen) >= 16 {
+	if t == nil {
 		return nil
 	}
-	seen[t] = true
-	if st.isImmNamed(t) {
-		return t
+	if it, ok := st.immIn[t]; ok {
+		return it
 	}
-	switch u := t.Underlying().(type) {
-	case *types.Array:
-		return st.immInValueTypeSeen(u.Elem(), seen)
-	case *types.Struct:
-		for i := 0; i < u.NumFields(); i++ {
-			f := u.Field(i)
-			if st.ix.Guarded[f.Origin()] != nil {
-				continue
-			}
-			if it := st.immInValueTypeSeen(f.Type(), seen); it != nil {
-				return it
+	if st.immIn == nil {
+		st.immIn = map[types.Type]types.Type{}
+	}
+	// A value cannot hold itself, so a type met again while it is being searched (only possible in
+	// code that does not type-check) adds nothing.
+	st.immIn[t] = nil
+	var it types.Type
+	if st.isImmNamed(t) {
+		it = t
+	} else {
+		switch u := t.Underlying().(type) {
+		case *types.Array:
+			it = st.immInValueType(u.Elem())
+		case *types.Struct:
+			for i := 0; i < u.NumFields() && it == nil; i++ {
+				if f := u.Field(i); st.ix.Guarded[f.Origin()] == nil {
+					it = st.immInValueType(f.Type())
+				}
 			}
 		}
 	}
-	return nil
+	st.immIn[t] = it
+	return it
 }
 
 func (st *state) checkImmWrite(ins ssa.Instruction, addr ssa.Value) {
@@ -267,7 +274,13 @@ func (st *state) immReturns(callee *ssa.Function) []immRet {
 		st.immStack[top].read, st.immStack[top].provisional = false, false
 		rs = st.traceReturns(callee)
 		f := st.immStack[top]
-		if !f.read || f.provisional || immRetsEqual(rs, f.partial) || round == immMaxRounds {
+		if !f.read || f.provisional || immRetsEqual(rs, f.partial) {
+			break
+		}
+		if round == immMaxRounds {
+			st.report(callee.Pos(), ImmCut, fmt.Sprintf(
+				"what %s returns did not settle after %d passes over its recursive calls, so the result of the last pass is used: a write through what it returns may be missed, or reported against the wrong value",
+				callee.Name(), immMaxRounds))
 			break
 		}
 		st.immStack[top].partial = rs
@@ -283,8 +296,10 @@ func (st *state) immReturns(callee *ssa.Function) []immRet {
 	return rs
 }
 
-// immMaxRounds bounds the fixpoint for one recursive function. A result that has not settled by
-// then is used as it stands, which can only miss findings, not loop.
+// immMaxRounds bounds the fixpoint for one recursive function. The rounds need not settle: each
+// return takes the first entry of the previous result that fits, so a function that calls itself
+// with two parameters swapped can alternate between two results for ever. A result that has not
+// settled by then is used as it stands and reported (ImmCut), never passed as final.
 const immMaxRounds = 8
 
 func (st *state) traceReturns(callee *ssa.Function) []immRet {
@@ -332,7 +347,9 @@ func (st *state) traceImmAddr(v ssa.Value, seen map[ssa.Value]bool) (types.Type,
 	var immType types.Type
 	x := v
 	firstPos := token.NoPos
-	for x != nil && !seen[x] && len(seen) < 64 {
+	// Every step goes to a value not seen before, in this function (a call is answered from
+	// immReturns, not walked into), so the walk ends when the function's values run out.
+	for x != nil && !seen[x] {
 		seen[x] = true
 		switch a := x.(type) {
 		case *ssa.FieldAddr:
@@ -444,7 +461,8 @@ func (st *state) checkImmFieldCall(fa *ssa.FieldAddr) {
 }
 
 func (st *state) checkImmDerivedCalls(fa *ssa.FieldAddr, immType types.Type, val ssa.Value, seen map[ssa.Value]bool) {
-	if val == nil || seen[val] || len(seen) >= 64 || val.Referrers() == nil {
+	// The walk follows the uses of val forward inside one function and visits each value once.
+	if val == nil || seen[val] || val.Referrers() == nil {
 		return
 	}
 	seen[val] = true

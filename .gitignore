@@ -15,6 +15,9 @@ coverage.*
 /rust/target/
 /rust/*/target/
 
+# Lean 4 Lake build artifacts
+.lake/
+
 # Agent, code-intelligence, and IDE workspace state
 /.devcouncil/
 /.claude/

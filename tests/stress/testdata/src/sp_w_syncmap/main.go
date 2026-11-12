@@ -15,7 +15,7 @@ func main() {
 	done := make(chan struct{})
 	go func() {
 		if v, ok := m.Load("k"); ok {
-			v.(*Job).ID = 2
+			v.(*Job).ID = 2 // HIT(SAFE005): m.Load returns read-only shared memory
 		}
 		close(done)
 	}()

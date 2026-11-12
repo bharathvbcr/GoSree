@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -82,6 +83,9 @@ type graph struct {
 	idx        map[ssa.Instruction]int
 	regions    map[*node]map[*node]bool
 	regionVals map[*node][]ssa.Value
+	// cutCalls are the calls whose callees could not all be found while they pass an argument one
+	// of them could publish (applyCallContract). checkTransfers reports them (TransferCut).
+	cutCalls []ssa.Instruction
 }
 
 func (st *state) buildGraph(fn *ssa.Function) *graph {
@@ -465,12 +469,17 @@ func selectCaseBlock(sel *ssa.Select, stateIdx int) *ssa.BasicBlock {
 	return nil
 }
 
-func resolveClosureVal(v ssa.Value, depth int) *ssa.MakeClosure {
-	return resolveClosureValSeen(v, depth, map[ssa.Value]bool{})
+// resolveClosureVal finds the closure a function value is: through conversions, the stores to the
+// local variable it was loaded from, and phis. The walk stays in one function and visits a value
+// once, so it ends when the function's values run out. It used to stop 10 steps or 32 values in,
+// and a closure further back than that was taken for an unknown function. The second argument was
+// that step count; every caller passes 0 and it is no longer read.
+func resolveClosureVal(v ssa.Value, _ int) *ssa.MakeClosure {
+	return resolveClosureValSeen(v, map[ssa.Value]bool{})
 }
 
-func resolveClosureValSeen(v ssa.Value, depth int, seen map[ssa.Value]bool) *ssa.MakeClosure {
-	if depth > 10 || v == nil || seen[v] || len(seen) >= 32 {
+func resolveClosureValSeen(v ssa.Value, seen map[ssa.Value]bool) *ssa.MakeClosure {
+	if v == nil || seen[v] {
 		return nil
 	}
 	seen[v] = true
@@ -478,14 +487,14 @@ func resolveClosureValSeen(v ssa.Value, depth int, seen map[ssa.Value]bool) *ssa
 	case *ssa.MakeClosure:
 		return val
 	case *ssa.ChangeType:
-		return resolveClosureValSeen(val.X, depth+1, seen)
+		return resolveClosureValSeen(val.X, seen)
 	case *ssa.UnOp:
 		if val.Op == token.MUL {
 			if alloc, ok := val.X.(*ssa.Alloc); ok {
 				var lastClosure *ssa.MakeClosure
 				for _, ref := range *alloc.Referrers() {
 					if store, ok := ref.(*ssa.Store); ok && store.Addr == alloc {
-						if mc := resolveClosureValSeen(store.Val, depth+1, seen); mc != nil {
+						if mc := resolveClosureValSeen(store.Val, seen); mc != nil {
 							lastClosure = mc
 						}
 					}
@@ -495,7 +504,7 @@ func resolveClosureValSeen(v ssa.Value, depth int, seen map[ssa.Value]bool) *ssa
 		}
 	case *ssa.Phi:
 		for _, edge := range val.Edges {
-			if mc := resolveClosureValSeen(edge, depth+1, seen); mc != nil {
+			if mc := resolveClosureValSeen(edge, seen); mc != nil {
 				return mc
 			}
 		}
@@ -513,7 +522,7 @@ func resolveClosureValSeen(v ssa.Value, depth int, seen map[ssa.Value]bool) *ssa
 // A bound method value's body is the method: its receiver is retained if the method leaks it, and
 // always for an interface method, whose implementation gosree cannot see.
 func (g *graph) closureRetains(mc *ssa.MakeClosure) {
-	if g.closureUsedOnlyAtCallSites(mc, mc, 0) {
+	if g.closureUsedOnlyAtCallSites(mc, mc) {
 		return
 	}
 	fn, _ := mc.Fn.(*ssa.Function)
@@ -540,20 +549,22 @@ func (g *graph) closureRetains(mc *ssa.MakeClosure) {
 
 // closureUsedOnlyAtCallSites reports whether every use of v (a closure, or a conversion of one) is a
 // static call or defer of mc itself, a go statement, or an argument a spawner runs on another
-// goroutine or an owned parameter takes.
-func (g *graph) closureUsedOnlyAtCallSites(mc *ssa.MakeClosure, v ssa.Value, depth int) bool {
+// goroutine or an owned parameter takes. Conversions are followed to their uses however many there
+// are (a conversion's result is a new value, so none comes round twice); past the fifth the answer
+// used to be no, which charged a closure started with go as if it had been stored.
+func (g *graph) closureUsedOnlyAtCallSites(mc *ssa.MakeClosure, v ssa.Value) bool {
 	refs := v.Referrers()
-	if refs == nil || depth > 4 {
+	if refs == nil {
 		return false
 	}
 	for _, r := range *refs {
 		switch r := r.(type) {
 		case *ssa.ChangeType:
-			if !g.closureUsedOnlyAtCallSites(mc, r, depth+1) {
+			if !g.closureUsedOnlyAtCallSites(mc, r) {
 				return false
 			}
 		case *ssa.MakeInterface:
-			if !g.closureUsedOnlyAtCallSites(mc, r, depth+1) {
+			if !g.closureUsedOnlyAtCallSites(mc, r) {
 				return false
 			}
 		case *ssa.Go:
@@ -623,17 +634,77 @@ func (g *graph) goStmt(ins *ssa.Go) {
 	g.writtenCaptures(ins, cc.Value, "captured by a goroutine, which may write it")
 }
 
+func (g *graph) applyCallContract(ins ssa.Instruction, cc *ssa.CallCommon) (map[int]bool, resolvedCallContract, bool) {
+	rc, ok, cut := g.st.resolveCallContractCut(g.fn, cc)
+	if cut && g.couldPublish(cc, rc) {
+		g.cutCalls = append(g.cutCalls, ins)
+	}
+	if !ok {
+		return nil, resolvedCallContract{}, false
+	}
+	var published map[int]bool
+	if len(rc.publishArgs) > 0 {
+		published = make(map[int]bool, len(rc.publishArgs))
+		for _, spec := range rc.publishArgs {
+			idx := spec.argIdx
+			if idx < 0 || idx >= len(cc.Args) || spec.delegatedToCallers {
+				continue
+			}
+			published[idx] = true
+			payload := unwrapPublishedArg(cc.Args[idx])
+			if payload == nil {
+				continue
+			}
+			if _, isConst := payload.(*ssa.Const); isConst || g.st.cls.Shareable(payload.Type()) {
+				continue
+			}
+			g.transferPublish(ins, payload, idx, spec.what, spec.freezesToImm)
+			g.writtenCaptures(ins, payload, "captured by a closure "+spec.what+", which may write it")
+		}
+	}
+	return published, rc, true
+}
+
+// couldPublish reports whether cc passes an argument that a callee could publish and that rc, the
+// contract of the callees found, does not already publish: a value that is not a constant and not
+// of a type that is safe to share. A call of an interface method can publish only if a method that
+// could stand behind it does (capMethodFor).
+func (g *graph) couldPublish(cc *ssa.CallCommon, rc resolvedCallContract) bool {
+	if cc.IsInvoke() && !g.st.capMethodFor(cc.Value.Type(), cc.Method.Name()).publishes {
+		return false
+	}
+	for i, a := range cc.Args {
+		if slices.ContainsFunc(rc.publishArgs, func(s pubArgSpec) bool { return s.argIdx == i && !s.delegatedToCallers }) {
+			continue
+		}
+		payload := unwrapPublishedArg(a)
+		if payload == nil {
+			continue
+		}
+		if _, isConst := payload.(*ssa.Const); isConst || g.st.cls.Shareable(payload.Type()) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) {
 	if cc.IsInvoke() {
+		published, rc, hasContract := g.applyCallContract(ins, cc)
 		desc := "passed to interface method " + cc.Method.Name() + " (dynamic dispatch may retain it)"
 		wdesc := "passed to interface method " + cc.Method.Name() + ", which may write it"
 		g.add(g.val(cc.Value), ev(evEscape, ins, desc))
 		g.written(ins, cc.Value, wdesc)
-		for _, a := range cc.Args {
-			g.add(g.val(a), ev(evEscape, ins, desc))
-			g.written(ins, a, wdesc)
+		for i, a := range cc.Args {
+			if !published[i] {
+				g.add(g.val(a), ev(evEscape, ins, desc))
+			}
+			if !hasContract || !rc.suppressWrite {
+				g.written(ins, a, wdesc)
+			}
 		}
-		if result != nil {
+		if result != nil && (!hasContract || !rc.freshResult) {
 			g.add(g.val(result), ev(evForeign, ins, "result of interface method "+cc.Method.Name()))
 		}
 		return
@@ -657,12 +728,17 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 			g.written(ins, cc.Value, "called dynamically; its captures may be written")
 			return
 		}
-		for _, a := range cc.Args {
-			g.add(g.val(a), ev(evEscape, ins, "passed to a dynamic function call"))
-			g.written(ins, a, "passed to a dynamic function call, which may write it")
+		published, rc, hasContract := g.applyCallContract(ins, cc)
+		for i, a := range cc.Args {
+			if !published[i] {
+				g.add(g.val(a), ev(evEscape, ins, "passed to a dynamic function call"))
+			}
+			if !hasContract || !rc.suppressWrite {
+				g.written(ins, a, "passed to a dynamic function call, which may write it")
+			}
 		}
 		g.written(ins, cc.Value, "called dynamically; its captures may be written")
-		if result != nil {
+		if result != nil && (!hasContract || !rc.freshResult) {
 			g.add(g.val(result), ev(evForeign, ins, "result of a dynamic function call"))
 		}
 		return
@@ -688,25 +764,7 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		g.transfer(ins, sp.fn, sp.what(sp.fn))
 		g.writtenCaptures(ins, sp.fn, "captured by a callback started by "+sp.via+", which may write it")
 	}
-	var published map[int]bool
-	if contract, ok := capContractFor(fn); ok && len(contract.publishArgs) > 0 {
-		published = make(map[int]bool, len(contract.publishArgs))
-		for _, idx := range contract.publishArgs {
-			if idx < 0 || idx >= len(cc.Args) {
-				continue
-			}
-			published[idx] = true
-			payload := unwrapPublishedArg(cc.Args[idx])
-			if payload == nil {
-				continue
-			}
-			if _, isConst := payload.(*ssa.Const); isConst || g.st.cls.Shareable(payload.Type()) {
-				continue
-			}
-			g.transferPublish(ins, payload, idx, contract.what, contract.freezesToImm)
-			g.writtenCaptures(ins, payload, "captured by a closure "+contract.what+", which may write it")
-		}
-	}
+	published, rc, hasContract := g.applyCallContract(ins, cc)
 	sum := g.st.summary(fn)
 	name := calleeName(fn)
 	note := sum.unavailable()
@@ -731,7 +789,7 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		case sum.leaks(i):
 			g.add(an, ev(evEscape, ins, "passed to "+name+", which may retain or share it"+note))
 		}
-		if sum.writes(i) {
+		if sum.writes(i) && (!hasContract || !rc.suppressWrite) {
 			g.written(ins, a, "passed to "+name+", which may write it"+note)
 		}
 	}
@@ -748,11 +806,11 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 	if result != nil {
 		if cc.Signature().Results().Len() > 1 && result.Referrers() != nil {
 			for _, r := range *result.Referrers() {
-				if ext, ok := r.(*ssa.Extract); ok && ext.Tuple == result && !sum.isFreshResult(ext.Index) {
+				if ext, ok := r.(*ssa.Extract); ok && ext.Tuple == result && !sum.isFreshResult(ext.Index) && !(ext.Index == 0 && hasContract && rc.freshResult) {
 					g.add(g.val(ext), ev(evForeign, ins, "result of "+name+" (not known to return a fresh value)"+note))
 				}
 			}
-		} else if !sum.fresh {
+		} else if !sum.fresh && (!hasContract || !rc.freshResult) {
 			g.add(g.val(result), ev(evForeign, ins, "result of "+name+" (not known to return a fresh value)"+note))
 		}
 	}

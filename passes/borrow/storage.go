@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -23,17 +24,57 @@ type storageChecker struct {
 	ssa         *buildssa.SSA
 	reports     map[reportKey]bool
 	lineReports map[reportLineKey]bool
+	// cur is the function being checked. Its checks run on the syntax and again on the SSA, and an
+	// instruction the source does not spell out (the boxing in `var i any = b`) has no position:
+	// the SSA check's finding for it is the syntax check's finding again, with nowhere to report
+	// it. Those wait in pending until every function is checked. One whose function has a finding
+	// of the same rule with a position (located) is that finding again and is left out; any other
+	// is reported at its function (flushPending). It used to be dropped either way.
+	cur     *ssa.Function
+	located []locatedFinding
+	pending []pendingFinding
 }
 
+type locatedFinding struct {
+	pos token.Pos
+	cat string
+}
+
+type pendingFinding struct {
+	fn       *ssa.Function
+	cat, msg string
+}
+
+// reportKey and reportLineKey tell findings apart. msg is set only for a finding that had no position
+// of its own (locate): where it is reported does not tell two of those apart, so their messages do.
 type reportKey struct {
 	pos token.Pos
 	cat string
+	msg string
 }
 
 type reportLineKey struct {
 	filename string
 	line     int
 	cat      string
+	msg      string
+}
+
+// locate returns where a finding is reported and what it says. A finding with no position used to be
+// dropped, which is how a defect comes to read as clean. It is reported at the function it is in
+// (fn, where the caller has one), else at the package clause, and its message says so; located is
+// false then.
+func locate(pass *analysis.Pass, pos token.Pos, fn *ssa.Function, msg string) (at token.Pos, text string, located bool) {
+	if pos.IsValid() {
+		return pos, msg, true
+	}
+	switch {
+	case fn != nil && fn.Pos().IsValid():
+		return fn.Pos(), msg + "; the code this is about has no source position, so it is reported at the function it is in", false
+	case len(pass.Files) > 0:
+		return pass.Files[0].Name.Pos(), msg + "; the code this is about has no source position, so it is reported at the package clause", false
+	}
+	return pos, msg, false
 }
 
 // CheckStorage performs both AST declaration checking and SSA escape analysis for second-class borrows.
@@ -55,7 +96,26 @@ func CheckStorage(pass *analysis.Pass, ix *annot.Index, ssaProg *buildssa.SSA) {
 		if len(fn.Blocks) == 0 {
 			continue
 		}
+		sc.cur = fn
 		sc.checkFunctionStorage(fn)
+		sc.cur = nil
+	}
+	sc.flushPending()
+}
+
+// flushPending reports the findings that had no position and that no finding with a position
+// accounts for: none of the same rule lies inside the function they were found in.
+func (sc *storageChecker) flushPending() {
+	pending := sc.pending
+	sc.pending = nil
+	for _, p := range pending {
+		if syn := p.fn.Syntax(); syn != nil && slices.ContainsFunc(sc.located, func(l locatedFinding) bool {
+			return l.cat == p.cat && syn.Pos() <= l.pos && l.pos <= syn.End()
+		}) {
+			continue
+		}
+		pos, msg, _ := locate(sc.pass, token.NoPos, p.fn, p.msg)
+		sc.reportAt(pos, p.cat, msg, false)
 	}
 }
 
@@ -87,11 +147,29 @@ func allPackageFuncs(ssaProg *buildssa.SSA) []*ssa.Function {
 }
 
 func (sc *storageChecker) report(pos token.Pos, cat, msg string) {
-	if !pos.IsValid() || sc.ix.Mute(pos) {
+	if !pos.IsValid() && sc.cur != nil {
+		sc.pending = append(sc.pending, pendingFinding{fn: sc.cur, cat: cat, msg: msg})
+		return
+	}
+	pos, msg, located := locate(sc.pass, pos, nil, msg)
+	sc.reportAt(pos, cat, msg, located)
+}
+
+// reportAt reports a finding at pos; located says pos is the finding's own position (see locate). A
+// finding a //gosree:unsafe mutes still counts as one with a position: what repeats it is not
+// reported in its place.
+func (sc *storageChecker) reportAt(pos token.Pos, cat, msg string, located bool) {
+	if located {
+		sc.located = append(sc.located, locatedFinding{pos: pos, cat: cat})
+	}
+	if sc.ix.Mute(pos) {
 		return
 	}
 	p := sc.pass.Fset.Position(pos)
-	lk := reportLineKey{p.Filename, p.Line, cat}
+	lk := reportLineKey{filename: p.Filename, line: p.Line, cat: cat}
+	if !located {
+		lk.msg = msg
+	}
 	if sc.lineReports[lk] {
 		return
 	}
@@ -1290,12 +1368,12 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 			// C. Store into slice element (*ssa.IndexAddr)
 			if _, ok := ins.Addr.(*ssa.IndexAddr); ok {
 				if valIsBorrow {
-					sc.report(ins.Pos(), StorageViolation,
+					sc.report(pos, StorageViolation,
 						"slice cannot store second-class borrow")
 					return
 				}
 				if fld, ok := structHoldsBorrow[ins.Val]; ok {
-					sc.report(ins.Pos(), StorageViolation, fmt.Sprintf(
+					sc.report(pos, StorageViolation, fmt.Sprintf(
 						"borrow stored in struct field '%s' escapes stack frame", fld))
 					return
 				}
@@ -1304,12 +1382,12 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 			// D. Store to heap or non-stack memory
 			if !isStackLocalAddr(ins.Addr) {
 				if valIsBorrow {
-					sc.report(ins.Pos(), StorageViolation,
+					sc.report(pos, StorageViolation,
 						"cannot store second-class borrow to heap or non-stack memory")
 					return
 				}
 				if fld, ok := structHoldsBorrow[ins.Val]; ok {
-					sc.report(ins.Pos(), StorageViolation, fmt.Sprintf(
+					sc.report(pos, StorageViolation, fmt.Sprintf(
 						"borrow stored in struct field '%s' escapes stack frame", fld))
 					return
 				}
@@ -1542,12 +1620,13 @@ func (sc *storageChecker) checkFunctionStorage(fn *ssa.Function) {
 				if !pos.IsValid() {
 					pos = resolveInstructionPos(ins, fn)
 				}
-				if pos.IsValid() {
-					line := sc.pass.Fset.Position(pos).Line
-					if !escapingLitLines[line] && !escapingAssignLines[line] {
-						sc.report(pos, StorageViolation,
-							"struct field or interface cannot box second-class borrow")
-					}
+				// A line the syntax check has reported is not reported again. A boxing with no
+				// position (an implicit conversion) cannot be matched to a line: it waits, and is
+				// reported at its function unless the function has a finding of this rule (report).
+				line := sc.pass.Fset.Position(pos).Line
+				if !pos.IsValid() || (!escapingLitLines[line] && !escapingAssignLines[line]) {
+					sc.report(pos, StorageViolation,
+						"struct field or interface cannot box second-class borrow")
 				}
 			}
 

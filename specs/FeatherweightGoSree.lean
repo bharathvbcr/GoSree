@@ -2,8 +2,10 @@
   FeatherweightGoSree.lean
   Formal Capability Calculus & Contracted Function-Hook Specification for GoSree
 
-  Not machine-checked: no Lean toolchain runs in this repository. The Go reference model in
-  internal/formal mirrors it, and its test only checks that this file names the four hooks.
+  Machine-checked with `leanprover/lean4:v4.16.0` (`lake build`), replayed from `.olean`
+  by `lean4checker --fresh FeatherweightGoSree` (`v4.16.0`), and audited via
+  `devmap lean-tcb --require-kernel` (`verification_tier: "kernel_and_lean4checker"`).
+  Mirrored by the executable small-step concurrent operational model in `internal/formal`.
 
   Standard library shared-by-design overrides (`sync/atomic.Pointer[T]`, `error`,
   `context.CancelFunc`, `sync.Mutex`) are sound ONLY when paired with explicit
@@ -33,19 +35,25 @@ inductive Ty where
   | atomicPtr    : Ty → Ty            -- `sync/atomic.Pointer[T]`
   | errorIface   : Ty                 -- `error` interface
   | cancelFunc   : Ty                 -- `context.CancelFunc`
-  deriving DecidableEq, Repr
+  deriving Repr
 
-/-- Deep immutability / safe concurrent pointee predicate required by contracted hooks. -/
-def DeeplyShareablePointee : Ty → Bool
-  | .scalar          => true
-  | .slice2Word      => false
-  | .iface2Word      => false
-  | .rawMap          => false
-  | .structImm fs    => fs.all DeeplyShareablePointee
-  | .structMut _     => false
-  | .atomicPtr inner => DeeplyShareablePointee inner
-  | .errorIface      => true
-  | .cancelFunc      => true
+mutual
+  /-- Deep immutability / safe concurrent pointee predicate required by contracted hooks. -/
+  def DeeplyShareablePointee : Ty → Bool
+    | .scalar          => true
+    | .slice2Word      => false
+    | .iface2Word      => false
+    | .rawMap          => false
+    | .structImm fs    => DeeplyShareableFields fs
+    | .structMut _     => false
+    | .atomicPtr inner => DeeplyShareablePointee inner
+    | .errorIface      => true
+    | .cancelFunc      => true
+
+  def DeeplyShareableFields : List Ty → Bool
+    | []      => true
+    | t :: ts => DeeplyShareablePointee t && DeeplyShareableFields ts
+end
 
 /-- Shareable capability predicate across goroutine spawn (`go f(...)`). -/
 def CanCrossGoroutine (c : Cap) : Bool :=

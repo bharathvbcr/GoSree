@@ -83,6 +83,10 @@ A value crossing to another goroutine (via `go f(x)`, channel send `ch <- x`, or
 - Aliases a package-level global variable.
 - Aliases a return value that the callee may still reference.
 
+> [!NOTE]
+> **Diagnostic Category: `SAFE002-incomplete`**
+> Emitted with `Diagnostic.Category = "SAFE002-incomplete"` (message prefix `SAFE002: `) at a call whose callees could not all be found: it calls a function value, or hands one to a function that calls it, or calls an interface method, and the trace of what that value may be was cut (it comes through more than 14 steps or from more than 96 values). Whether the call publishes an argument (stores it in a `sync.Map`, an `atomic.Pointer`, a `sync.Pool`) is then known only for the callees the trace reached, so `SAFE002`, `SAFE003` and `SAFE004` were not checked for the others, and the call says so instead of passing. It is reported only where the call passes an argument a callee could publish (not a constant, not a value that is safe to share, not one the callees found already publish), and for an interface method only where something of that name and signature could publish: a container's method (the signature is compared where the package itself imports `sync` or `sync/atomic`; elsewhere the name decides), or a method of the package under analysis that publishes an argument or hands one to a function it is given. A call of an interface method is checked through the method of each type its receiver may be: the container's, or the package's own method as a direct call of it would be; of a method declared in another package, other than the containers', the call knows nothing that it publishes or loads (read from the code; no test). A value counts as frozen when published only if the method of every such type freezes it and the types are all known; the result of an interface method is never taken as the caller's own. Call the function directly, narrow the set of functions the variable can hold, or mark the line `//gosree:unsafe` with the reason.
+
 ### Failing Example
 ```go
 package example
@@ -200,6 +204,13 @@ Types declared `//gosree:imm` must be deeply immutable:
 - Values of an `imm` type are only written by their composite literal; any other field write is reported as `SAFE005`.
 - Memory loaded from concurrent containers (`(*sync/atomic.Pointer[T]).Load`, `(*sync/atomic.Value).Load`, `(*sync.Map).Load`) carries an `\imm` read-only capability: attempting to modify loaded fields, slice elements, or map entries without synchronization is reported as `SAFE005`.
 
+> [!NOTE]
+> **Diagnostic Category: `SAFE005-incomplete`**
+> Emitted with `Diagnostic.Category = "SAFE005-incomplete"` (message prefix `SAFE005: `) where the check gave up before it had an answer: the walk back from a written value to the `Load` it may have come from visited 4096 values without reaching an end. The check found no write through loaded memory there and did not rule one out, and says so at that line instead of passing it. Split the expression, or mark the line `//gosree:unsafe` with the reason it is safe.
+> The same category is reported at a function whose returns the check could not settle: a function that calls itself with two pointer parameters swapped gives a different answer for "what does it return" on every pass, and after 8 passes the last answer is used. A write to `imm` memory through that function's result may then be missed or reported against the wrong value.
+> And it is reported at a call through a function value that passes shared loaded memory, where the trace of which functions the value may be was cut (it comes through more than 14 steps or from more than 96 values): the ones found are checked for writes, the others are not. A callee the trace cannot find for any other reason is not reported. The same holds for a call of an interface method that passes shared loaded memory, as an argument or as its receiver: the check follows it into the method of each type the receiver may be, reports a trace of the receiver that was cut, and says nothing about types it cannot see (a receiver that comes in from outside the package).
+> The same cut is reported at a call whose result one of the callees not reached may have loaded from a shared container: writes through that result are then not checked. It is reported only where the result is of a type that is not safe to share, and for an interface method only where a loading method of that name and signature exists: a container's, or one of the package under analysis that returns loaded memory (compared under the same condition as for `SAFE002-incomplete`). A method of the package that returns what a container holds makes its result loaded memory when it is called through an interface as when it is called directly.
+
 ### Failing Example
 ```go
 package example
@@ -229,6 +240,10 @@ type ServerConfig struct {
 
 ### Semantics
 Package-level global variables must not be mutated outside package `init()` functions unless protected by a declared mutex guard (`//gosree:guarded_by <mu>`). The diagnostic is reported once at the global variable's declaration, with all mutation sites listed as related positions.
+
+> [!NOTE]
+> **Diagnostic Category: `SAFE006-incomplete`**
+> Emitted with `Diagnostic.Category = "SAFE006-incomplete"` (message prefix `SAFE006: `) where the walk from a written or handed-over value back to the package variable it may come from visited 4096 values without reaching an end. That walk goes into the functions whose results it meets, which is why it has a budget. The check did not find a package variable there and did not rule one out, and says so at that line instead of passing it. Split the expression, or mark the line `//gosree:unsafe` with the reason it is safe.
 
 ### Failing Example
 ```go
@@ -306,6 +321,16 @@ type Store struct {
 
 ### Semantics
 HTTP request handlers run concurrently across incoming requests. The check fires at the handler's **registration** (`http.Handle`, `http.HandleFunc`, `(*ServeMux).Handle/HandleFunc`, ...), not at a `ServeHTTP` declaration with no registration. A write to memory shared across invocations (the receiver, or variables the handler closure captured) is flagged as `SAFE008` unless the field is `//gosree:guarded_by` (then `SAFE009` governs). Passing shared memory to an interface method or a dynamic call is reported too (`captured variable count is passed to a dynamic function call, which may write it, by a handler registered with ...`). A write to a package variable is `SAFE006`, not `SAFE008`; an atomic update through a captured `atomic.Int64` is not flagged.
+
+> [!NOTE]
+> **Diagnostic Category: `SAFE008-incomplete`**
+> Emitted with `Diagnostic.Category = "SAFE008-incomplete"` (message prefix `SAFE008: `) where the handler check reached one of its two bounds before it finished, so a write may be unreported:
+> - at a line of the handler or of a function it calls, when the walk back from a value used there visited 4096 values without reaching an end (`where a value used here comes from could not be followed to the end`);
+> - at the registration, when the check scanned 10000 function bodies with shared memory still to follow (`the write check of the handler registered with ... stopped after scanning ...`).
+>
+> A check that stopped early is reported, never passed as clean. It is a separate category so it is counted apart from the writes the check did find, and never merged with one of them at the same position.
+
+A finding is always reported at a source position. Where the write sits in a function the compiler front end synthesises (the wrapper behind a method value such as `put := h.cache.Put`, a promoted method, an instantiated generic), which has no position of its own, the finding is at the call in your source that leads into it, once per such call, and a `//gosree:unsafe` on that call covers it. The same holds for `SAFE005`.
 
 ### Failing Example
 ```go

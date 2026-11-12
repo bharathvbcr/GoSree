@@ -81,9 +81,14 @@ func sameLockset(a, b lockset) bool {
 // pathOf returns the guard path of v: a root value with the field and load steps that reach v. A
 // load is a step only through a variable cell assigned once before it; any other load breaks the
 // path, because what it reads may change.
+//
+// The walk has no step limit and needs none: each step goes to an operand of the value, or from a
+// load to the value a store that dominates the load put there, and both are defined strictly
+// earlier, so no value comes round twice. With a limit (it was 32) a lock reached through a longer
+// path was not seen to be taken, and the guarded access under it was reported.
 func pathOf(v ssa.Value) (guardPath, bool) {
 	var steps []string
-	for range 32 {
+	for {
 		switch x := v.(type) {
 		case *ssa.FieldAddr:
 			steps = append(steps, "."+strconv.Itoa(x.Field))
@@ -108,7 +113,6 @@ func pathOf(v ssa.Value) (guardPath, bool) {
 			return guardPath{v, strings.Join(steps, "")}, true
 		}
 	}
-	return guardPath{}, false
 }
 
 func uncapturedSingleStore(load *ssa.UnOp) ssa.Value {
@@ -275,9 +279,11 @@ func derefStruct(t types.Type) (*types.Struct, bool) {
 }
 
 // slotOf follows v back through derivations and loads to the nearest guarded memory it was read
-// from or points into.
+// from or points into. Each step goes to an operand, which is defined strictly earlier, so the walk
+// ends without a step limit; with one (it was 64) an access further than that from its guarded
+// field read as unguarded memory and was not checked.
 func (st *state) slotOf(v ssa.Value) (slot, bool) {
-	for range 64 {
+	for {
 		if s, ok := st.guardedAt(v); ok {
 			return s, true
 		}
@@ -313,7 +319,6 @@ func (st *state) slotOf(v ssa.Value) (slot, bool) {
 			return slot{}, false
 		}
 	}
-	return slot{}, false
 }
 
 type lockOpKind uint8
@@ -854,10 +859,15 @@ func (st *state) locksOf(gs *guardState, fn *ssa.Function) map[ssa.Instruction]l
 
 // flow runs the must-hold analysis on fn from the given entry locks and returns the held guards
 // before each reachable instruction.
+//
+// The passes repeat until nothing changes, with no limit on their number. They end because a
+// block's set, once it has one, is only ever replaced by its meet with another set, which can drop
+// guards and weaken modes but never add: every change is one of finitely many. With a limit (it
+// was 64) a block further than that from the entry kept no set, and what it accessed went unchecked.
 func (st *state) flow(gs *guardState, fn *ssa.Function, entry lockset) map[ssa.Instruction]lockset {
 	in := make([]lockset, len(fn.Blocks))
 	in[0] = entry
-	for changed, rounds := true, 0; changed && rounds < 64; rounds++ {
+	for changed := true; changed; {
 		changed = false
 		for _, b := range fn.Blocks {
 			if in[b.Index] == nil {
@@ -1090,9 +1100,11 @@ func (st *state) acquiresOf(gs *guardState, fn *ssa.Function) []acquire {
 
 // unwrapBoolCond strips boolean negations, single-store local loads, and == / != bool constant
 // comparisons from a branch condition, returning the underlying SSA value and whether it is negated.
+// Every step goes to a value defined strictly earlier (an operand, or what a dominating store put
+// in the cell), so it runs to the end; stopping after 16 lost the TryLock behind a longer chain.
 func unwrapBoolCond(cond ssa.Value) (ssa.Value, bool) {
 	negated := false
-	for range 16 {
+	for {
 		switch x := cond.(type) {
 		case *ssa.UnOp:
 			if x.Op == token.NOT {
@@ -1308,9 +1320,11 @@ func killFor(s lockset, v ssa.Value) {
 }
 
 // argValues returns what an argument carries: v itself without interface conversions, or the values
-// stored into a variadic argument slice.
+// stored into a variadic argument slice. Conversions are followed to the end: each step goes to an
+// operand, defined strictly earlier. Stopping after 8 left a lock handed over through more
+// conversions than that looking as if it were still held.
 func argValues(v ssa.Value) []ssa.Value {
-	for range 8 {
+	for {
 		switch x := v.(type) {
 		case *ssa.MakeInterface:
 			v = x.X
@@ -1339,7 +1353,6 @@ func argValues(v ssa.Value) []ssa.Value {
 		}
 		return []ssa.Value{v}
 	}
-	return []ssa.Value{v}
 }
 
 // checkGuardedFunc reports the SAFE009 findings of fn, one per line and guarded variable.

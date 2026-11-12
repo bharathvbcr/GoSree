@@ -330,6 +330,37 @@ func (st *state) summary(fn *ssa.Function) *summary {
 		return s
 	}
 	obj, ok := fn.Object().(*types.Func)
+	if ok && (isBoundMethodWrapper(fn) || isMethodThunk(fn)) && obj.Signature().Recv() != nil && !types.IsInterface(obj.Signature().Recv().Type()) {
+		origObj := obj.Origin()
+		nParams := len(fn.Params)
+		nFree := len(fn.FreeVars)
+		if c, has := capContracts[origObj.FullName()]; has && c.freshResult {
+			leaks := make([]bool, nParams)
+			writes := make([]bool, nParams)
+			for i := range leaks {
+				leaks[i] = true
+				writes[i] = true
+			}
+			freeLeaks := make([]bool, nFree)
+			freeWrites := make([]bool, nFree)
+			for j := range freeLeaks {
+				freeLeaks[j] = true
+				freeWrites[j] = true
+			}
+			return &summary{leakParam: leaks, writeParam: writes, leakFree: freeLeaks, writeFree: freeWrites, fresh: true}
+		}
+		if origObj.Pkg() != nil && origObj.Pkg().Path() == atomicPkg {
+			leaks := make([]bool, nParams)
+			for i := range leaks {
+				leaks[i] = true
+			}
+			freeLeaks := make([]bool, nFree)
+			for j := range freeLeaks {
+				freeLeaks[j] = true
+			}
+			return &summary{leakParam: leaks, writeParam: make([]bool, nParams), leakFree: freeLeaks, writeFree: make([]bool, nFree)}
+		}
+	}
 	// Functions of other packages are built from type information; wrappers, thunks and bound
 	// methods have their own parameter layout and get no summary.
 	if !ok || (fn.Synthetic != "" && !strings.HasPrefix(fn.Synthetic, "from type information")) {
