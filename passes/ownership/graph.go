@@ -571,13 +571,82 @@ type callTarget struct {
 	mc *ssa.MakeClosure
 }
 
+// cellUses is how a local variable that lives in memory is used. Such a variable is an Alloc in
+// the function that declares it and a free variable in each closure that captures it: several
+// addresses of one cell. Whoever asks what the cell may hold has to read the stores through all of
+// them. Reading the Alloc's alone takes the cell at what its own function stores to it.
+type cellUses struct {
+	// stores are the stores to the cell, through any of its addresses.
+	stores []*ssa.Store
+	// fields, elems and slices are the addresses taken of a part of the cell: a field of a struct,
+	// an element of an array, a slice of an array. What is written through them is written to that
+	// part, and what becomes of each is for whoever asks about that part to read.
+	fields []*ssa.FieldAddr
+	elems  []*ssa.IndexAddr
+	slices []*ssa.Slice
+	// open says an address of the whole cell goes somewhere other than a load, a store to the
+	// cell, the address of a part, or a closure's captures: it is stored, passed to a call,
+	// returned, converted. Something that is not in stores may then write the cell.
+	open bool
+}
+
+// usesOfCell reads every use of the cell alloc, in its function and in the closures that capture
+// it, however deep.
+func usesOfCell(alloc *ssa.Alloc) cellUses {
+	var u cellUses
+	seen := map[*ssa.FreeVar]bool{}
+	// address reads the uses of one address of the cell: the Alloc, or the free variable a
+	// closure that captures it sees it as.
+	var address func(addr ssa.Value, refs *[]ssa.Instruction)
+	address = func(addr ssa.Value, refs *[]ssa.Instruction) {
+		if refs == nil {
+			u.open = true
+			return
+		}
+		for _, ref := range *refs {
+			switch r := ref.(type) {
+			case *ssa.Store:
+				if r.Addr != addr {
+					u.open = true // the cell's address is stored somewhere
+					continue
+				}
+				u.stores = append(u.stores, r)
+			case *ssa.UnOp, *ssa.DebugRef:
+			case *ssa.FieldAddr:
+				u.fields = append(u.fields, r)
+			case *ssa.IndexAddr:
+				u.elems = append(u.elems, r)
+			case *ssa.Slice:
+				u.slices = append(u.slices, r)
+			case *ssa.MakeClosure:
+				fn, ok := r.Fn.(*ssa.Function)
+				if !ok {
+					u.open = true
+					continue
+				}
+				for j, b := range r.Bindings {
+					if b == addr && j < len(fn.FreeVars) && !seen[fn.FreeVars[j]] {
+						seen[fn.FreeVars[j]] = true
+						address(fn.FreeVars[j], fn.FreeVars[j].Referrers())
+					}
+				}
+			default:
+				u.open = true // handed on: something else may write the cell
+			}
+		}
+	}
+	address(alloc, alloc.Referrers())
+	return u
+}
+
 // callTargets lists the functions v may be when it is called: v itself, and what reaches it
 // through conversions, phi edges and the stores to a local cell, in this function and in the
 // closures that capture the cell. rest is what it could not resolve to a function: a value of
 // another kind on some path (a parameter, a field, a call's result), or the load of a cell that
-// can be written by something other than the stores seen (a cell whose address goes anywhere but
-// into a load, a store to it or a closure's captures). The targets are all v may be when rest is
-// empty. The stores to a cell are taken together, whatever their order.
+// can be written by something other than the stores seen (usesOfCell: its address goes anywhere
+// but into a load, a store to it or a closure's captures). The targets are all v may be when rest
+// is empty. The stores to a cell are taken together, whatever their order. A cell that is called
+// holds a function, so no address of a part of it is ever taken.
 //
 // What a caller takes from the list depends on what it asks. A fact that holds if any target does
 // it (releases a lock, publishes, writes) can be taken from each target. A fact that must hold
@@ -623,45 +692,12 @@ func callTargets(v ssa.Value) (targets []callTarget, rest []ssa.Value) {
 				unresolved(v)
 				return
 			}
-			stores := 0
-			// cell follows one address of the cell: the Alloc, or the free variable a closure
-			// that captures it sees it as.
-			var cell func(addr ssa.Value, refs *[]ssa.Instruction)
-			cell = func(addr ssa.Value, refs *[]ssa.Instruction) {
-				if refs == nil {
-					unresolved(v)
-					return
-				}
-				for _, ref := range *refs {
-					switch r := ref.(type) {
-					case *ssa.Store:
-						if r.Addr != addr {
-							unresolved(v) // the cell's address is stored somewhere
-							continue
-						}
-						stores++
-						walk(r.Val)
-					case *ssa.UnOp, *ssa.DebugRef:
-					case *ssa.MakeClosure:
-						fn, ok := r.Fn.(*ssa.Function)
-						if !ok {
-							unresolved(v)
-							continue
-						}
-						for j, b := range r.Bindings {
-							if b == addr && j < len(fn.FreeVars) && !seen[fn.FreeVars[j]] {
-								seen[fn.FreeVars[j]] = true
-								cell(fn.FreeVars[j], fn.FreeVars[j].Referrers())
-							}
-						}
-					default:
-						unresolved(v) // handed on: something else may write the cell
-					}
-				}
-			}
-			cell(alloc, alloc.Referrers())
-			if stores == 0 {
+			uses := usesOfCell(alloc)
+			if uses.open || len(uses.stores) == 0 {
 				unresolved(v)
+			}
+			for _, st := range uses.stores {
+				walk(st.Val)
 			}
 		default:
 			unresolved(v)

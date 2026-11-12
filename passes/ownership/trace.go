@@ -289,21 +289,23 @@ func (t *trace) arguments(bodyFn *ssa.Function, p *ssa.Parameter, a ask, depth i
 	return out, incomplete
 }
 
-// storedInCell walks every value stored to a local cell. fn stands in for a store with no function.
+// storedInCell walks every value stored to a local cell: the stores made through the variable and
+// through each closure that captures it (usesOfCell). They are all the cell may hold unless its
+// address goes somewhere else, and then the answer may not be all. fn stands in for a store with
+// no function.
 func (t *trace) storedInCell(alloc *ssa.Alloc, fn *ssa.Function, a ask, depth int) ([]leafValue, bool) {
+	uses := usesOfCell(alloc)
 	var out []leafValue
-	incomplete := false
-	for _, ref := range *alloc.Referrers() {
-		if stIns, ok := ref.(*ssa.Store); ok && stIns.Addr == alloc {
-			pFn := stIns.Parent()
-			if pFn == nil {
-				pFn = fn
-			}
-			sub, inc := t.follow(pFn, stIns.Val, a, depth+1)
-			out = append(out, sub...)
-			if inc {
-				incomplete = true
-			}
+	incomplete := uses.open
+	for _, stIns := range uses.stores {
+		pFn := stIns.Parent()
+		if pFn == nil {
+			pFn = fn
+		}
+		sub, inc := t.follow(pFn, stIns.Val, a, depth+1)
+		out = append(out, sub...)
+		if inc {
+			incomplete = true
 		}
 	}
 	if len(out) == 0 {
@@ -416,41 +418,55 @@ func (t *trace) fieldBehind(fn *ssa.Function, ptr ssa.Value, field int, depth in
 
 // fieldOfBase walks what is stored to one field of an allocation or a package variable: the stores
 // to the field, and that field of each whole value stored.
+//
+// For an allocation these are the stores made through the variable and through each closure that
+// captures it (usesOfCell). They are all the field may hold unless an address of the whole struct
+// or of this field goes somewhere else. The address of another field going somewhere (s.mu.Lock())
+// says nothing about this one.
 func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bool) {
 	switch base := lf.v.(type) {
 	case *ssa.Alloc:
 		if base.Referrers() == nil {
 			return nil, true
 		}
+		uses := usesOfCell(base)
 		var out []leafValue
-		incomplete := false
-		for _, ref := range *base.Referrers() {
-			if fa, ok := ref.(*ssa.FieldAddr); ok && fa.Field == field && fa.Referrers() != nil {
-				for _, r2 := range *fa.Referrers() {
-					if stIns, ok := r2.(*ssa.Store); ok && stIns.Addr == fa {
-						pFn := stIns.Parent()
-						if pFn == nil {
-							pFn = lf.fn
-						}
-						sub, inc := t.follow(pFn, stIns.Val, ask{kind: askValue}, depth+1)
-						out = append(out, sub...)
-						if inc {
-							incomplete = true
-						}
+		incomplete := uses.open
+		walk := func(stIns *ssa.Store, a ask) {
+			pFn := stIns.Parent()
+			if pFn == nil {
+				pFn = lf.fn
+			}
+			sub, inc := t.follow(pFn, stIns.Val, a, depth+1)
+			out = append(out, sub...)
+			if inc {
+				incomplete = true
+			}
+		}
+		for _, fa := range uses.fields {
+			if fa.Field != field {
+				continue
+			}
+			if fa.Referrers() == nil {
+				incomplete = true
+				continue
+			}
+			for _, ref := range *fa.Referrers() {
+				switch r := ref.(type) {
+				case *ssa.Store:
+					if r.Addr != fa {
+						incomplete = true // the field's address is stored somewhere
+						continue
 					}
+					walk(r, ask{kind: askValue})
+				case *ssa.UnOp, *ssa.DebugRef:
+				default:
+					incomplete = true // handed on, or the address of a part of the field
 				}
 			}
-			if stIns, ok := ref.(*ssa.Store); ok && stIns.Addr == base {
-				pFn := stIns.Parent()
-				if pFn == nil {
-					pFn = lf.fn
-				}
-				sub, inc := t.follow(pFn, stIns.Val, ask{kind: askField, field: field}, depth+1)
-				out = append(out, sub...)
-				if inc {
-					incomplete = true
-				}
-			}
+		}
+		for _, stIns := range uses.stores {
+			walk(stIns, ask{kind: askField, field: field})
 		}
 		if len(out) == 0 {
 			incomplete = true
