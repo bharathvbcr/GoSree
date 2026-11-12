@@ -369,10 +369,10 @@ func (t *trace) storedInCell(alloc *ssa.Alloc, fn *ssa.Function, a ask, depth in
 }
 
 // storedInGlobal walks every value this package stores to a package variable. An exported one may be
-// stored to from elsewhere.
+// stored to from elsewhere, and so may one whose address has been handed on (globalAddrTaken).
 func (t *trace) storedInGlobal(g *ssa.Global, a ask, depth int) ([]leafValue, bool) {
 	vals := t.q.contracts.globalStores[g]
-	incomplete := len(vals) == 0 || token.IsExported(g.Name())
+	incomplete := len(vals) == 0 || token.IsExported(g.Name()) || t.q.contracts.globalAddrTaken[g]
 	var out []leafValue
 	for _, sv := range vals {
 		sub, inc := t.follow(parentOf(sv), sv, a, depth+1)

@@ -70,3 +70,59 @@ func direct(x *T) { impl{}.do(reads, x) }
 		}
 	}
 }
+
+// What a package variable may hold is all in sight only when every store to it is. One whose
+// address has been handed on (stored, returned, passed to a call) can be assigned through that
+// address anywhere: var LstatP = &lstat in path/filepath lets its test package replace lstat.
+// The stores by name were read as all of them.
+func TestPackageVariableWhoseAddressIsHandedOnIsNotAllInSight(t *testing.T) {
+	const head = `package p
+
+type T struct{ n int }
+
+var kept *T
+
+func reads(x *T) { _ = x.n }
+
+func keeps(x *T) { kept = x }
+
+var hook = reads
+
+func call(x *T) { hook(x) }
+`
+	for name, c := range map[string]struct {
+		rest    string
+		leaves  int
+		mayMiss bool
+	}{
+		"assigned where it is declared":          {"", 1, false},
+		"assigned by name in another function":   {"\nfunc swap() { hook = keeps }\n", 2, false},
+		"its address is in an exported variable": {"\nvar HookP = &hook\n", 1, true},
+		"its address is returned":                {"\nfunc HookAddr() *func(*T) { return &hook }\n", 1, true},
+		"its address is handed to a call":        {"\nfunc Hand(set func(*func(*T))) { set(&hook) }\n", 1, true},
+	} {
+		pkg := buildWalk(t, head+c.rest)
+		var fns []*ssa.Function
+		for _, m := range pkg.Members {
+			if f, ok := m.(*ssa.Function); ok && f.Name() != "init" {
+				fns = append(fns, f)
+			}
+		}
+		st := &state{
+			pass:       &analysis.Pass{Pkg: pkg.Pkg, Fset: pkg.Prog.Fset},
+			ssa:        &buildssa.SSA{Pkg: pkg, SrcFuncs: fns},
+			ix:         &annot.Index{},
+			sums:       map[*ssa.Function]*summary{},
+			sumReaders: map[*ssa.Function]map[*ssa.Function]bool{},
+		}
+		st.contracts = st.buildContractIndex(fns)
+		call := pkg.Func("call")
+		leaves, mayMiss := st.ask().origins(call, calledValue(t, call))
+		if len(leaves) != c.leaves {
+			t.Errorf("%s: the trace found %d functions stored by name, want %d", name, len(leaves), c.leaves)
+		}
+		if mayMiss != c.mayMiss {
+			t.Errorf("%s: the trace says its answer may not be all: %v, want %v", name, mayMiss, c.mayMiss)
+		}
+	}
+}

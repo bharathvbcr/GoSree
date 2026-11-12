@@ -112,6 +112,35 @@ func callF(f func()) { f() }
 
 func ticks() { callF(tick) }
 
+func newPeek() func() {
+	n := 0
+	return func() { _ = n }
+}
+
+// peek holds a closure that only reads what it captured.
+var peek = newPeek()
+
+func callG(f func()) { f() }
+
+func peeks() { callG(peek) }
+
+var cfgVia, cfgViaRead = &T{}, &T{}
+
+func writeVia(x *T) {
+	h := holder{f: writesIt}
+	h.f(x)
+}
+
+func readVia(x *T) {
+	h := holder{f: reads}
+	h.f(x)
+}
+
+func pokesVia() {
+	writeVia(cfgVia)
+	readVia(cfgViaRead)
+}
+
 func callIt(f func(*T), x *T) { f(x) }
 
 func viaSeam(x *T) { callIt(seam, x) }
@@ -259,6 +288,15 @@ func TestCallThroughAValueWritesWhatItsTargetWrites(t *testing.T) {
 	if n := count("cfgWritten"); n != 1 {
 		t.Errorf("cfgWritten is handed to writesIt through a field; the write must be reported once, got %d of: %s", n, strings.Join(got, "; "))
 	}
+	if n := count("peek"); n != 0 {
+		t.Errorf("peek holds a closure that only reads what it captured; handing it to a function that calls it was reported as a write: %s", strings.Join(got, "; "))
+	}
+	if n := count("cfgVia"); n != 1 {
+		t.Errorf("cfgVia is handed to a function that calls writesIt through a field; the write must be reported once, got %d of: %s", n, strings.Join(got, "; "))
+	}
+	if n := count("cfgViaRead"); n != 0 {
+		t.Errorf("cfgViaRead is handed to a function that calls reads through a field; it was reported as written: %s", strings.Join(got, "; "))
+	}
 	if n := count("tick"); n != 1 {
 		t.Errorf("tick holds a closure that writes what it captured; handing it to a function that calls it must be reported once, got %d of: %s", n, strings.Join(got, "; "))
 	}
@@ -269,5 +307,130 @@ func TestCallThroughAValueWritesWhatItsTargetWrites(t *testing.T) {
 func TestCallOfAPackageFunctionVariableIsNotAWrite(t *testing.T) {
 	if got := advDiagLines(t, callThroughValueHead, "package variable seam"); len(got) != 0 {
 		t.Errorf("seam is assigned where it is declared and only called after, through callIt; got: %s", strings.Join(got, "; "))
+	}
+}
+
+// A package variable whose address has been handed on can be assigned where this package does
+// not show: the functions stored to it by name are not all it may hold, and a call of it keeps
+// and writes what it is handed, as a call of something unknown does. The standard library does
+// this in every export_test.go (var LstatP = &lstat, hookSetter(&testHookEnterRoundTrip)).
+func TestCallThroughAPackageVariableWhoseAddressIsHandedOn(t *testing.T) {
+	const use = "\nfunc useProbe() {\n\tx := &T{}\n\tprobe(x)\n\tgo func() { x.n++ }()\n}\n"
+	const match = "also escapes: passed to a dynamic function call"
+	if got := advDiagLinesAfter(t, callThroughValueHead, "\nvar probe = reads\n"+use, match); len(got) != 0 {
+		t.Errorf("probe is assigned where it is declared and nowhere else, and reads keeps nothing; got %d reports: %s", len(got), strings.Join(got, "; "))
+	}
+	for name, decl := range map[string]string{
+		"its address is in an exported variable": "\nvar probe = reads\n\nvar ProbeP = &probe\n",
+		"its address is returned":                "\nvar probe = reads\n\nfunc ProbeAddr() *func(*T) { return &probe }\n",
+		"its address is handed to a function":    "\nvar probe = reads\n\nfunc Hand(set func(*func(*T))) { set(&probe) }\n",
+	} {
+		if got := advDiagLinesAfter(t, callThroughValueHead, decl+use, match); len(got) != 1 {
+			t.Errorf("%s: probe may be assigned out of sight, so x escapes into the call; it must be reported once, got %d: %s", name, len(got), strings.Join(got, "; "))
+		}
+	}
+}
+
+// A builtin that only reads what it is handed is not a call of something unknown: len and cap of
+// memory every request shares write nothing. The builtins that write are writes, as before.
+func TestHandlerCallingAReadOnlyBuiltin(t *testing.T) {
+	const body = `
+type store struct {
+	items map[string]int
+	list  []int
+}
+
+func registerStore(mux *http.ServeMux, sLen, sDel, sDefer *store) {
+	mux.HandleFunc("/len", func(w http.ResponseWriter, r *http.Request) {
+		_ = len(sLen.items) + cap(sLen.list) + len(sLen.list)
+	})
+	mux.HandleFunc("/del", func(w http.ResponseWriter, r *http.Request) {
+		delete(sDel.items, "k")
+	})
+	mux.HandleFunc("/defer", func(w http.ResponseWriter, r *http.Request) {
+		defer delete(sDefer.items, "k")
+	})
+}
+`
+	got := advDiagLinesAfter(t, callThroughValueHead, body, "which shares it with every concurrent request")
+	count := func(v string) int {
+		n := 0
+		for _, d := range got {
+			if strings.Contains(d, "variable "+v+" ") {
+				n++
+			}
+		}
+		return n
+	}
+	if n := count("sLen"); n != 0 {
+		t.Errorf("len and cap read; sLen was reported %d times: %s", n, strings.Join(got, "; "))
+	}
+	if n := count("sDel"); n != 1 {
+		t.Errorf("delete writes the map sDel holds; it must be reported once, got %d: %s", n, strings.Join(got, "; "))
+	}
+	if n := count("sDefer"); n != 1 {
+		t.Errorf("a deferred delete writes the map sDefer holds; it must be reported once, got %d: %s", n, strings.Join(got, "; "))
+	}
+}
+
+// A target that publishes its argument publishes it at the call, and one that keeps it besides
+// is reported for that, as when it is called by name. A publish is not a write of what is
+// published: the function that hands its parameter to a method value of sync.Map writes it no
+// more than the one that calls the method.
+func TestCallThroughAValuePublishesWhatItsTargetPublishes(t *testing.T) {
+	const decl = `
+var reg sync.Map
+
+func pubAndKeep(x *T) {
+	reg.Store(1, x)
+	kept = x
+}
+
+func pubOnly(x *T) { reg.Store(1, x) }
+
+func useKeep() {
+	x := &T{}
+	h := holder{f: pubAndKeep}
+	h.f(x)
+}
+
+func useOnly() {
+	x := &T{}
+	h := holder{f: pubOnly}
+	h.f(x)
+}
+
+var cfgStore, cfgDirect = &T{}, &T{}
+
+func storeVia(x *T) {
+	store := reg.Store
+	store(1, x)
+}
+
+func storeDirect(x *T) { reg.Store(1, x) }
+
+func pokesStore() {
+	storeVia(cfgStore)
+	storeDirect(cfgDirect)
+}
+`
+	src := strings.Replace(callThroughValueHead, "import \"net/http\"", "import (\n\t\"net/http\"\n\t\"sync\"\n)", 1) + decl
+	all := advDiagLines(t, src, "")
+	var besides, stored, direct []string
+	for _, d := range all {
+		switch {
+		case strings.Contains(d, "composite literal is published via (*sync.Map).Store but also escapes"):
+			besides = append(besides, d)
+		case strings.Contains(d, "package variable cfgStore is written"):
+			stored = append(stored, d)
+		case strings.Contains(d, "package variable cfgDirect is written"):
+			direct = append(direct, d)
+		}
+	}
+	if len(besides) != 1 {
+		t.Errorf("pubAndKeep publishes its argument and keeps it; the call through the field must say so once (and not for pubOnly), got %d: %s", len(besides), strings.Join(besides, "; "))
+	}
+	if len(stored) != len(direct) {
+		t.Errorf("handing a parameter to a method value of sync.Map is the call of the method: written %d times through the value, %d by name: %s", len(stored), len(direct), strings.Join(append(stored, direct...), "; "))
 	}
 }

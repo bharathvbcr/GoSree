@@ -496,6 +496,11 @@ type contractIndex struct {
 	openCallers       map[*ssa.Function]bool
 	globalStores      map[*ssa.Global][]ssa.Value
 	globalFieldStores map[*ssa.Global]map[int][]ssa.Value
+	// globalAddrTaken holds the package variables whose address this package uses for something
+	// other than reading or writing the variable through it: stored, passed on, returned
+	// (takesAddress). Such a variable can be written where the stores listed for it do not
+	// show: var LstatP = &lstat lets another package assign lstat.
+	globalAddrTaken   map[*ssa.Global]bool
 	structFieldStores map[structFieldKey][]indexedValue
 	// structWholeStores holds, by struct type, every struct value stored whole (*p = v): a store
 	// to all of its fields at once.
@@ -581,6 +586,7 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 		openCallers:       map[*ssa.Function]bool{},
 		globalStores:      map[*ssa.Global][]ssa.Value{},
 		globalFieldStores: map[*ssa.Global]map[int][]ssa.Value{},
+		globalAddrTaken:   map[*ssa.Global]bool{},
 		structWholeStores: map[string][]indexedValue{},
 		structFieldStores: map[structFieldKey][]indexedValue{},
 		structConv:        map[string][]string{},
@@ -716,6 +722,9 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 			for _, op := range ins.Operands(opBuf[:0]) {
 				if op == nil {
 					continue
+				}
+				if g, ok := (*op).(*ssa.Global); ok && !ci.globalAddrTaken[g] && takesAddress(ins, g) {
+					ci.globalAddrTaken[g] = true
 				}
 				if f, ok := (*op).(*ssa.Function); ok {
 					bf := canonicalBodyFn(f)
@@ -2277,4 +2286,29 @@ func (st *state) sharedLoadRoot(v ssa.Value, roots map[ssa.Value]string) (ssa.Va
 		}
 	}
 	return st.sharedLoadWalk().root(v, roots)
+}
+
+// takesAddress reports whether ins uses addr, the address of a variable or of a part of one, for
+// something other than reading or writing through it: stores it, hands it to a call, returns it,
+// slices it. The address of a field or an element is followed to its own uses.
+func takesAddress(ins ssa.Instruction, addr ssa.Value) bool {
+	switch x := ins.(type) {
+	case *ssa.UnOp:
+		return x.Op != token.MUL
+	case *ssa.Store:
+		return x.Val == addr
+	case *ssa.DebugRef:
+		return false
+	case *ssa.FieldAddr, *ssa.IndexAddr:
+		part := ins.(ssa.Value)
+		if refs := part.Referrers(); refs != nil {
+			for _, r := range *refs {
+				if takesAddress(r, part) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return true
 }

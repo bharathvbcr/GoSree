@@ -151,6 +151,14 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 				return
 			}
 			cc := c.Common()
+			if _, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
+				// The builtins that write what they are handed are writes (writeOf). The others
+				// read it: len of a map every request shares writes nothing. A deferred or
+				// started one is not read by writeOf and stays as it was.
+				if _, isCall := ins.(*ssa.Call); isCall {
+					return
+				}
+			}
 			if cc.IsInvoke() {
 				for _, v := range append([]ssa.Value{cc.Value}, cc.Args...) {
 					if _, guarded := st.slotOf(v); guarded {
