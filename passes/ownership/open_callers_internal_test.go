@@ -44,29 +44,11 @@ func direct(x *T) { impl{}.do(reads, x) }
 		"called through an interface a struct embeds": {"\ntype doer interface{ do(f func(*T), x *T) }\n\ntype box struct{ doer }\n\nfunc via(b box, x *T) { b.do(keeps, x) }\n", true},
 		"a method value through the embedding struct": {"\ntype doer interface{ do(f func(*T), x *T) }\n\ntype box struct{ doer }\n\nfunc via(b box, x *T) {\n\tg := b.do\n\tg(keeps, x)\n}\n", true},
 	} {
-		pkg := buildWalk(t, head+c.rest)
-		var fns []*ssa.Function
-		for _, m := range pkg.Members {
-			if f, ok := m.(*ssa.Function); ok {
-				fns = append(fns, f)
-			}
-		}
-		do := pkg.Prog.LookupMethod(pkg.Type("impl").Type(), pkg.Pkg, "do")
-		if do == nil {
-			t.Fatalf("%s: no method do", name)
-		}
-		fns = append(fns, do)
-		st := &state{
-			pass:       &analysis.Pass{Pkg: pkg.Pkg, Fset: pkg.Prog.Fset},
-			ssa:        &buildssa.SSA{Pkg: pkg, SrcFuncs: fns},
-			ix:         &annot.Index{},
-			sums:       map[*ssa.Function]*summary{},
-			sumReaders: map[*ssa.Function]map[*ssa.Function]bool{},
-		}
-		st.contracts = st.buildContractIndex(fns)
-		leaves, mayMiss := st.ask().origins(do, calledValue(t, do))
-		if len(leaves) != 1 {
-			t.Errorf("%s: the one call by name passes reads; the trace found %d functions", name, len(leaves))
+		leaves, mayMiss := calledOrigins(t, head+c.rest, func(pkg *ssa.Package) *ssa.Function {
+			return pkg.Prog.LookupMethod(pkg.Type("impl").Type(), pkg.Pkg, "do")
+		})
+		if leaves != 1 {
+			t.Errorf("%s: the one call by name passes reads; the trace found %d functions", name, leaves)
 		}
 		if mayMiss != c.mayMiss {
 			t.Errorf("%s: the trace says its answer may not be all: %v, want %v", name, mayMiss, c.mayMiss)
@@ -114,28 +96,83 @@ func callField(x *T) { cfg.hook(x) }
 		"the address of the field is in another variable": {"\nvar FieldP = &cfg.hook\n", "callField", 1, true},
 		"the address of the struct is returned":           {"\nfunc CfgAddr() *conf { return &cfg }\n", "callField", 1, true},
 	} {
-		pkg := buildWalk(t, head+c.rest)
-		var fns []*ssa.Function
-		for _, m := range pkg.Members {
-			if f, ok := m.(*ssa.Function); ok && f.Name() != "init" {
-				fns = append(fns, f)
-			}
-		}
-		st := &state{
-			pass:       &analysis.Pass{Pkg: pkg.Pkg, Fset: pkg.Prog.Fset},
-			ssa:        &buildssa.SSA{Pkg: pkg, SrcFuncs: fns},
-			ix:         &annot.Index{},
-			sums:       map[*ssa.Function]*summary{},
-			sumReaders: map[*ssa.Function]map[*ssa.Function]bool{},
-		}
-		st.contracts = st.buildContractIndex(fns)
-		call := pkg.Func(c.fn)
-		leaves, mayMiss := st.ask().origins(call, calledValue(t, call))
-		if len(leaves) != c.leaves {
-			t.Errorf("%s: the trace found %d functions stored by name, want %d", name, len(leaves), c.leaves)
+		leaves, mayMiss := calledOrigins(t, head+c.rest, func(pkg *ssa.Package) *ssa.Function { return pkg.Func(c.fn) })
+		if leaves != c.leaves {
+			t.Errorf("%s: the trace found %d functions stored by name, want %d", name, leaves, c.leaves)
 		}
 		if mayMiss != c.mayMiss {
 			t.Errorf("%s: the trace says its answer may not be all: %v, want %v", name, mayMiss, c.mayMiss)
 		}
 	}
+}
+
+// What is received from a channel is what is sent on it, when every send is in sight. A channel
+// made here and handed to a call, captured by a closure or stored can be sent on where its uses
+// here do not show; the sends among those uses were read as all of them.
+func TestChannelHandedOnIsNotAllInSight(t *testing.T) {
+	const head = `package p
+
+type T struct{ n int }
+
+var kept *T
+
+func reads(x *T) { _ = x.n }
+
+func keeps(x *T) { kept = x }
+
+func fill(ch chan func(*T)) { ch <- keeps }
+
+var chans []chan func(*T)
+`
+	for name, c := range map[string]struct {
+		handOn  string
+		leaves  int
+		mayMiss bool
+	}{
+		"sent here and received here":         {"", 1, false},
+		"sent here twice, once in a select":   {"select {\n\tcase ch <- keeps:\n\tdefault:\n\t}", 2, false},
+		"its length is read and it is closed": {"_ = len(ch)\n\tdefer close(ch)", 1, false},
+		"handed to a function":                {"fill(ch)", 1, true},
+		"captured by a closure":               {"func() { ch <- keeps }()", 0, true},
+		"stored":                              {"chans = append(chans, ch)", 1, true},
+		"sent on another channel":             {"chch := make(chan chan func(*T), 1)\n\tchch <- ch", 1, true},
+		"sent on another channel in a select": {"chch := make(chan chan func(*T), 1)\n\tselect {\n\tcase chch <- ch:\n\tdefault:\n\t}", 1, true},
+	} {
+		src := head + "\nfunc call(x *T) {\n\tch := make(chan func(*T), 2)\n\tch <- reads\n\t" + c.handOn + "\n\tf := <-ch\n\tf(x)\n}\n"
+		leaves, mayMiss := calledOrigins(t, src, func(pkg *ssa.Package) *ssa.Function { return pkg.Func("call") })
+		if leaves != c.leaves {
+			t.Errorf("%s: the trace found %d functions sent in sight, want %d", name, leaves, c.leaves)
+		}
+		if mayMiss != c.mayMiss {
+			t.Errorf("%s: the trace says its answer may not be all: %v, want %v", name, mayMiss, c.mayMiss)
+		}
+	}
+}
+
+// calledOrigins builds src, indexes every function of the package with the one pick returns, and
+// asks the trace what the value that function calls may be: how many it found, and whether it
+// says there may be more.
+func calledOrigins(t *testing.T, src string, pick func(*ssa.Package) *ssa.Function) (leaves int, mayMiss bool) {
+	t.Helper()
+	pkg := buildWalk(t, src)
+	fn := pick(pkg)
+	if fn == nil {
+		t.Fatal("the function to ask about is not in the package")
+	}
+	fns := []*ssa.Function{fn}
+	for _, m := range pkg.Members {
+		if f, ok := m.(*ssa.Function); ok && f != fn && f.Name() != "init" {
+			fns = append(fns, f)
+		}
+	}
+	st := &state{
+		pass:       &analysis.Pass{Pkg: pkg.Pkg, Fset: pkg.Prog.Fset},
+		ssa:        &buildssa.SSA{Pkg: pkg, SrcFuncs: fns},
+		ix:         &annot.Index{},
+		sums:       map[*ssa.Function]*summary{},
+		sumReaders: map[*ssa.Function]map[*ssa.Function]bool{},
+	}
+	st.contracts = st.buildContractIndex(fns)
+	found, mayMiss := st.ask().origins(fn, calledValue(t, fn))
+	return len(found), mayMiss
 }

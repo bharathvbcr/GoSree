@@ -11,8 +11,9 @@ import (
 // set through a method's receiver, a parameter of a method also reached through an interface, and a
 // channel handed to another function. In each a function that returns shared memory may run, so the
 // publish of the result must be reported. Taking "every function it may hold returns a fresh value"
-// as an answer (5bfec07) silenced all four; until those answers are honest, a call of a variable
-// whose targets are fresh only by their summaries is not taken as fresh.
+// as an answer (5bfec07) silenced all four, and fde27e1 stopped taking it. The trace now says "may
+// not be all" in each of the four (globalAddrTaken for the first two, the methods called through
+// an interface, a channel with a use that is not a send or a receive), and this test holds that.
 func TestCallOfAVariableWithHiddenTargetsIsNotFresh(t *testing.T) {
 	const head = `package p
 

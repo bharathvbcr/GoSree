@@ -716,13 +716,42 @@ func (t *trace) received(fn *ssa.Function, ch ssa.Value, depth int) ([]leafValue
 	}
 	var out []leafValue
 	incomplete := false
+	sent := func(fn *ssa.Function, v ssa.Value) {
+		sub, inc := t.follow(fn, v, ask{kind: askValue}, depth+1)
+		out = append(out, sub...)
+		if inc {
+			incomplete = true
+		}
+	}
 	for _, ref := range *mc.Referrers() {
-		if snd, ok := ref.(*ssa.Send); ok && snd.Chan == mc {
-			sub, inc := t.follow(snd.Parent(), snd.X, ask{kind: askValue}, depth+1)
-			out = append(out, sub...)
-			if inc {
+		switch r := ref.(type) {
+		case *ssa.Send:
+			if r.Chan != mc {
+				incomplete = true // the channel is itself sent somewhere
+				continue
+			}
+			sent(r.Parent(), r.X)
+		case *ssa.Select:
+			for _, state := range r.States {
+				if state.Chan == mc && state.Send != nil {
+					sent(r.Parent(), state.Send)
+				}
+				if state.Send == mc {
+					incomplete = true
+				}
+			}
+		case *ssa.UnOp, *ssa.DebugRef:
+			// a receive, which is the only unary operation on a channel
+		case ssa.CallInstruction:
+			// len, cap and close send nothing, deferred or not. Any other call is handed the
+			// channel and may send on it what is not in sight here.
+			if _, builtin := r.Common().Value.(*ssa.Builtin); !builtin {
 				incomplete = true
 			}
+		default:
+			// Stored, captured by a closure, converted or returned: the channel is somewhere a
+			// send does not show among these uses.
+			incomplete = true
 		}
 	}
 	if len(out) == 0 {

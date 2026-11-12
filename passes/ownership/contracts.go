@@ -1887,11 +1887,12 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 		out.matched = true
 	} else if bodyFn.Signature != nil && bodyFn.Signature.Results() != nil && bodyFn.Signature.Results().Len() > 0 {
 		// Fresh by what the body does, which its summary says. This is not taken as an answer about
-		// the call (out.matched stays false): a call whose targets are all fresh in this way would
-		// then be fresh whenever the trace says it has every target, and that "every" is not yet
-		// honest for a package variable set through its address, a field set through a receiver,
-		// a parameter of a method reached through an interface, or a channel handed on
-		// (TestCallOfAVariableWithHiddenTargetsIsNotFresh).
+		// the call (out.matched stays false). When that was decided the trace's "every target" was
+		// not honest for a package variable set through its address, a field set through a
+		// receiver, a parameter of a method reached through an interface, or a channel handed on
+		// (TestCallOfAVariableWithHiddenTargetsIsNotFresh). Each has its rule in the trace now,
+		// and the result of a call whose targets are all known is read from their summaries in
+		// graph.callOfKnown, not here.
 		if s := st.summaryRead(bodyFn); s != nil && !s.pessimistic && s.fresh && len(s.links) == 0 {
 			out.freshResult = true
 		}
