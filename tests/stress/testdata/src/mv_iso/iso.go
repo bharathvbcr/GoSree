@@ -51,7 +51,7 @@ func viaMethodValue() {
 	f := S{}.Take
 	j := &Job{}
 	f(j)
-	j.ID = 1 // MISS(SAFE003): f is S.Take; j moved into its iso parameter
+	j.ID = 1 // HIT(SAFE003)
 }
 
 func apply(f func(*Job), j *Job) { f(j) }

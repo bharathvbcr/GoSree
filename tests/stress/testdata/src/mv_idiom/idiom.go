@@ -66,7 +66,7 @@ func perElementGo(n int) []Item {
 	items := make([]Item, n)
 	var wg sync.WaitGroup
 	for i := range items {
-		it := &items[i] // FP(SAFE003): a different element each iteration; Wait below joins them all
+		it := &items[i]
 		wg.Go(func() { it.ID = i })
 	}
 	wg.Wait()

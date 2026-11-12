@@ -150,7 +150,7 @@ type state struct {
 	// graphs caches the alias graph of each function once summaries are final; the fork-join rule
 	// reads a goroutine body's graph while checking its parent.
 	graphs    map[*ssa.Function]*graph
-	joinCache map[ssa.Instruction]map[ssa.Instruction]bool
+	joinCache map[joinCacheKey]map[ssa.Instruction]bool
 	// localGuards maps the cells of guarded local variables (their Alloc, and the free variables of
 	// closures that capture them) to their guard.
 	localGuards    map[ssa.Value]localGuard
@@ -181,6 +181,22 @@ type state struct {
 	// enclosing function is walked once, not once per identifier.
 	litBindings map[ast.Node]map[*types.Var][]*ast.FuncLit
 	litBorrows  map[litKey][]capturedBorrow
+
+	// allFns are the functions of the package the pass checks (sourceFuncs); the access footprints
+	// of moves (footprint.go) read their lock summaries.
+	allFns []*ssa.Function
+
+	// autoGuarded, autoHolds, and cancelSafeVars hold proven mutex-encapsulated unexported fields
+	// and package variables inferred from SSA lockset dominance (autoguard.go).
+	autoGuarded          map[*types.Var]*types.Var
+	paramAutoGuarded     map[*types.Var]*types.Var
+	autoHolds            map[*types.Func]autoHoldInfo
+	cancelSafeVars       map[*types.Var]bool
+	autoSyncTypes        map[*types.TypeName]bool
+	valueAutoSyncTypes   map[*types.TypeName]bool
+	genericAutoSyncTypes map[*types.TypeName]bool
+	roLocalFields        map[*types.Var]bool
+	exposedLocalTypes    map[*types.TypeName]bool
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the
@@ -212,7 +228,7 @@ func run(pass *analysis.Pass) (any, error) {
 		suppressed: map[reportKey]bool{},
 
 		graphs:    map[*ssa.Function]*graph{},
-		joinCache: map[ssa.Instruction]map[ssa.Instruction]bool{},
+		joinCache: map[joinCacheKey]map[ssa.Instruction]bool{},
 	}
 	if err := checkCallTables(pass.Pkg); err != nil {
 		return nil, err
@@ -230,9 +246,15 @@ func run(pass *analysis.Pass) (any, error) {
 	st.cls = st.newClassifier()
 
 	fns := sourceFuncs(st.ssa)
+	st.allFns = fns
 	st.localGuards = st.guardedCells(fns)
 	st.contracts = st.buildContractIndex(fns)
+	st.inferAutoGuards(fns)
 	st.computeSummaries(fns)
+	if st.refineAutoGuardsPostSummaries(fns) {
+		st.computeSummaries(fns)
+	}
+	st.inferAutoSyncTypes(fns)
 	st.exportFacts(fns)
 	st.collectGlobalMutations(fns)
 
@@ -344,6 +366,33 @@ func (st *state) exportFacts(fns []*ssa.Function) {
 			f.FreshResult = append([]bool(nil), s.freshResult...)
 			if acq != nil {
 				f.Acquires = append([]acquire(nil), acq[fn]...)
+			}
+			if s.waitParam >= 0 && s.waitGroupKind() != 0 {
+				f.WaitParamPlusOne = s.waitParam + 1
+			}
+			f.WaitKind = s.waitKind
+			if len(fn.Params) > 0 {
+				pa := make([]bool, len(fn.Params))
+				for i, p := range fn.Params {
+					if !st.cls.Shareable(p.Type()) && st.isExportableAutoSyncSigType(p.Type()) {
+						pa[i] = true
+					}
+				}
+				if anyTrue(pa) {
+					f.ParamAutoSync = pa
+				}
+			}
+			if fn.Signature != nil && fn.Signature.Results() != nil && fn.Signature.Results().Len() > 0 {
+				ra := make([]bool, fn.Signature.Results().Len())
+				for k := range ra {
+					rt := fn.Signature.Results().At(k).Type()
+					if !st.cls.Shareable(rt) && st.isExportableAutoSyncSigType(rt) {
+						ra[k] = true
+					}
+				}
+				if anyTrue(ra) {
+					f.ResAutoSync = ra
+				}
 			}
 		}
 		st.pass.ExportObjectFact(obj, f)

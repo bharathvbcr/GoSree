@@ -68,8 +68,14 @@ func (fr frame) into(callee *ssa.Function, ins ssa.Instruction, last token.Pos) 
 	return frame{fn: callee, site: fr.at(ins, last)}
 }
 
-// checkHandlerWrites reports SAFE008 for the handler registered at sp.
-func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
+// checkHandlerWrites reports SAFE008 for the handler registered at sp and returns whether any
+// finding (or incomplete bound cut) was raised.
+func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
+	flagged := false
+	raise := func(pos token.Pos, cat, msg string) {
+		flagged = true
+		st.report(pos, cat, msg)
+	}
 	walk := newRootWalk(st.summary)
 	shared := map[frame]map[ssa.Value]string{}
 	// A frame waits in the queue once however many values are added to it meanwhile: queueing it
@@ -84,7 +90,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 		}
 	}
 	if len(queue) == 0 {
-		return
+		return false
 	}
 	add := func(fr frame, v ssa.Value, desc string) {
 		if shared[fr] == nil {
@@ -121,18 +127,31 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 		fn, r := cur.fn, shared[cur]
 		at := func(ins ssa.Instruction) token.Pos { return cur.at(ins, regPos) }
 		into := func(callee *ssa.Function, ins ssa.Instruction) frame { return cur.into(callee, ins, regPos) }
+		followArgClosures := func(ins ssa.Instruction, args []ssa.Value) {
+			for _, a := range args {
+				for _, mc := range closureCandidates(a) {
+					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
+						for j, b := range mc.Bindings {
+							if root, ok := walk.root(b, r); ok && j < len(argFn.FreeVars) {
+								add(into(argFn, ins), argFn.FreeVars[j], r[root])
+							}
+						}
+					}
+				}
+			}
+		}
 		forEachInstr(fn, func(ins ssa.Instruction) {
 			// A walk back from a value this instruction uses that ran out of budget did not find
 			// shared memory and did not rule it out: say so here, where it gave up.
 			walk.cut = false
 			defer func() {
 				if walk.cut {
-					st.report(at(ins), HandlerWriteCut, fmt.Sprintf(
+					raise(at(ins), HandlerWriteCut, fmt.Sprintf(
 						"where a value used here comes from could not be followed to the end (more than %d values lead to it), so a write here to memory a handler shares with every concurrent request may be unreported",
 						rootWalkBudget))
 				}
 			}()
-			if _, ok := spawnOf(ins); ok {
+			if _, ok := st.spawnSiteOf(ins); ok {
 				return
 			}
 			if w, ok := writeOf(ins); ok {
@@ -140,7 +159,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 					return // SAFE009 checks guarded memory at every access
 				}
 				if root, ok := walk.root(w.addr, r); ok && once(at(ins)) {
-					st.report(at(ins), HandlerWrite, fmt.Sprintf(
+					raise(at(ins), HandlerWrite, fmt.Sprintf(
 						"%s is written here by a handler registered with %s%s, which shares it with every concurrent request",
 						r[root], sp.via, st.at(regPos)))
 				}
@@ -152,12 +171,32 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 			}
 			cc := c.Common()
 			if cc.IsInvoke() {
+				if methodSums, resolved := st.resolveInvokeMethodSummaries(fn, cc); resolved {
+					followArgClosures(ins, cc.Args)
+					fullArgs := append([]ssa.Value{cc.Value}, cc.Args...)
+					for _, sum := range methodSums {
+						for i, v := range fullArgs {
+							root, ok := walk.root(v, r)
+							if !ok || !sum.writes(i) || st.isHandlerCallGuarded(v) || st.isSafeHandlerValue(v) {
+								continue
+							}
+							if once(at(ins)) {
+								raise(at(ins), HandlerWrite, fmt.Sprintf(
+									"%s is passed to interface method %s, which may write it, by a handler registered with %s%s, which shares it with every concurrent request",
+									r[root], cc.Method.Name(), sp.via, st.at(regPos)))
+							}
+							return
+						}
+					}
+					return
+				}
 				for _, v := range append([]ssa.Value{cc.Value}, cc.Args...) {
-					if _, guarded := st.slotOf(v); guarded {
+					root, ok := walk.root(v, r)
+					if !ok || st.isHandlerCallGuarded(v) || st.isSafeHandlerValue(v) {
 						continue
 					}
-					if root, ok := walk.root(v, r); ok && !st.cls.Shareable(v.Type()) && once(at(ins)) {
-						st.report(at(ins), HandlerWrite, fmt.Sprintf(
+					if once(at(ins)) {
+						raise(at(ins), HandlerWrite, fmt.Sprintf(
 							"%s is passed to interface method %s, which may write it, by a handler registered with %s%s, which shares it with every concurrent request",
 							r[root], cc.Method.Name(), sp.via, st.at(regPos)))
 						return
@@ -165,20 +204,94 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 				}
 				return
 			}
+			if b, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
+				switch b.Name() {
+				case "len", "cap", "min", "max", "ssa:wrapnilchk", "print", "println", "recover", "close":
+					return
+				}
+			}
 			// Every function the call may run is followed. Where the called value may also be
 			// something that could not be resolved to a function (rest), that something may
 			// write what the call hands it, and what it is itself: a function read from shared
 			// memory may be a closure over that memory. What a known target captures is its own
 			// and is followed with it.
 			targets, rest := callTargets(cc.Value)
+			if len(targets) == 0 && len(rest) == 1 && rest[0] == cc.Value {
+				if fieldFns, ok := st.resolveLoadedFieldCallables(cc.Value); ok {
+					rest = nil
+					for _, fnTarget := range fieldFns {
+						targets = append(targets, callTarget{fn: fnTarget})
+					}
+				} else if fvTargets, ok := st.resolveFreeVarCallables(cc.Value); ok {
+					rest = nil
+					for i, a := range cc.Args {
+						root, hasRoot := walk.root(a, r)
+						if !hasRoot || st.isHandlerCallGuarded(a) || st.isSafeHandlerValue(a) {
+							continue
+						}
+						mayWriteArg := false
+						for _, ft := range fvTargets {
+							if st.summary(ft.fn).writes(i) {
+								mayWriteArg = true
+								break
+							}
+						}
+						if mayWriteArg {
+							if once(at(ins)) {
+								raise(at(ins), HandlerWrite, fmt.Sprintf(
+									"%s is passed to a dynamic function call, which may write it, by a handler registered with %s%s, which shares it with every concurrent request",
+									r[root], sp.via, st.at(regPos)))
+							}
+							return
+						}
+					}
+					followArgClosures(ins, cc.Args)
+					for _, ft := range fvTargets {
+						if ft.mc == nil {
+							continue
+						}
+						sum := st.summary(ft.fn)
+						needsFollow := false
+						for j, b := range ft.mc.Bindings {
+							if !st.isHandlerCallGuarded(b) && !st.isSafeHandlerValue(b) && sum.writesFree(j) {
+								needsFollow = true
+								break
+							}
+						}
+						if !needsFollow {
+							continue
+						}
+						if len(ft.fn.Blocks) == 0 || !st.followable(ft.fn) {
+							if once(at(ins)) {
+								raise(at(ins), HandlerWrite, fmt.Sprintf(
+									"captured closure is invoked at a dynamic function call, which may write shared memory, by a handler registered with %s%s",
+									sp.via, st.at(regPos)))
+							}
+							return
+						}
+						for j, b := range ft.mc.Bindings {
+							if j >= len(ft.fn.FreeVars) || st.isHandlerCallGuarded(b) || st.isSafeHandlerValue(b) || !sum.writesFree(j) {
+								continue
+							}
+							desc := describe(b)
+							if root, hasRoot := walk.root(b, r); hasRoot {
+								desc = r[root]
+							}
+							add(into(ft.fn, ins), ft.fn.FreeVars[j], desc)
+						}
+					}
+					return
+				}
+			}
 			if len(rest) > 0 {
 				handed := append(append([]ssa.Value(nil), cc.Args...), rest...)
 				for _, v := range handed {
-					if _, guarded := st.slotOf(v); guarded {
+					root, ok := walk.root(v, r)
+					if !ok || st.isHandlerCallGuarded(v) || st.isSafeHandlerValue(v) {
 						continue
 					}
-					if root, ok := walk.root(v, r); ok && !st.cls.Shareable(v.Type()) && once(at(ins)) {
-						st.report(at(ins), HandlerWrite, fmt.Sprintf(
+					if once(at(ins)) {
+						raise(at(ins), HandlerWrite, fmt.Sprintf(
 							"%s is passed to a dynamic function call, which may write it, by a handler registered with %s%s, which shares it with every concurrent request",
 							r[root], sp.via, st.at(regPos)))
 						return
@@ -190,21 +303,13 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 			}
 			// A closure handed on as an argument may be called by the callee: every closure the
 			// argument may be is followed with what it captures.
-			for _, a := range cc.Args {
-				for _, mc := range closureCandidates(a) {
-					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
-						for j, b := range mc.Bindings {
-							if root, ok := walk.root(b, r); ok && j < len(argFn.FreeVars) {
-								add(into(argFn, ins), argFn.FreeVars[j], r[root])
-							}
-						}
-					}
-				}
-			}
+			followArgClosures(ins, cc.Args)
 			for _, t := range targets {
 				callee := t.fn
 				if len(callee.Blocks) == 0 || !st.followable(callee) {
-					st.checkCalleeWrites(at(ins), cc, callee, r, walk, sp, regPos, once)
+					if st.checkCalleeWrites(at(ins), cc, callee, r, walk, sp, regPos, once) {
+						flagged = true
+					}
 					continue
 				}
 				for i, a := range cc.Args {
@@ -227,10 +332,29 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 		})
 	}
 	if len(queue) > 0 {
-		st.report(regPos, HandlerWriteCut, fmt.Sprintf(
+		raise(regPos, HandlerWriteCut, fmt.Sprintf(
 			"the write check of the handler registered with %s stopped after scanning %d function bodies with shared memory still to follow, so a write to memory the handler shares with every concurrent request may be unreported",
 			sp.via, steps))
 	}
+	return flagged
+}
+
+func (st *state) isSafeHandlerValue(v ssa.Value) bool {
+	if v == nil {
+		return true
+	}
+	return st.cls.Shareable(v.Type()) || st.isAutoSyncType(v.Type())
+}
+
+func (st *state) isHandlerCallGuarded(v ssa.Value) bool {
+	slot, guarded := st.slotOf(v)
+	if !guarded {
+		return false
+	}
+	if slot.inferred {
+		return st.isCancelFuncValue(v)
+	}
+	return true
 }
 
 // checkCalleeWrites reports SAFE008 at a call the write check does not follow into (a function of
@@ -238,18 +362,21 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 // the callee's summary says it may write that parameter. Shareable arguments (a mutex, an atomic, an
 // imm value) are exempt: their methods synchronise or never write. pos is where the call is
 // reported, which is not the call's own position when it sits in a synthesised function.
-func (st *state) checkCalleeWrites(pos token.Pos, cc *ssa.CallCommon, callee *ssa.Function, r map[ssa.Value]string, walk *rootWalk, sp spawnSite, regPos token.Pos, once func(token.Pos) bool) {
+func (st *state) checkCalleeWrites(pos token.Pos, cc *ssa.CallCommon, callee *ssa.Function, r map[ssa.Value]string, walk *rootWalk, sp spawnSite, regPos token.Pos, once func(token.Pos) bool) bool {
 	sum := st.summary(callee)
 	for i, a := range cc.Args {
 		root, ok := walk.root(a, r)
-		if !ok || !sum.writes(i) || st.cls.Shareable(a.Type()) || !once(pos) {
+		if !ok || !sum.writes(i) || st.isSafeHandlerValue(a) {
 			continue
 		}
-		st.report(pos, HandlerWrite, fmt.Sprintf(
-			"%s is passed to %s, which may write it%s, by a handler registered with %s%s, which shares it with every concurrent request",
-			r[root], calleeName(callee), sum.unavailable(), sp.via, st.at(regPos)))
-		return
+		if once(pos) {
+			st.report(pos, HandlerWrite, fmt.Sprintf(
+				"%s is passed to %s, which may write it%s, by a handler registered with %s%s, which shares it with every concurrent request",
+				r[root], calleeName(callee), sum.unavailable(), sp.via, st.at(regPos)))
+		}
+		return true
 	}
+	return false
 }
 
 // followable reports whether the write check follows a call into fn: a function of this package,
@@ -334,6 +461,21 @@ func handlerRoots(prog *ssa.Program, sp spawnSite) []handlerBody {
 				}
 			}
 			resolve(x.X)
+		case *ssa.Phi:
+			for _, e := range x.Edges {
+				resolve(e)
+			}
+		case *ssa.UnOp:
+			if x.Op == token.MUL {
+				if alloc, ok := x.X.(*ssa.Alloc); ok {
+					uses := usesOfCell(alloc)
+					if !uses.open && len(uses.fields) == 0 && len(uses.elems) == 0 && len(uses.slices) == 0 {
+						for _, stIns := range uses.stores {
+							resolve(stIns.Val)
+						}
+					}
+				}
+			}
 		case *ssa.MakeClosure:
 			fn := x.Fn.(*ssa.Function)
 			roots := map[ssa.Value]string{}
@@ -349,6 +491,113 @@ func handlerRoots(prog *ssa.Program, sp spawnSite) []handlerBody {
 	}
 	resolve(sp.fn)
 	return out
+}
+
+// hasCompleteHandlerRoots reports whether every non-nil branch of sp.fn resolves completely to
+// known function/handler bodies in prog (with at least one such body and zero unknown leaves).
+func hasCompleteHandlerRoots(prog *ssa.Program, sp spawnSite) bool {
+	if !sp.repeated || sp.fn == nil {
+		return false
+	}
+	foundBody := false
+	seen := map[ssa.Value]bool{}
+	var check func(v ssa.Value) bool
+	check = func(v ssa.Value) bool {
+		if v == nil {
+			return false
+		}
+		if seen[v] {
+			return true
+		}
+		seen[v] = true
+		switch x := v.(type) {
+		case *ssa.Const:
+			return x.IsNil()
+		case *ssa.ChangeType:
+			return check(x.X)
+		case *ssa.Phi:
+			if len(x.Edges) == 0 {
+				return false
+			}
+			for _, e := range x.Edges {
+				if !check(e) {
+					return false
+				}
+			}
+			return true
+		case *ssa.UnOp:
+			if x.Op != token.MUL {
+				return false
+			}
+			alloc, ok := x.X.(*ssa.Alloc)
+			if !ok {
+				return false
+			}
+			uses := usesOfCell(alloc)
+			if uses.open || len(uses.stores) == 0 || len(uses.fields) > 0 || len(uses.elems) > 0 || len(uses.slices) > 0 {
+				return false
+			}
+			for _, stIns := range uses.stores {
+				if !check(stIns.Val) {
+					return false
+				}
+			}
+			return true
+		case *ssa.Call:
+			if callee := x.Call.StaticCallee(); callee != nil && len(callee.Blocks) > 0 {
+				returned := false
+				for _, b := range callee.Blocks {
+					for _, ins := range b.Instrs {
+						if ret, ok := ins.(*ssa.Return); ok {
+							if len(ret.Results) != 1 {
+								return false
+							}
+							returned = true
+							if !check(ret.Results[0]) {
+								return false
+							}
+						}
+					}
+				}
+				if returned {
+					return true
+				}
+			}
+			for _, a := range x.Call.Args {
+				if spawnedFunc(prog, a, true) != nil {
+					return check(a)
+				}
+			}
+			return false
+		case *ssa.MakeInterface:
+			if fn := spawnedFunc(prog, x, true); fn != nil {
+				if _, isClosure := unwrapToClosure(x); !isClosure {
+					if len(fn.Blocks) == 0 {
+						return false
+					}
+					foundBody = true
+					return true
+				}
+			}
+			return check(x.X)
+		case *ssa.MakeClosure:
+			fn, ok := x.Fn.(*ssa.Function)
+			if !ok || len(fn.Blocks) == 0 {
+				return false
+			}
+			foundBody = true
+			return true
+		case *ssa.Function:
+			if len(x.Blocks) == 0 {
+				return false
+			}
+			foundBody = true
+			return true
+		default:
+			return false
+		}
+	}
+	return check(sp.fn) && foundBody
 }
 
 // unwrapToClosure reports whether a boxed handler is a converted function value (http.HandlerFunc).
@@ -638,34 +887,77 @@ func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]
 				return nil, false
 			}
 			var alloc *ssa.Alloc
+			targetField := -1
+			hasTargetIndex := false
+			var targetIndex int64
 			if a, ok := x.X.(*ssa.Alloc); ok {
 				alloc = a
 			} else if fa, ok := x.X.(*ssa.FieldAddr); ok {
-				alloc, _ = fa.X.(*ssa.Alloc)
+				if a, isA := fa.X.(*ssa.Alloc); isA {
+					alloc = a
+					targetField = fa.Field
+				}
+			} else if ia, ok := x.X.(*ssa.IndexAddr); ok {
+				if a, isA := ia.X.(*ssa.Alloc); isA {
+					alloc = a
+					targetIndex, hasTargetIndex = constIndex(ia.Index)
+				}
 			}
 			if alloc != nil && alloc.Referrers() != nil {
+				var checkAddrStores func(addr ssa.Value) (ssa.Value, bool)
+				checkAddrStores = func(addr ssa.Value) (ssa.Value, bool) {
+					if addr.Referrers() == nil {
+						return nil, false
+					}
+					for _, r2 := range *addr.Referrers() {
+						switch sub := r2.(type) {
+						case *ssa.Store:
+							if sub.Addr == addr {
+								if r, ok := sharedRootSeen(sub.Val, roots, seen, w); ok {
+									return r, true
+								}
+							}
+						case *ssa.FieldAddr:
+							if sub.X == addr {
+								if r, ok := checkAddrStores(sub); ok {
+									return r, true
+								}
+							}
+						case *ssa.IndexAddr:
+							if sub.X == addr {
+								if r, ok := checkAddrStores(sub); ok {
+									return r, true
+								}
+							}
+						}
+					}
+					return nil, false
+				}
 				for _, ref := range *alloc.Referrers() {
 					if st, ok := ref.(*ssa.Store); ok && st.Addr == alloc {
 						if r, ok := sharedRootSeen(st.Val, roots, seen, w); ok {
 							return r, true
 						}
 					}
-					if fa, ok := ref.(*ssa.FieldAddr); ok && fa.Referrers() != nil {
-						for _, r2 := range *fa.Referrers() {
-							if st, ok := r2.(*ssa.Store); ok && st.Addr == fa {
-								if r, ok := sharedRootSeen(st.Val, roots, seen, w); ok {
-									return r, true
-								}
-							}
+					if fa, ok := ref.(*ssa.FieldAddr); ok && fa.X == alloc {
+						if targetField >= 0 && fa.Field != targetField {
+							continue
+						}
+						if r, ok := checkAddrStores(fa); ok {
+							return r, true
 						}
 					}
-					if ia, ok := ref.(*ssa.IndexAddr); ok && ia.Referrers() != nil {
-						for _, r2 := range *ia.Referrers() {
-							if st, ok := r2.(*ssa.Store); ok && st.Addr == ia {
-								if r, ok := sharedRootSeen(st.Val, roots, seen, w); ok {
-									return r, true
-								}
+					if ia, ok := ref.(*ssa.IndexAddr); ok && ia.X == alloc {
+						if targetField >= 0 {
+							continue
+						}
+						if hasTargetIndex {
+							if ci, ok := constIndex(ia.Index); ok && ci != targetIndex {
+								continue
 							}
+						}
+						if r, ok := checkAddrStores(ia); ok {
+							return r, true
 						}
 					}
 				}

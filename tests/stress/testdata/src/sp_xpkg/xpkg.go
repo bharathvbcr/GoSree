@@ -43,7 +43,7 @@ func methodValueIso() {
 	j := &sub.Job{}
 	f := sub.Worker{}.Submit
 	f(j)
-	j.ID = 1 // MISS(SAFE003): a method value calls a bound-method wrapper, which summary() makes pessimistic: it leaks j but does not move it
+	j.ID = 1 // HIT(SAFE003)
 }
 
 // control: a generic spawner with owned parameters, instantiated here.

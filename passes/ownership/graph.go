@@ -269,11 +269,37 @@ func (g *graph) written(ins ssa.Instruction, v ssa.Value, desc string) {
 	g.add(g.val(v), ev(evWrite, ins, desc))
 }
 
-// writtenCaptures records a write through every value closure v captured: a function value whose
-// body runs where gosree cannot see it may write all of them.
+// unwrapClosureValue strips type and interface conversions around a MakeClosure.
+func unwrapClosureValue(v ssa.Value) (*ssa.MakeClosure, bool) {
+	for {
+		switch x := v.(type) {
+		case *ssa.MakeClosure:
+			return x, true
+		case *ssa.ChangeType:
+			v = x.X
+		case *ssa.MakeInterface:
+			v = x.X
+		case *ssa.ChangeInterface:
+			v = x.X
+		default:
+			return nil, false
+		}
+	}
+}
+
+// writtenCaptures records a write through each value closure v captured that its body may write.
 func (g *graph) writtenCaptures(ins ssa.Instruction, v ssa.Value, desc string) {
-	if mc, ok := v.(*ssa.MakeClosure); ok {
-		for _, b := range mc.Bindings {
+	mc, ok := unwrapClosureValue(v)
+	if !ok {
+		return
+	}
+	writes := func(int) bool { return true }
+	if fn, ok := mc.Fn.(*ssa.Function); ok && fn != nil {
+		s := g.st.summary(fn)
+		writes = s.writesFree
+	}
+	for j, b := range mc.Bindings {
+		if writes(j) {
 			g.written(ins, b, desc)
 		}
 	}
@@ -289,6 +315,9 @@ func (g *graph) instr(ins ssa.Instruction) {
 	case *ssa.MakeClosure:
 		c := g.val(ins)
 		for _, b := range ins.Bindings {
+			if g.isAutoSyncCapture(ins, b) {
+				continue
+			}
 			if bn := g.val(b); bn != nil && c != nil {
 				g.union(g.pointee(c), bn)
 			}
@@ -953,23 +982,159 @@ func (g *graph) closureRetains(mc *ssa.MakeClosure) {
 	fn, _ := mc.Fn.(*ssa.Function)
 	leaks := func(j int) bool { return true }
 	if fn != nil {
-		if strings.HasPrefix(fn.Synthetic, "bound method wrapper") {
-			if m, ok := fn.Object().(*types.Func); ok && !types.IsInterface(m.Signature().Recv().Type()) {
-				if target := fn.Prog.FuncValue(m); target != nil {
-					s := g.st.summary(target)
-					leaks = func(int) bool { return s.leaks(0) }
-				}
-			}
-		} else {
-			s := g.st.summary(fn)
-			leaks = s.freeLeaks
-		}
+		s := g.st.summary(fn)
+		leaks = s.freeLeaks
 	}
 	for j, b := range mc.Bindings {
+		if g.isAutoSyncCapture(mc, b) {
+			continue
+		}
 		if bn := g.val(b); bn != nil && leaks(j) {
 			g.add(bn, ev(evEscape, mc, "captured by a closure that may retain or share it"))
 		}
 	}
+}
+
+func (g *graph) isAutoSyncCapture(ins ssa.Instruction, b ssa.Value) bool {
+	if g == nil || g.st == nil || b == nil {
+		return false
+	}
+	if !g.st.cls.Shareable(b.Type()) && g.st.isAutoSyncType(b.Type()) {
+		return true
+	}
+	return g.isAutoSyncFinalCell(ins, b)
+}
+
+// isAutoSyncFinalCell mirrors finalCells (cfg.go) for cells holding an AutoSync value: single
+// heap Allocs and Go 1.22+ per-iteration loop Phis selecting exclusively among such heap Allocs,
+// provided no store to any cell instance can execute after ins (or after any capturing closure)
+// without re-executing that cell's Alloc first.
+func (g *graph) isAutoSyncFinalCell(ins ssa.Instruction, b ssa.Value) bool {
+	isElemAutoSync := func(t types.Type) bool {
+		ptr, ok := t.Underlying().(*types.Pointer)
+		return ok && !g.st.cls.Shareable(ptr.Elem()) && g.st.isAutoSyncType(ptr.Elem())
+	}
+	if !isElemAutoSync(b.Type()) {
+		return false
+	}
+	comp := []ssa.Value{}
+	inComp := map[ssa.Value]bool{}
+	add := func(v ssa.Value) bool {
+		switch x := v.(type) {
+		case *ssa.Alloc:
+			if !x.Heap || x.Parent() != g.fn || !isElemAutoSync(x.Type()) {
+				return false
+			}
+		case *ssa.Phi:
+			if x.Parent() != g.fn || len(x.Edges) == 0 || !isElemAutoSync(x.Type()) {
+				return false
+			}
+		default:
+			return false
+		}
+		if !inComp[v] {
+			inComp[v] = true
+			comp = append(comp, v)
+		}
+		return true
+	}
+	if !add(b) {
+		return false
+	}
+	for head := 0; head < len(comp); head++ {
+		cur := comp[head]
+		if phi, isPhi := cur.(*ssa.Phi); isPhi {
+			for _, e := range phi.Edges {
+				if !add(e) {
+					return false
+				}
+			}
+		}
+		if cur.Referrers() != nil {
+			for _, r := range *cur.Referrers() {
+				if rPhi, isPhi := r.(*ssa.Phi); isPhi {
+					if !add(rPhi) {
+						return false
+					}
+				}
+			}
+		}
+	}
+	var captures []*ssa.MakeClosure
+	var stores []*ssa.Store
+	for _, v := range comp {
+		refs := v.Referrers()
+		if refs == nil {
+			return false
+		}
+		for _, r := range *refs {
+			switch r := r.(type) {
+			case *ssa.MakeClosure:
+				captures = append(captures, r)
+				fn, ok := r.Fn.(*ssa.Function)
+				if !ok {
+					return false
+				}
+				for j, bnd := range r.Bindings {
+					if bnd == v && (j >= len(fn.FreeVars) || freeVarWritten(fn.FreeVars[j])) {
+						return false
+					}
+				}
+			case *ssa.Store:
+				if r.Addr != v || r.Parent() != g.fn {
+					return false
+				}
+				stores = append(stores, r)
+			case *ssa.UnOp:
+				if r.Op != token.MUL {
+					return false
+				}
+			case *ssa.Phi:
+				if !inComp[r] {
+					return false
+				}
+			case *ssa.DebugRef:
+			default:
+				return false
+			}
+		}
+	}
+	if len(stores) == 0 {
+		return false
+	}
+	checkNoStoreAfter := func(start ssa.Instruction) bool {
+		if start == nil || start.Parent() != g.fn {
+			return false
+		}
+		var after func(ssa.Instruction) bool
+		for _, s := range stores {
+			if s == start {
+				return false
+			}
+			if alloc, isAlloc := s.Addr.(*ssa.Alloc); isAlloc {
+				if reachableWithoutKill(start, s, alloc) {
+					return false
+				}
+			} else {
+				if after == nil {
+					after = reachableAfter(start)
+				}
+				if after(s) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	if !checkNoStoreAfter(ins) {
+		return false
+	}
+	for _, mc := range captures {
+		if !checkNoStoreAfter(mc) {
+			return false
+		}
+	}
+	return true
 }
 
 // closureUsedOnlyAtCallSites reports whether every use of v (a closure, or a conversion of one) is a
@@ -1020,7 +1185,7 @@ func (g *graph) closureUsedOnlyAtCallSites(mc *ssa.MakeClosure, v ssa.Value) boo
 	return true
 }
 
-// isIsoArg reports whether v is passed to a //gosree:iso parameter of the static callee, which owns it.
+// isIsoArg reports whether v is passed to a //gosree:iso or spawner callback parameter of the static callee.
 func (g *graph) isIsoArg(cc *ssa.CallCommon, v ssa.Value) bool {
 	fn := cc.StaticCallee()
 	if fn == nil {
@@ -1028,7 +1193,7 @@ func (g *graph) isIsoArg(cc *ssa.CallCommon, v ssa.Value) bool {
 	}
 	sum := g.st.summary(fn)
 	for i, a := range cc.Args {
-		if a == v && sum.isIso(i) {
+		if a == v && (sum.isIso(i) || sum.spawns(i)) {
 			return true
 		}
 	}
@@ -1054,9 +1219,18 @@ func (g *graph) goStmt(ins *ssa.Go) {
 			g.transferWithOp(ins, v, token.NoPos, -1, what)
 		}
 	}
+	var goSum *summary
+	if callee := cc.StaticCallee(); callee != nil && !cc.IsInvoke() {
+		goSum = g.st.summary(callee)
+	}
 	for i, a := range cc.Args {
 		g.transferWithOp(ins, a, token.NoPos, i, "passed to a goroutine")
-		g.written(ins, a, "passed to a goroutine, which may write it")
+		if goSum == nil || goSum.writes(i) {
+			g.written(ins, a, "passed to a goroutine, which may write it")
+		}
+	}
+	if cc.IsInvoke() {
+		g.written(ins, cc.Value, "receiver of a method started as a goroutine, which may write it")
 	}
 	g.writtenCaptures(ins, cc.Value, "captured by a goroutine, which may write it")
 }

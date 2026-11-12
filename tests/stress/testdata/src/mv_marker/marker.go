@@ -67,7 +67,7 @@ func methodMarkerValue(p Pool) {
 	put := p.Put
 	j := &Job{}
 	put(j)
-	j.ID = 1 // MISS(SAFE003): put is Pool.Put, whose cap.Iso parameter started a goroutine on j
+	j.ID = 1 // HIT(SAFE003)
 }
 
 // a local alias of the marker type is not recognised (annot.capSymbol matches the cap package or

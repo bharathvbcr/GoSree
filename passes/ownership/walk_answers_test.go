@@ -294,19 +294,23 @@ func TestCallersThatAskForAnyTargetAreListed(t *testing.T) {
 // walkBounds lists every fixed number in this package that can end a walk or a fixpoint before it
 // is done, as "function: bound", with what the code does when the number is reached.
 var walkBounds = map[string]string{
-	"follow: originDepth":                  "answers incomplete and marks its question as cut; the checks that asked report SAFE002-incomplete or SAFE005-incomplete",
-	"follow: originBudget":                 "as originDepth",
-	"anotherName: cellViewLimit":           "the memory is taken as open: the trace answers that what it holds may not be all, and callTargets lists the load among what it could not resolve",
-	"evalValueAsCallable: depth > 6":       "marks its question as cut and answers that no contract was found, so the call is reported as one whose callees could not all be found (not reached today: the nested call passes no arguments, so nesting stops at one)",
-	"releaseSummaries: maxReleaseSteps":    "the summary is cut to that many steps and the release is taken as one that may happen: errs toward reporting (docs/RULES.md)",
-	"releaseSummaries: maxReleasesPerFn":   "past that many releases the function is taken to release: errs toward reporting (docs/RULES.md)",
-	"acquireSummaries: maxAcquireRounds":   "the acquisition is not credited: errs toward reporting (docs/RULES.md)",
-	"sharedLoadRoot: for range 16":         "only the search for a reason not to check the write stops (a shareable type, a guarded field); the write is then checked like any other, so past 16 steps the check reports more, never less",
-	"sharedRootSeen: rootWalkBudget":       "the walk reports where it stopped (SAFE008-incomplete or SAFE005-incomplete, by the check that asked)",
-	"checkHandlerWrites: handlerStepLimit": "the handler is reported as not fully examined (SAFE008-incomplete)",
-	"root: globalWalkBudget":               "the walk reports where it stopped (SAFE006-incomplete) and the write is not attributed either way",
-	"immReturns: immMaxRounds":             "the result that has not settled is used as it stands and reported (SAFE005-incomplete)",
-	"GobDecode: for range 4":               "not a walk: a function fact holds four lists of bits and each is decoded",
+	"follow: originDepth":                             "answers incomplete and marks its question as cut; the checks that asked report SAFE002-incomplete or SAFE005-incomplete",
+	"follow: originBudget":                            "as originDepth",
+	"anotherName: cellViewLimit":                      "the memory is taken as open: the trace answers that what it holds may not be all, and callTargets lists the load among what it could not resolve",
+	"evalValueAsCallable: depth > 6":                  "marks its question as cut and answers that no contract was found, so the call is reported as one whose callees could not all be found (not reached today: the nested call passes no arguments, so nesting stops at one)",
+	"releaseSummaries: maxReleaseSteps":               "the summary is cut to that many steps and the release is taken as one that may happen: errs toward reporting (docs/RULES.md)",
+	"releaseSummaries: maxReleasesPerFn":              "past that many releases the function is taken to release: errs toward reporting (docs/RULES.md)",
+	"acquireSummaries: maxAcquireRounds":              "the acquisition is not credited: errs toward reporting (docs/RULES.md)",
+	"sharedLoadRoot: for range 16":                    "only the search for a reason not to check the write stops (a shareable type, a guarded field); the write is then checked like any other, so past 16 steps the check reports more, never less",
+	"sharedRootSeen: rootWalkBudget":                  "the walk reports where it stopped (SAFE008-incomplete or SAFE005-incomplete, by the check that asked)",
+	"checkHandlerWrites: handlerStepLimit":            "the handler is reported as not fully examined (SAFE008-incomplete)",
+	"root: globalWalkBudget":                          "the walk reports where it stopped (SAFE006-incomplete) and the write is not attributed either way",
+	"immReturns: immMaxRounds":                        "the result that has not settled is used as it stands and reported (SAFE005-incomplete)",
+	"GobDecode: for range 4":                          "not a walk: a function fact holds four lists of bits and each is decoded",
+	"handlerHasUnguardedHiddenWrite: len(seen) > 128": "answers that the handler may write hidden shared memory, so the registration is not verified (Mode H declines) and the transfer is checked as before: errs toward reporting",
+	"isFreshInFn: depth < 8":                          "answers not fresh, so the value is treated as shared: errs toward reporting",
+	"unwrapOuterLoopValue: for steps < 8":             "answers that the index is not a loop counter, so it is taken as any index (stAnyIndex) and overlaps every other index: errs toward reporting",
+	"unwrapOuterLoopValue: steps < 8":                 "as unwrapOuterLoopValue: for steps < 8",
 }
 
 var boundName = regexp.MustCompile(`(Budget|Depth|Limit|Rounds)$|^max[A-Z]`)

@@ -35,7 +35,7 @@ func methodValue() {
 	j := &Job{}
 	start := wg.Go
 	start(func() { j.ID = 2 })
-	j.ID = 1 // MISS(SAFE003): a method value (wg.Go) is a bound-method wrapper, not the static callee the spawner table is keyed on, so the callback is no transfer. Witness sp_w_methodvalue
+	j.ID = 1 // HIT(SAFE003)
 	wg.Wait()
 }
 
