@@ -966,8 +966,8 @@ func cellOfFreeVar(fv *ssa.FreeVar) *ssa.Alloc {
 // What a caller takes from the list depends on what it asks. A fact that holds if any target does
 // it (releases a lock, publishes, writes) can be taken from each target. A fact that must hold
 // whichever target runs (a lock is held afterwards) needs every target to have it and rest to be
-// empty. What the call hands over is handed to whatever is in rest as well, and restCut says
-// whether that is all a value in rest may run on.
+// empty. What the call hands over is handed to whatever is in rest as well. restCut says when
+// that is not enough: a value in rest may then be a closure over anything in sight.
 func callTargets(v ssa.Value) (targets []callTarget, rest []ssa.Value) {
 	seen := map[ssa.Value]bool{}
 	inRest := map[ssa.Value]bool{}
@@ -1037,8 +1037,9 @@ func callTargets(v ssa.Value) (targets []callTarget, rest []ssa.Value) {
 // restCut says whether a value callTargets could not resolve is the load of a local variable whose
 // walk stopped before it read every name (cellUses.cut). What was stored there may then be any
 // closure made in sight, over any value of the function, and not only something that runs on
-// what the call hands it. A value of rest that is not such a load was not resolved for a reason
-// that is about the value itself (a parameter, a field, a call's result, an address handed out).
+// what the call hands it. A value of rest that is not such a load is taken, by every caller, to
+// run only on what the call hands it; that is not always so (a closure stored through an address
+// handed out, or through a load of a load), and those cases are tracked as open gaps.
 func restCut(rest []ssa.Value) bool {
 	for _, v := range rest {
 		load, ok := v.(*ssa.UnOp)
