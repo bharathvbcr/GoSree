@@ -16,8 +16,8 @@ Labels used below: **verified** means a command was run and its output read. **I
 |---|---|---|
 | ft-d323b7dd0b328a61d6520b47bec24786: safeerr wrong diagnostics, unbounded solver memory | **review** (rev 5) | `run/d323-solver`, `run/d323-frontend` |
 | ft-8e7947bad32ad012d13f77fda5bf9181: gosree-corpus, gosree-erase, acceptance script | **review** (rev 4) | `run/8e79-cmd` |
-| ft-b6a2a427e41d1e84e41c83538e4919eb: ownership/borrow false positives, caps, nondeterminism | **review** (rev 5) | `run/b6a2-ownership` |
-| ft-3b3c483abe2170060cf568b8edc238a5: ERR005 for a closure closing a captured resource (filed this run) | **review** (rev 4) | `run/3b3c-errcheck` |
+| ft-b6a2a427e41d1e84e41c83538e4919eb: ownership/borrow false positives, caps, nondeterminism | **review** (rev 6) | `run/b6a2-ownership` |
+| ft-3b3c483abe2170060cf568b8edc238a5: ERR005 for a closure closing a captured resource (filed this run) | **review** (rev 5) | `run/3b3c-errcheck` |
 | ft-f138c1b5ed039f7e77ec140fdaa3e667: census edges through generics, `[]*T`, `map[K]*T` (filed this run) | **review** (rev 3) | `run/f138-census` |
 
 All five branches are now contained in local `main` (section 10). No task was moved to **done**. Done needs `dev verify`, and in this repository it returns "DevCouncil state is unavailable in this directory": there is no task store, and `dev doctor` finds no `state.sqlite`. A gate that could not run is not treated as one that passed.
@@ -41,7 +41,7 @@ Run in a scratch worktree at `78f0879` on 2026-11-11 from 23:05 to 2026-11-12 00
 | `go test ./... -count=1`, cgo | 15 of 17 packages with tests `ok`. `passes/ownership` hit `go test`'s default 10-minute timeout. `tests/stress` failed `TestScale/send/use_pairs_in_one_function`. |
 | `CGO_ENABLED=0 go test ./... -count=1` | 16 of 17 `ok`; `passes/ownership` hit the same timeout |
 | `go test ./passes/ownership -count=1 -timeout 60m` | ok in both engines (571 s cgo, 548 s without). Main's FINDINGS.md also runs with `-timeout 60m`. |
-| `TestScale` repeated | Passes alone in both engines with a growth exponent of about 2. It failed 1 of 3 further runs (12.4× from N=200 to N=400, bound 10×). Over 8 interleaved rounds against the base `9161d81`, N=400 took 85–119 ms on `main` and 88–104 ms on the base, and every round passed. So this is a wall-clock ratio that spikes under contention, not a regression. Noted on ft-a0d4. |
+| `TestScale` repeated | Passes alone in both engines with a growth exponent of about 2. It failed 1 of 3 further runs (12.4× from N=200 to N=400, bound 10×). Over 8 interleaved rounds against the base `9161d81`, N=400 took 85–119 ms on `main` and 88–104 ms on the base, and every round passed. In 4 further interleaved rounds of the whole `TestScale` at load 54–63, both passed every round, with N=400 at 80–108 ms on `main` and 80–120 ms on the base. **Inferred:** a wall-clock ratio that spikes under contention. The base was never seen to fail, but I could not reproduce the failing condition on demand, so a small regression is not ruled out. Noted on ft-a0d4. |
 | Checker fingerprint | `ea4d532b03a3c903`, the same as main's FINDINGS.md |
 
 The acceptance tiers were not run at `78f0879`; their last run is the one below.
@@ -179,11 +179,13 @@ Benchmark baseline: `wt/base` at `9161d81`, kept for this comparison.
 | Waves 1 and 2 before b6a2 (`6b401b9`, `dfa778d`) | CPU of the stress ledger (method below), 8 rounds: −1.8% and +0.6%; A/A −0.1% | No regression |
 | ft-b6a2 as reviewed (`b1c8585`) | 10 rounds at load 60–90: +5.8% paired median, slower in 10/10, A/A 2.5%. Bisect, 8 rounds: `e32af00` −0.4%, `cb22145` +1.0%, `d9d8f3a` +9.6%, `b1c8585` +8.0%. The lane profile puts the cost in the escaped-variable scan, which builds about 352 package graphs, about 0.38 s per run. A re-measure at load about 14 gave +2.5%. | Over 5% at high load; the cause was found |
 | `60968b7` (lane speed fix) | −2% against the base at load about 14 | **Withdrawn:** unsound, removed on `main` by `16b0506` (section 10) |
-| **This run's work as merged, with both review fixes (`9823ff0`)** | 10 rounds, 2026-11-12 00:05, load 50–100: **+6.2% paired median** (range −0.4 to +8.9%, slower in 9/10). Medians: base 5.72 s and 5.71 s, `9823ff0` 6.06 s. A/A −0.5% (range −6.4 to +5.5%). | **Regression over 5%.** Justification and follow-up below. |
+| `9823ff0`: the merge with both review fixes. It also contains the main checkout's checkpoint `2fd93f0`, about 7,400 lines of another session's ownership and borrow work. | First series, 10 rounds, 2026-11-12 00:05, load 50–100: +6.2% paired median (range −0.4 to +8.9%, slower in 9/10); A/A −0.5% (range −6.4 to +5.5%). Second series (below): +5.1%, slower in 10/10. | Not this run's alone; see the next two rows |
+| **This run only (`e34e37c`, `run/integ-1111`, no gate)** | Second series, 10 rounds, 00:16–00:27, load 40–60, five arms per round (base, `e34e37c`, `2fd93f0`, `9823ff0`, base): **+6.2% paired median** (range +1.7 to +11.6%, slower in 10/10). Medians: base 5.88 s and 5.77 s, `e34e37c` 6.30 s. A/A −2.0% (range −5.7 to +1.5%). | **Regression over 5%.** Justification and follow-up below. |
+| The other session's checkpoint alone (`2fd93f0`) | Same series: +3.5% (range −3.2 to +6.4%, slower in 8/10) | Not this run's work; recorded so the merged figure can be read |
 
 **Method.** CPU time (user + sys) of `go test -c ./tests/stress` binaries running `-test.run '^TestStress$'`. Every arm runs from `wt/base/tests/stress`, so the input is identical; the newer binaries report FAIL there because their markers differ, but they analyse the same packages. Wall-clock time was unusable at this load. Arms are interleaved round by round, with a second base arm (A/A) in each round. Logs: `logs/bench-*-cpu.txt` in this run's scratchpad.
 
-**Justification for the +6.2%.** The cost is the escaped-variable scan that makes ft-b6a2's init-only fix sound: a package table whose memory escapes is no longer exempt. The bisect, the lane profile (about 0.38 s of a 5.8 s run, about 6.5%) and this measurement agree. The one cheaper version measured, `60968b7`, lost findings for publishes through an interface. Speeding the scan up without losing findings is filed as ft-1f846b0057d8860989a544ac56143014. Whether the regression may stand until then is listed in section 7.
+**Justification for the +6.2%.** The measured part is that this run's own work (`e34e37c`) costs +6.2% on the stress ledger. That the cost is the escaped-variable scan is **inferred**, not measured at these commits. The evidence is the 2026-11-11 bisect (`d9d8f3a`, which adds the scan, +9.6%; the commits before it within ±1%), the lane profile (about 352 package graph builds, about 0.38 s of a 5.8 s run, about 6.5%), and `60968b7` measuring −2% when it skipped the scan. The scan is what makes ft-b6a2's init-only fix sound: a package table whose memory escapes is no longer exempt. The one cheaper version measured, `60968b7`, lost findings for publishes through an interface. Speeding the scan up without losing findings is filed as ft-1f846b0057d8860989a544ac56143014. Whether the regression may stand until then is listed in section 7.
 
 ## 6. Fable (advisor) decisions
 
@@ -194,10 +196,12 @@ Benchmark baseline: `wt/base` at `9161d81`, kept for this comparison.
 5. **b6a2 overlap.** b6a2 continued to review on its branch, even though the main checkout has uncommitted edits to the same files. Merge order is the owner's call.
 6. **Wave 2 scope.** Two lanes: ft-3b3c (only `lower.go`, because `errcheck.go` is dirty on main) and ft-f138. Wave 1 was closed on the verified integration tip first. ft-a0d4 and ft-d71c were deferred for the reasons in section 3.
 7. **Range-over-func after-loop write.** Check the Go spec first. Because the defer runs at the enclosing function's return, the miss is recorded as a MISS, not documented as intended.
+8. **After the merge.** Do not rewrite `main` or `run/integ-1111`. The corrected report goes on its own branch, `run/report-1111`, starting at `main`. The 5% check is re-measured on the merged work, and the commits that are not this run's are measured separately. A regression over 5% is written up with its cause and a follow-up task; it is not reverted here, because reverting would bring back the escaped-table soundness bug.
+9. **Before declaring done.** No card summary claims a suite result I did not see. The `TestScale` comparison runs the full test, not one subtest. The benchmark separates this run's commits from the main checkout's checkpoint (`2fd93f0`) that the merge also brought in.
 
 ## 7. Owner decisions pending
 
-1. **b6a2 overlap with uncommitted work in the main checkout.**
+1. **b6a2 overlap with uncommitted work in the main checkout. Settled by the merge:** the other session committed that work as `2fd93f0` before merging this run's branches. The original note follows.
    - Another session (likely Claude Desktop pid 20696) has about 2,000 lines of uncommitted edits to the files b6a2 changes: `passes/ownership/{contracts,globals,graph,ownership,summary,check,handlerwrite,imm,lockset,spawn}.go`, `passes/borrow/{check,storage}.go`, and new `*_caps_*`, `*_nopos_*` and `locate_*` tests.
    - These look like fixes for the same card items. Which version lands is your decision, item by item, and `globals.go` will conflict.
    - Another session has also created `/Users/bharath/Code/devtools/gocap-worktree` (branch `harden/gosree-gates`) at this run's integration commit `6b401b9`, with b6a2-named test files staged. It was not touched.
@@ -245,7 +249,7 @@ After the merge into `main` (2026-11-11 23:10), free space was 55 GB (about 6%),
 
 Kept:
 - Every `run/*` branch. They are local and unpushed, and all are contained in `main`.
-- `wt/base` (the benchmark baseline), `wt/b6a2-adv2` (checked out at `run/report-1111`) and `wt/bench-9823` (detached at `9823ff0`, used for the benchmark above).
+- `wt/base` (the benchmark baseline) and `wt/b6a2-adv2` (checked out at `run/report-1111`). The benchmark worktrees `bench-9823`, `bench-e34e` and `bench-2fd9`, along with their test binaries, were removed after the measurements.
 - `wt/base`, the benchmark baseline.
 - The two ScholarLM `census.json` files in `f138keep/` (3.8 MB).
 - The shared Go build cache. It is 7.4 GB now; it was 8.6 → 11 GB earlier. It is shared with other sessions, so this run's share cannot be told apart, and it was not cleaned.
@@ -262,6 +266,7 @@ Every adversary branch (`run/{3b3c,8e79,b6a2,d323-frontend,d323-solver,f138}-adv
 - **One stalled agent.** The first b6a2 adversary stopped making progress for 53 minutes with no running child process and no commits. It was stopped and replaced, and its unfinished tests were reused.
 - **Clock times.** The working notes give estimated times for some wave-2 steps. This report uses only times read from command output.
 - **Unprobed by an adversary:** `16b0506` and `9823ff0` were written by another session after the merge. I checked them with the full suite at `78f0879` and five extra slice shapes (below), not with a separate adversary pass.
+- **Post-wave checks (2026-11-12 00:30).** `devmap_status`: fresh, generation 511, 220 files, 2,244 symbols, 8,074 edges. `gitpulse_insights`: every facet `ok`, 13 worktrees scanned, none truncated. Session `45c62196` (the one that merged) is still editing `passes/ownership`, so nothing here touches `main`.
 
 ## 10. After the merge into `main`
 
