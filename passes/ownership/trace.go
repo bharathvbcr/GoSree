@@ -18,6 +18,44 @@ import (
 type trace struct {
 	q    *question
 	seen map[valVisitKey]bool
+	// copied holds the fields of allocations for which the struct values stored whole anywhere
+	// in the package have been read on this walk (fieldOfBase), with the depth they were read
+	// at. Such a value may be a copy of another struct whose address is out of sight, which is
+	// read the same way, and a field asked of a struct value is not marked as visited: without
+	// this the walk would read the same stores again at every struct it comes to, as deep as
+	// the depth limit lets it.
+	copied map[fieldOfAlloc]int
+	// byType holds the fields whose stores anywhere in the package have been read on this walk
+	// for a pointer that led nowhere (fieldBehind), with the depth they were read at. Each
+	// stored value is marked as visited when it is read, so a second reading finds nothing.
+	byType map[structFieldKey]int
+}
+
+// firstOrShallower reports whether a reading that is made once on a walk is to be made at this
+// depth, and records that it is: the first time, and again from a shallower step. A reading
+// stops at the depth limit, so one from a shallower step goes further than the one before, and
+// one made at the limit reads nothing at all; a reading from the same step or a deeper one
+// finds nothing the earlier one did not.
+func firstOrShallower[K comparable](read *map[K]int, key K, depth int) bool {
+	if at, ok := (*read)[key]; ok && at <= depth {
+		return false
+	}
+	if *read == nil {
+		*read = map[K]int{}
+	}
+	(*read)[key] = depth
+	return true
+}
+
+type fieldOfAlloc struct {
+	base  *ssa.Alloc
+	field int
+}
+
+// fresh is a walk for a question asked on the way, on a visited set of its own. What it has
+// read is its own too: its answer is not the answer of the walk that asks.
+func (t *trace) fresh() *trace {
+	return &trace{q: t.q, seen: map[valVisitKey]bool{}}
 }
 
 // askKind is what a walk is asked about a value.
@@ -32,6 +70,8 @@ const (
 	askField
 	// askStored: as askValue, for what may be stored at an address.
 	askStored
+	// askElem: as askValue, for the elements of an array value.
+	askElem
 )
 
 type ask struct {
@@ -89,7 +129,8 @@ func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafV
 		return nil, true
 	}
 	bodyFn := canonicalBodyFn(fn)
-	if a.kind == askValue || a.kind == askBase {
+	if a.kind == askValue || a.kind == askBase || a.kind == askElem {
+		// An array value is asked for its elements and for nothing else, so one set serves.
 		key := valVisitKey{fn: bodyFn, v: v}
 		if t.seen[key] {
 			return nil, false
@@ -162,8 +203,9 @@ func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafV
 		switch a.kind {
 		case askValue, askBase:
 			return t.arguments(bodyFn, x, a, depth)
-		case askField:
-			// With no call site that says anything, the field is looked up by its type below.
+		case askField, askElem:
+			// With no call site that says anything, a field is looked up by its type below, and
+			// the elements of an array are not known.
 			if out, incomplete := t.arguments(bodyFn, x, a, depth); len(out) > 0 {
 				return out, incomplete
 			}
@@ -174,6 +216,8 @@ func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafV
 			return t.follow(bodyFn, x.X, ask{kind: askStored}, depth+1)
 		case x.Op == token.MUL && a.kind == askField:
 			return t.fieldBehind(bodyFn, x.X, a.field, depth)
+		case x.Op == token.MUL && a.kind == askElem:
+			return t.elemsBehind(bodyFn, x.X, depth)
 		case x.Op == token.MUL && a.kind == askBase:
 			if alloc, ok := x.X.(*ssa.Alloc); ok && alloc.Referrers() != nil {
 				return t.storedInCell(alloc, bodyFn, a, depth)
@@ -196,6 +240,11 @@ func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafV
 		if a.kind == askStored {
 			return t.elements(fn, x, depth)
 		}
+	case *ssa.Index:
+		// An element read out of an array value: a range over an array, an array a call returned.
+		if a.kind == askValue {
+			return t.follow(bodyFn, x.X, ask{kind: askElem}, depth+1)
+		}
 	case *ssa.Lookup:
 		if a.kind == askValue {
 			return t.looked(bodyFn, x.X, depth+1)
@@ -209,13 +258,13 @@ func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafV
 				return t.received(bodyFn, recv.X, depth+1)
 			}
 		}
-		if a.kind == askValue || a.kind == askBase {
+		if a.kind == askValue || a.kind == askBase || a.kind == askElem {
 			if callIns, ok := x.Tuple.(*ssa.Call); ok {
 				return t.returned(bodyFn, callIns, x.Index, a, depth+1)
 			}
 		}
 	case *ssa.Call:
-		if a.kind == askValue || a.kind == askBase {
+		if a.kind == askValue || a.kind == askBase || a.kind == askElem {
 			return t.returned(bodyFn, x, 0, a, depth+1)
 		}
 	}
@@ -292,11 +341,16 @@ func (t *trace) arguments(bodyFn *ssa.Function, p *ssa.Parameter, a ask, depth i
 // storedInCell walks every value stored to a local cell: the stores made through the variable,
 // through each closure that captures it and through each function of this package its address is
 // passed to (usesOfCell). They are all the cell may hold unless its address goes somewhere that is
-// not read, and then the answer may not be all. fn stands in for a store with no function.
+// not read, and then the answer may not be all: for a variable that holds a function, the
+// functions this package stores through a pointer stand in for what is written there
+// (writtenThroughPointer). fn stands in for a store with no function.
 func (t *trace) storedInCell(alloc *ssa.Alloc, fn *ssa.Function, a ask, depth int) ([]leafValue, bool) {
 	uses := usesOfCell(alloc)
 	var out []leafValue
 	incomplete := uses.open
+	if uses.open {
+		out = t.writtenThroughPointer(alloc, pointee(alloc.Type()), a, depth)
+	}
 	for _, stIns := range uses.stores {
 		pFn := stIns.Parent()
 		if pFn == nil {
@@ -391,7 +445,7 @@ func (t *trace) returned(caller *ssa.Function, callIns *ssa.Call, resIdx int, a 
 // this field; on the set of the walk that asks, a second read through the same pointer would be
 // answered "nothing more".
 func (t *trace) fieldBehind(fn *ssa.Function, ptr ssa.Value, field int, depth int) ([]leafValue, bool) {
-	fresh := &trace{q: t.q, seen: map[valVisitKey]bool{}}
+	fresh := t.fresh()
 	bases, incomplete := fresh.follow(fn, ptr, ask{kind: askBase}, depth+1)
 	var out []leafValue
 	for _, b := range bases {
@@ -403,9 +457,11 @@ func (t *trace) fieldBehind(fn *ssa.Function, ptr ssa.Value, field int, depth in
 	}
 	if len(out) == 0 && t.q.contracts != nil && ptr != nil {
 		if keyStr, ok := derefStructTypeKey(ptr.Type()); ok {
-			for _, iv := range t.q.contracts.fieldStores(keyStr, field) {
-				sub, _ := t.follow(iv.fn, iv.v, ask{kind: askValue}, depth+1)
-				out = append(out, sub...)
+			if firstOrShallower(&t.byType, structFieldKey{typ: keyStr, field: field}, depth) {
+				for _, iv := range t.q.contracts.fieldStores(keyStr, field) {
+					sub, _ := t.follow(iv.fn, iv.v, ask{kind: askValue}, depth+1)
+					out = append(out, sub...)
+				}
 			}
 			incomplete = true
 		}
@@ -435,6 +491,7 @@ func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bo
 		uses := usesOfCell(base)
 		var out []leafValue
 		incomplete := uses.open
+		fieldOpen := false
 		walk := func(stIns *ssa.Store, a ask) {
 			pFn := stIns.Parent()
 			if pFn == nil {
@@ -456,6 +513,9 @@ func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bo
 			if fu.open || len(fu.fields)+len(fu.elems)+len(fu.slices) > 0 {
 				incomplete = true // handed on, or a part of the field is written on its own
 			}
+			if fu.open {
+				fieldOpen = true
+			}
 			for _, stIns := range fu.stores {
 				walk(stIns, ask{kind: askValue})
 			}
@@ -466,13 +526,33 @@ func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bo
 		if uses.open && t.q.contracts != nil {
 			// The struct's address goes somewhere that is not read: it is returned, stored, joined
 			// with another pointer. A store through that other name is a store to this struct, and
-			// which stores those are is not followed. Every store the package makes to this field
-			// of this struct type stands in for them.
+			// which stores those are is not followed. The stores the package makes to this field
+			// of this struct type stand in for them, and this field of each struct value it stores
+			// whole. A store made to another allocation is not one of them: that is other memory.
 			if keyStr, ok := derefStructTypeKey(base.Type()); ok {
 				for _, iv := range t.q.contracts.fieldStores(keyStr, field) {
+					if iv.otherMemory(base) {
+						continue
+					}
 					sub, _ := t.follow(iv.fn, iv.v, ask{kind: askValue}, depth+1)
 					out = append(out, sub...)
 				}
+				if firstOrShallower(&t.copied, fieldOfAlloc{base, field}, depth) {
+					for _, iv := range t.q.contracts.wholeStores(keyStr) {
+						if iv.otherMemory(base) {
+							continue
+						}
+						sub, _ := t.follow(iv.fn, iv.v, ask{kind: askField, field: field}, depth+1)
+						out = append(out, sub...)
+					}
+				}
+			}
+		}
+		if uses.open || fieldOpen {
+			// The field's own address is out of sight, or may be taken through another name of the
+			// struct. It is never a variable's, so no allocation a store names is this field.
+			if st, ok := pointee(base.Type()).Underlying().(*types.Struct); ok && field < st.NumFields() {
+				out = append(out, t.writtenThroughPointer(nil, st.Field(field).Type(), ask{kind: askValue}, depth)...)
 			}
 		}
 		if len(out) == 0 {
@@ -509,6 +589,28 @@ func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bo
 	return nil, true
 }
 
+// writtenThroughPointer walks the functions this package stores through a pointer (*p = f), for a
+// function variable or field of type typ whose address has gone where it is not read: any of
+// those stores may be to it, and they stand in for what is written there. A store through a
+// pointer that is known to be another allocation's is left out; one that is known to be cell's
+// own is kept, since a pointer that is cell's or another's is not read where the cell is. The
+// caller has answered that what it found may not be all.
+func (t *trace) writtenThroughPointer(cell *ssa.Alloc, typ types.Type, a ask, depth int) []leafValue {
+	sig, ok := typ.Underlying().(*types.Signature)
+	if !ok || t.q.contracts == nil {
+		return nil
+	}
+	var out []leafValue
+	for _, iv := range t.q.contracts.funcPointerStores {
+		if !types.Identical(iv.v.Type().Underlying(), sig) || iv.otherMemory(cell) {
+			continue
+		}
+		sub, _ := t.follow(iv.fn, iv.v, a, depth+1)
+		out = append(out, sub...)
+	}
+	return out
+}
+
 // fieldByType walks the stores to a field of a struct type anywhere in the package. It is what is
 // left when the struct value itself leads nowhere, and its answer may never be all.
 func (t *trace) fieldByType(structVal ssa.Value, field int, depth int) ([]leafValue, bool) {
@@ -527,39 +629,63 @@ func (t *trace) fieldByType(structVal ssa.Value, field int, depth int) ([]leafVa
 	return nil, true
 }
 
-// elements walks the stores to the elements of a local array, directly and through slices of it.
-// Which element is read is not followed, so the answer may never be all.
+// elements walks what an element of an array may hold, for an element reached by its address: the
+// array's own, or a slice's of it.
 func (t *trace) elements(fn *ssa.Function, ia *ssa.IndexAddr, depth int) ([]leafValue, bool) {
 	base := ia.X
 	if sl, ok := base.(*ssa.Slice); ok {
 		base = sl.X
 	}
-	baseAlloc, ok := base.(*ssa.Alloc)
-	if !ok || baseAlloc.Referrers() == nil {
-		return nil, true
-	}
+	return t.elemsBehind(fn, base, depth)
+}
+
+// elemsBehind walks what the elements of the local array a pointer points to may hold. The array
+// is read as any local memory is (usesOfCell), through every name it has: its own, a closure's
+// that captures it, a parameter's of a function it is passed to. What may be in an element is
+// what is stored through an element's address, taken from any of those names or from a slice of
+// the array, and the elements of every array stored to it whole. An array built as a value is
+// stored whole: the literal is built in memory of its own first.
+//
+// Which element is read is not followed, and a slice of the array may be written through where
+// that is not read, so the answer may never be all.
+func (t *trace) elemsBehind(fn *ssa.Function, ptr ssa.Value, depth int) ([]leafValue, bool) {
+	fresh := t.fresh()
+	bases, _ := fresh.follow(fn, ptr, ask{kind: askBase}, depth+1)
 	var out []leafValue
-	stores := func(ia *ssa.IndexAddr) {
-		if ia.Referrers() == nil {
-			return
+	for _, b := range bases {
+		alloc, ok := b.v.(*ssa.Alloc)
+		if !ok || alloc.Referrers() == nil {
+			continue
 		}
-		for _, r2 := range *ia.Referrers() {
-			if stIns, ok := r2.(*ssa.Store); ok && stIns.Addr == ia {
-				sub, _ := t.follow(fn, stIns.Val, ask{kind: askValue}, depth+1)
-				out = append(out, sub...)
+		walk := func(stIns *ssa.Store, a ask) {
+			pFn := stIns.Parent()
+			if pFn == nil {
+				pFn = b.fn
+			}
+			sub, _ := t.follow(pFn, stIns.Val, a, depth+1)
+			out = append(out, sub...)
+		}
+		element := func(ia *ssa.IndexAddr) {
+			for _, stIns := range usesOfAddress(ia).stores {
+				walk(stIns, ask{kind: askValue})
 			}
 		}
-	}
-	for _, r := range *baseAlloc.Referrers() {
-		if ia, ok := r.(*ssa.IndexAddr); ok {
-			stores(ia)
+		uses := usesOfCell(alloc)
+		for _, ia := range uses.elems {
+			element(ia)
 		}
-		if sl, ok := r.(*ssa.Slice); ok {
-			for _, sr := range *sl.Referrers() {
-				if ia, ok := sr.(*ssa.IndexAddr); ok {
-					stores(ia)
+		for _, sl := range uses.slices {
+			if sl.Referrers() == nil {
+				continue
+			}
+			for _, ref := range *sl.Referrers() {
+				if ia, ok := ref.(*ssa.IndexAddr); ok {
+					element(ia)
 				}
 			}
+		}
+		for _, stIns := range uses.stores {
+			walk(stIns, ask{kind: askElem})
 		}
 	}
 	return out, true

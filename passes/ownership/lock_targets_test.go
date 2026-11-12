@@ -200,6 +200,24 @@ func (s *S) setLock(p *func()) { *p = s.lockIt }
 func (s *S) setUnlock(p *func()) { *p = s.unlockIt }
 
 func (s *S) setUnlockClosure(p *func()) { *p = func() { s.mu.Unlock() } }
+
+func (s *S) setUnlockBound(p *func()) { *p = s.mu.Unlock }
+
+func setUnlockOf(p *func(), t *S) { *p = t.unlockIt }
+
+func (s *S) setVia(p *func()) { s.setUnlock(p) }
+
+func setRec(p *func(), t *S, n int) {
+	if n > 0 {
+		setRec(p, t, n-1)
+		return
+	}
+	*p = t.unlockIt
+}
+
+var keepS *S
+
+func setUnlockKept(p *func()) { *p = keepS.unlockIt }
 `
 
 func lockAddressDiags(t *testing.T, body string) []string {
@@ -232,19 +250,106 @@ func TestLockThroughAVariableWhoseAddressIsPassedOn(t *testing.T) {
 	}
 }
 
-// A helper that stores, through the variable's address, a function that unlocks: the function is
-// now among those the variable may hold, but it was made in the helper, and the mutex it unlocks
-// is named there by the helper's own receiver. The lock check keeps the locks of the function it
-// is checking as paths from that function's values, so the release is not matched and the write
-// after the call still counts as guarded. Pinned as what is known; it was missed before as well,
-// when the variable was "not known" and a call with no arguments released nothing.
-func TestLockReleasedByAFunctionAHelperStoresIsAKnownMiss(t *testing.T) {
+// A helper that stores, through the variable's address, a function that unlocks. The function is
+// among those the variable may hold, but it was made in the helper, and the mutex it unlocks is
+// named there by the helper's own values: its receiver, a parameter, a variable it captured. The
+// lock check keeps the locks of the function it is checking as paths from that function's
+// values, so the release matched nothing and the write after the call still counted as guarded.
+//
+// What such a function runs on is now brought to the function being checked: a parameter of the
+// helper is the argument at the call the variable's address went in by, a captured variable is
+// what the closure was made with. Where that cannot be done the function may unlock anything.
+func TestLockReleasedByAFunctionAHelperStores(t *testing.T) {
 	for name, body := range map[string]string{
-		"a method value of the helper's receiver": "s.mu.Lock()\n\tf := func() {}\n\ts.setUnlock(&f)\n\tf()\n\ts.n++",
-		"a closure made in the helper":            "s.mu.Lock()\n\tf := func() {}\n\ts.setUnlockClosure(&f)\n\tf()\n\ts.n++",
+		"a method value of the helper's receiver":             "s.mu.Lock()\n\tf := func() {}\n\ts.setUnlock(&f)\n\tf()\n\ts.n++",
+		"a closure made in the helper":                        "s.mu.Lock()\n\tf := func() {}\n\ts.setUnlockClosure(&f)\n\tf()\n\ts.n++",
+		"the mutex's own method, bound in the helper":         "s.mu.Lock()\n\tf := func() {}\n\ts.setUnlockBound(&f)\n\tf()\n\ts.n++",
+		"a helper handed s as an argument":                    "s.mu.Lock()\n\tf := func() {}\n\tsetUnlockOf(&f, s)\n\tf()\n\ts.n++",
+		"through two helpers":                                 "s.mu.Lock()\n\tf := func() {}\n\ts.setVia(&f)\n\tf()\n\ts.n++",
+		"a helper that calls itself":                          "s.mu.Lock()\n\tf := func() {}\n\tsetRec(&f, s, 3)\n\tf()\n\ts.n++",
+		"a closure made in a closure of this function":        "s.mu.Lock()\n\tf := func() {}\n\tw := func() { f = func() { s.mu.Unlock() } }\n\tw()\n\tf()\n\ts.n++",
+		"a method value made in a closure":                    "s.mu.Lock()\n\tf := func() {}\n\tw := func() { f = s.unlockIt }\n\tw()\n\tf()\n\ts.n++",
+		"a closure handed s as an argument":                   "s.mu.Lock()\n\tf := func() {}\n\tw := func(t *S) { f = t.unlockIt }\n\tw(s)\n\tf()\n\ts.n++",
+		"a helper that unlocks what a package variable holds": "s.mu.Lock()\n\tkeepS = s\n\tf := func() {}\n\tsetUnlockKept(&f)\n\tf()\n\ts.n++",
+		"control: the function is made here":                  "s.mu.Lock()\n\tf := func() {}\n\tif c {\n\t\tf = s.unlockIt\n\t}\n\tf()\n\ts.n++",
+	} {
+		if got := lockAddressDiags(t, body); len(got) == 0 {
+			t.Errorf("%s: a function the variable may hold unlocks mu, and the write of n after the call was not reported", name)
+		}
+	}
+	for name, body := range map[string]string{
+		"a helper handed another S":                                "o := &S{}\n\ts.mu.Lock()\n\tf := func() {}\n\tsetUnlockOf(&f, o)\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"a method of another S stores its own unlock":              "o := &S{}\n\ts.mu.Lock()\n\tf := func() {}\n\to.setUnlock(&f)\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"through two helpers, of another S":                        "o := &S{}\n\ts.mu.Lock()\n\tf := func() {}\n\to.setVia(&f)\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"a closure made in the helper, of another S":               "o := &S{}\n\ts.mu.Lock()\n\tf := func() {}\n\to.setUnlockClosure(&f)\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"the mutex's own method bound in the helper, of another S": "o := &S{}\n\ts.mu.Lock()\n\tf := func() {}\n\to.setUnlockBound(&f)\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"a helper that calls itself, of another S":                 "o := &S{}\n\ts.mu.Lock()\n\tf := func() {}\n\tsetRec(&f, o, 3)\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"a closure made in a closure, of another S":                "o := &S{}\n\ts.mu.Lock()\n\tf := func() {}\n\tw := func() { f = func() { o.mu.Unlock() } }\n\tw()\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"control: made here, of another S":                         "o := &S{}\n\ts.mu.Lock()\n\tf := func() {}\n\tif c {\n\t\tf = o.unlockIt\n\t}\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
 	} {
 		if got := lockAddressDiags(t, body); len(got) != 0 {
-			t.Errorf("%s: this is now reported (%s): move the case to the test above and take it off the list of known misses", name, strings.Join(got, "; "))
+			t.Errorf("%s: the function unlocks another mutex and mu is held when n is written, and it was reported: %s", name, strings.Join(got, "; "))
 		}
+	}
+}
+
+// A function of another package that a helper bound to the helper's own value is handed that
+// value, and may unlock what is in it, as any function of another package may that is handed it
+// here. (*sync.RWMutex).RLocker is not one of the mutex operations the check knows, so it stands
+// for any such function.
+func TestLockHandedToAnotherPackageByAFunctionAHelperStores(t *testing.T) {
+	const src = `package p
+
+import "sync"
+
+type RW struct {
+	mu sync.RWMutex
+	//gosree:guarded_by mu
+	n int
+}
+
+func (r *RW) setLocker(p *func() sync.Locker) { *p = r.mu.RLocker }
+
+func (r *RW) viaHelper() {
+	r.mu.Lock()
+	f := func() sync.Locker { return nil }
+	r.setLocker(&f)
+	f()
+	r.n++
+}
+
+func (r *RW) here(c bool) {
+	r.mu.Lock()
+	f := func() sync.Locker { return nil }
+	if c {
+		f = r.mu.RLocker
+	}
+	f()
+	r.n++
+}
+
+func (r *RW) ofAnother(o *RW) {
+	r.mu.Lock()
+	f := func() sync.Locker { return nil }
+	o.setLocker(&f)
+	f()
+	r.n++
+	r.mu.Unlock()
+}
+`
+	got := advDiagLines(t, src, "SAFE009")
+	lines := map[string]bool{}
+	for _, d := range got {
+		line, _, _ := strings.Cut(d, ":")
+		lines[line] = true
+	}
+	if !lines["18"] {
+		t.Errorf("bound in a helper: mu was handed to a function of another package, and the write of n after the call was not reported: %v", got)
+	}
+	if !lines["28"] {
+		t.Errorf("control, bound here: the write of n after the call was not reported: %v", got)
+	}
+	if lines["36"] {
+		t.Errorf("bound in a helper to another RW: mu is held when n is written, and it was reported: %v", got)
 	}
 }

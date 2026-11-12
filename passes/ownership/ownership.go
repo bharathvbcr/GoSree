@@ -128,14 +128,19 @@ type releaseMetrics struct {
 }
 
 type state struct {
-	pass    *analysis.Pass
-	ix      *annot.Index
-	ssa     *buildssa.SSA
-	cls     *kinds.Classifier
-	imm     map[*types.TypeName]bool
-	sums    map[*ssa.Function]*summary
-	stats   *Stats
-	reports map[reportKey]bool
+	pass *analysis.Pass
+	ix   *annot.Index
+	ssa  *buildssa.SSA
+	cls  *kinds.Classifier
+	imm  map[*types.TypeName]bool
+	sums map[*ssa.Function]*summary
+	// sumFor is the function whose summary is being worked out, and sumReaders the functions
+	// that read each summary while theirs was (summaryRead). A summary that changes sends its
+	// readers round again (computeSummaries).
+	sumFor     *ssa.Function
+	sumReaders map[*ssa.Function]map[*ssa.Function]bool
+	stats      *Stats
+	reports    map[reportKey]bool
 	// suppressed holds the findings muted by //gosree:unsafe, so each counts once in Stats.
 	suppressed map[reportKey]bool
 	// muted is set while checking a transfer that lies in a //gosree:unsafe scope: every finding it
@@ -202,12 +207,14 @@ type reportKey struct {
 
 func run(pass *analysis.Pass) (any, error) {
 	st := &state{
-		pass:    pass,
-		ix:      pass.ResultOf[annot.Analyzer].(*annot.Index),
-		ssa:     pass.ResultOf[buildssa.Analyzer].(*buildssa.SSA),
-		sums:    map[*ssa.Function]*summary{},
-		stats:   &Stats{},
-		reports: map[reportKey]bool{},
+		pass: pass,
+		ix:   pass.ResultOf[annot.Analyzer].(*annot.Index),
+		ssa:  pass.ResultOf[buildssa.Analyzer].(*buildssa.SSA),
+		sums: map[*ssa.Function]*summary{},
+
+		sumReaders: map[*ssa.Function]map[*ssa.Function]bool{},
+		stats:      &Stats{},
+		reports:    map[reportKey]bool{},
 
 		suppressed: map[reportKey]bool{},
 

@@ -14,6 +14,6 @@ func main() {
 	j := &Job{}
 	start := wg.Go
 	start(func() { j.ID = 2 })
-	j.ID = 1 // MISS(SAFE003): the callback started by wg.Go (through a method value) writes j concurrently
+	j.ID = 1 // HIT(SAFE003)
 	wg.Wait()
 }

@@ -267,6 +267,30 @@ func isMethodThunk(fn *ssa.Function) bool {
 	return fn != nil && (strings.HasPrefix(fn.Synthetic, "thunk") || strings.HasSuffix(fn.Name(), "$thunk"))
 }
 
+// methodBehind returns the method a method value's wrapper (g := r.m) or a method expression's
+// thunk (g := (*R).m) stands for: the method as declared, for a generic type the one all its
+// instances share. It is nil for anything else, and for a method of an interface, which has no
+// one function behind it.
+//
+// What is known of a method is recorded for the method: its summary, what it publishes, the
+// calls it is called by. A wrapper has its own parameters (the method's without the receiver,
+// which it captures) and a thunk has the method's, so whoever reads the method's facts for one of
+// them goes through here and then lines the parameters up.
+func methodBehind(fn *ssa.Function) *ssa.Function {
+	if !isBoundMethodWrapper(fn) && !isMethodThunk(fn) {
+		return nil
+	}
+	obj, ok := fn.Object().(*types.Func)
+	if !ok {
+		return nil
+	}
+	recv := obj.Signature().Recv()
+	if recv == nil || types.IsInterface(recv.Type()) {
+		return nil
+	}
+	return fn.Prog.FuncValue(obj.Origin())
+}
+
 func canonicalBodyFn(fn *ssa.Function) *ssa.Function {
 	if fn != nil && fn.Origin() != nil {
 		return fn.Origin()
@@ -385,9 +409,59 @@ type structFieldKey struct {
 	field int
 }
 
+// indexedValue is a value stored somewhere, with the function that stores it, and what is known
+// of the address the store was made through (for a store to a field, the pointer to the struct):
+// the allocations it is, when the address itself says so (addressedAllocs).
 type indexedValue struct {
-	fn *ssa.Function
-	v  ssa.Value
+	fn      *ssa.Function
+	v       ssa.Value
+	at      []*ssa.Alloc
+	atKnown bool
+}
+
+// storedAt is the value v, stored in fn through the address addr.
+func storedAt(fn *ssa.Function, v, addr ssa.Value) indexedValue {
+	allocs, ok := addressedAllocs(addr, map[ssa.Value]bool{})
+	return indexedValue{fn: fn, v: v, at: allocs, atKnown: ok}
+}
+
+// addressedAllocs gives the allocations an address is, where the value itself says so: an
+// allocation, a captured variable, a package variable (which is none), and a choice between or a
+// conversion of such. ok is false for an address that came from anywhere else, which may be any
+// memory of its type.
+func addressedAllocs(v ssa.Value, seen map[ssa.Value]bool) (allocs []*ssa.Alloc, ok bool) {
+	switch x := v.(type) {
+	case *ssa.Alloc:
+		return []*ssa.Alloc{x}, true
+	case *ssa.Global:
+		return nil, true
+	case *ssa.FreeVar:
+		if cell := cellOfFreeVar(x); cell != nil {
+			return []*ssa.Alloc{cell}, true
+		}
+	case *ssa.ChangeType:
+		return addressedAllocs(x.X, seen)
+	case *ssa.Phi:
+		if seen[x] {
+			return nil, true
+		}
+		seen[x] = true
+		for _, e := range x.Edges {
+			sub, ok := addressedAllocs(e, seen)
+			if !ok {
+				return nil, false
+			}
+			allocs = append(allocs, sub...)
+		}
+		return allocs, true
+	}
+	return nil, false
+}
+
+// otherMemory reports whether the store is known to be made to memory other than the allocation
+// base. Two allocations are never the same memory, whatever their type.
+func (iv indexedValue) otherMemory(base *ssa.Alloc) bool {
+	return iv.atKnown && !slices.Contains(iv.at, base)
 }
 
 func derefStructTypeKey(ptrType types.Type) (string, bool) {
@@ -423,11 +497,23 @@ type contractIndex struct {
 	globalStores      map[*ssa.Global][]ssa.Value
 	globalFieldStores map[*ssa.Global]map[int][]ssa.Value
 	structFieldStores map[structFieldKey][]indexedValue
+	// structWholeStores holds, by struct type, every struct value stored whole (*p = v): a store
+	// to all of its fields at once.
+	structWholeStores map[string][]indexedValue
+	// funcPointerStores holds every function stored through a pointer that is not itself the
+	// variable, field or element it writes (*p = f): the stores that may be to a function
+	// variable whose address has gone where it is not read (writtenThroughPointer).
+	funcPointerStores []indexedValue
 	callForwards      map[*ssa.Function][]callForwardRule
 	retForwards       map[*ssa.Function][]retForwardRule
 	directPublish     map[*ssa.Function][]pubArgSpec
-	directSharedRet   map[*ssa.Function]string
-	directFreshRet    map[*ssa.Function]bool
+	// freePublish holds, for a closure, the captured variables whose value it publishes when it
+	// is called, by itself or through a closure it makes and calls. argIdx is the index of the
+	// free variable. A call of the closure is a publish of the variable, in the function that
+	// made the closure (graph.call).
+	freePublish     map[*ssa.Function][]pubArgSpec
+	directSharedRet map[*ssa.Function]string
+	directFreshRet  map[*ssa.Function]bool
 	// retFreshButForwards holds the functions whose every returned value is fresh or the result
 	// of one of their retForwards (retFreshness). A function in directFreshRet needs no entry.
 	retFreshButForwards map[*ssa.Function]bool
@@ -453,13 +539,35 @@ func (ci *contractIndex) fieldStores(typ string, field int) []indexedValue {
 		return ci.structFieldStores[structFieldKey{typ: typ, field: field}]
 	}
 	var out []indexedValue
+	for _, key := range ci.convertedWith(typ) {
+		out = append(out, ci.structFieldStores[structFieldKey{typ: key, field: field}]...)
+	}
+	return out
+}
+
+// wholeStores returns every struct value stored whole as the struct type with key typ or as a
+// type this package converts to or from it.
+func (ci *contractIndex) wholeStores(typ string) []indexedValue {
+	if len(ci.structConv[typ]) == 0 {
+		return ci.structWholeStores[typ]
+	}
+	var out []indexedValue
+	for _, key := range ci.convertedWith(typ) {
+		out = append(out, ci.structWholeStores[key]...)
+	}
+	return out
+}
+
+// convertedWith returns the struct type with key typ and every struct type this package converts
+// to or from it, directly or through others.
+func (ci *contractIndex) convertedWith(typ string) []string {
+	out := []string{typ}
 	seen := map[string]bool{typ: true}
-	for work := []string{typ}; len(work) > 0; work = work[1:] {
-		out = append(out, ci.structFieldStores[structFieldKey{typ: work[0], field: field}]...)
-		for _, other := range ci.structConv[work[0]] {
+	for i := 0; i < len(out); i++ {
+		for _, other := range ci.structConv[out[i]] {
 			if !seen[other] {
 				seen[other] = true
-				work = append(work, other)
+				out = append(out, other)
 			}
 		}
 	}
@@ -473,11 +581,13 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 		openCallers:       map[*ssa.Function]bool{},
 		globalStores:      map[*ssa.Global][]ssa.Value{},
 		globalFieldStores: map[*ssa.Global]map[int][]ssa.Value{},
+		structWholeStores: map[string][]indexedValue{},
 		structFieldStores: map[structFieldKey][]indexedValue{},
 		structConv:        map[string][]string{},
 		callForwards:      map[*ssa.Function][]callForwardRule{},
 		retForwards:       map[*ssa.Function][]retForwardRule{},
 		directPublish:     map[*ssa.Function][]pubArgSpec{},
+		freePublish:       map[*ssa.Function][]pubArgSpec{},
 		directSharedRet:   map[*ssa.Function]string{},
 		directFreshRet:    map[*ssa.Function]bool{},
 
@@ -519,6 +629,9 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 		}
 	}
 
+	// wrappers are the method values' wrappers and method expressions' thunks the functions name.
+	// Each calls its method, and that call is read below as one of the method's calls.
+	var wrappers []*ssa.Function
 	var opBuf [8]*ssa.Value
 	for _, fn := range scanFns {
 		bodyFn := canonicalBodyFn(fn)
@@ -563,7 +676,18 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 					}
 					if keyStr, ok := derefStructTypeKey(fa.X.Type()); ok {
 						fk := structFieldKey{typ: keyStr, field: fa.Field}
-						ci.structFieldStores[fk] = append(ci.structFieldStores[fk], indexedValue{fn: bodyFn, v: x.Val})
+						ci.structFieldStores[fk] = append(ci.structFieldStores[fk], storedAt(bodyFn, x.Val, fa.X))
+					}
+				}
+				if keyStr, ok := structValueTypeKey(x.Val.Type()); ok {
+					ci.structWholeStores[keyStr] = append(ci.structWholeStores[keyStr], storedAt(bodyFn, x.Val, x.Addr))
+				}
+				if _, isFunc := x.Val.Type().Underlying().(*types.Signature); isFunc {
+					switch x.Addr.(type) {
+					case *ssa.Alloc, *ssa.Global, *ssa.FieldAddr, *ssa.IndexAddr:
+						// the variable, field or element itself
+					default:
+						ci.funcPointerStores = append(ci.funcPointerStores, storedAt(bodyFn, x.Val, x.Addr))
 					}
 				}
 			case ssa.CallInstruction:
@@ -593,7 +717,28 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 					if bf != directFn {
 						ci.openCallers[bf] = true
 					}
+					if methodBehind(f) != nil && len(f.Blocks) > 0 && !slices.Contains(wrappers, f) {
+						wrappers = append(wrappers, f)
+					}
 				}
+			}
+		})
+	}
+	// A method called through a method value or a method expression is called by the wrapper made
+	// for the value, which passes its own parameters on (and for a method value the receiver it
+	// captured). That call is one of the method's calls: what a parameter of the method may be is
+	// asked at it, goes to the wrapper's parameter, and from there to the calls of the value,
+	// which are listed under the wrapper. Without it a method reached only through a value had no
+	// call in sight, and one that also had direct calls was read as if those were all.
+	for _, w := range wrappers {
+		forEachInstr(w, func(ins ssa.Instruction) {
+			c, ok := ins.(ssa.CallInstruction)
+			if !ok || c.Common().IsInvoke() {
+				return
+			}
+			if callee := c.Common().StaticCallee(); callee != nil {
+				target := canonicalBodyFn(callee)
+				ci.callSitesOf[target] = append(ci.callSitesOf[target], indexedCallSite{caller: canonicalBodyFn(w), ins: c})
 			}
 		})
 	}
@@ -616,8 +761,8 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 		ci.retForwards[fn] = append(ci.retForwards[fn], r)
 		return true
 	}
-	addDirectPublish := func(fn *ssa.Function, spec pubArgSpec) bool {
-		specs := ci.directPublish[fn]
+	addPublish := func(into map[*ssa.Function][]pubArgSpec, fn *ssa.Function, spec pubArgSpec) bool {
+		specs := into[fn]
 		for i := range specs {
 			if specs[i].argIdx == spec.argIdx {
 				if specs[i].freezesToImm && !spec.freezesToImm {
@@ -627,12 +772,15 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 				return false
 			}
 		}
-		ci.directPublish[fn] = append(specs, pubArgSpec{
+		into[fn] = append(specs, pubArgSpec{
 			argIdx:       spec.argIdx,
 			what:         spec.what,
 			freezesToImm: spec.freezesToImm,
 		})
 		return true
+	}
+	addDirectPublish := func(fn *ssa.Function, spec pubArgSpec) bool {
+		return addPublish(ci.directPublish, fn, spec)
 	}
 
 	// Base forwarding rules inside each function body.
@@ -754,6 +902,10 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 							}) {
 								changed = true
 							}
+						} else if free := capturedVariableRead(unwrapPublishedArg(cc.Args[spec.argIdx]), bodyFn); free >= 0 {
+							if addPublish(ci.freePublish, bodyFn, pubArgSpec{argIdx: free, what: spec.what, freezesToImm: spec.freezesToImm}) {
+								changed = true
+							}
 						}
 					}
 					if isRetCall && !targetIsParam && rc.sharedReadOnlyLoad && ci.directSharedRet[bodyFn] == "" {
@@ -769,6 +921,29 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 					return
 				}
 				calleeBody := canonicalBodyFn(callee)
+				// A closure called here, or deferred, that publishes a variable it captures
+				// publishes what this function gave it, before this function returns: a
+				// variable this function captures itself, or one that may hold a parameter of
+				// this function.
+				if mc, ok := cc.Value.(*ssa.MakeClosure); ok {
+					for _, fp := range ci.freePublish[calleeBody] {
+						if fp.argIdx >= len(mc.Bindings) {
+							continue
+						}
+						switch b := mc.Bindings[fp.argIdx].(type) {
+						case *ssa.FreeVar:
+							if free := slices.Index(bodyFn.FreeVars, b); free >= 0 && addPublish(ci.freePublish, bodyFn, pubArgSpec{argIdx: free, what: fp.what, freezesToImm: fp.freezesToImm}) {
+								changed = true
+							}
+						case *ssa.Alloc:
+							for _, p := range parametersHeld(b, bodyFn) {
+								if addDirectPublish(bodyFn, pubArgSpec{argIdx: p, what: fp.what, freezesToImm: fp.freezesToImm}) {
+									changed = true
+								}
+							}
+						}
+					}
+				}
 				for _, cf := range ci.callForwards[calleeBody] {
 					if cf.targetParam >= len(cc.Args) || cf.argParam >= len(cc.Args) {
 						continue
@@ -1081,6 +1256,37 @@ func paramFlowIndexSeen(v ssa.Value, fn *ssa.Function, depth int, seen map[ssa.V
 			return -1
 		}
 	}
+}
+
+// capturedVariableRead is the index of the free variable of fn that v is a read of, or -1. A
+// closure captures a variable by its address, so the variable's value is a load of the free
+// variable.
+func capturedVariableRead(v ssa.Value, fn *ssa.Function) int {
+	load, ok := v.(*ssa.UnOp)
+	if !ok || load.Op != token.MUL {
+		return -1
+	}
+	fv, ok := load.X.(*ssa.FreeVar)
+	if !ok {
+		return -1
+	}
+	return slices.Index(fn.FreeVars, fv)
+}
+
+// parametersHeld lists the parameters of fn that a local variable of fn may hold: each one that
+// some store to the variable, made by fn itself, stores. What else the variable may hold does
+// not matter to who asks: publishing the variable may publish each of them.
+func parametersHeld(cell *ssa.Alloc, fn *ssa.Function) []int {
+	var held []int
+	for _, st := range usesOfCell(cell).stores {
+		if st.Parent() != fn {
+			continue
+		}
+		if p := paramFlowIndex(st.Val, fn); p >= 0 && !slices.Contains(held, p) {
+			held = append(held, p)
+		}
+	}
+	return held
 }
 
 type valVisitKey struct {
@@ -1499,7 +1705,13 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 		return outcomeFromCapContract(c, pkgPath)
 	}
 
+	// The facts are the method's, also for a method value's wrapper (bound, and the method's
+	// parameters are one further on than the call's arguments) and a method expression's thunk
+	// (the same parameters as the method).
 	bodyFn := canonicalBodyFn(fn)
+	if m := methodBehind(fn); m != nil {
+		bodyFn = canonicalBodyFn(m)
+	}
 	if st.contracts == nil || bodyFn == nil {
 		return candOutcome{}
 	}
@@ -1624,7 +1836,7 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 	}
 	// What the body does with a published argument besides, for a callee reached as a value: a
 	// direct call reads the same from the summary. There are no summaries while the index is built.
-	if s := st.sums[bodyFn]; s != nil {
+	if s := st.summaryRead(bodyFn); s != nil {
 		for _, p := range out.publishArgs {
 			param := p.argIdx
 			if bound {
@@ -1646,8 +1858,12 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 		out.freshResult = true
 		out.matched = true
 	} else if bodyFn.Signature != nil && bodyFn.Signature.Results() != nil && bodyFn.Signature.Results().Len() > 0 {
-		if s := st.sums[bodyFn]; s != nil && !s.pessimistic && s.fresh && len(s.links) == 0 {
+		// Fresh by what the body does, which its summary says. That is an answer about the call
+		// like any other: a call whose targets were all fresh in this way used to merge to "no
+		// contract", and its result was not owned.
+		if s := st.summaryRead(bodyFn); s != nil && !s.pessimistic && s.fresh && len(s.links) == 0 {
 			out.freshResult = true
+			out.matched = true
 		}
 	}
 	return out
