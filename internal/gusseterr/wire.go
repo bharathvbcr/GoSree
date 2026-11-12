@@ -15,9 +15,12 @@ const NoneU32 uint32 = ^uint32(0)
 
 // Limits matching rust/gosree-errsolve/src/lib.rs.
 const (
-	// MaxFuncs bounds the functions in one package frame. Every per-package structure is linear
-	// in it and phase 1 costs O((functions + call edges) x log functions) plus the solves, so
-	// the bound is set by real packages: ScholarLM's internal/wisdev with its tests has 18,973.
+	// MaxFuncs bounds the functions in one package frame, set by real packages: ScholarLM's
+	// internal/wisdev with its tests has 18,973. Every per-package structure is linear in it,
+	// and phase 1 costs O((solves + call edges) x log functions). The solves are not linear: a
+	// caller is solved again for each sweep in which a callee flipped, so a function calling
+	// every member of a caller-first chain is solved about once per member (186 s at this limit,
+	// docs/ERROR_DISCIPLINE.md). No whole-package work budget bounds that.
 	MaxFuncs             = 262_144
 	MaxSlots             = 262_144
 	MaxTuples            = 16_384

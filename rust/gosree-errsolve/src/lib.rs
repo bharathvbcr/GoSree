@@ -24,9 +24,12 @@ pub const NONE_U32: u32 = u32::MAX;
 
 /// Functions in one package frame. Every per-package structure is linear in this count (summary
 /// bits, caller lists, the phase-1 worklists), and phase 1 costs O((functions + call edges) x
-/// log functions) plus one solve per function and per callee flip, so the bound is set by real
-/// packages, not by solver cost: a package with its tests has reached 18,973 (ScholarLM
-/// `internal/wisdev`). `MaxFuncs` in `internal/gusseterr/wire.go` is the mirror.
+/// log functions) plus one solve per function and per callee flip. The bound is set by real
+/// packages: a package with its tests has reached 18,973 (ScholarLM `internal/wisdev`). The
+/// solve count is not linear in it: a function calling every member of a caller-first chain is
+/// solved about once per member, which took 186 s at this limit (docs/ERROR_DISCIPLINE.md), and
+/// no whole-package work budget bounds that. `MaxFuncs` in `internal/gusseterr/wire.go` is the
+/// mirror.
 pub const MAX_FUNCS: usize = 262_144;
 pub const MAX_SLOTS: usize = 262_144;
 pub const MAX_TUPLES: usize = 16_384;

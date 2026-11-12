@@ -757,3 +757,17 @@ The main checkout's work and every branch of 2026-11-11 are on one line (see
   `MaxFuncs` raised to 65,536, which analyses the package in about half a minute. Raising the
   limit in the product, in `internal/gusseterr/wire.go` and `rust/gosree-errsolve/src/lib.rs`
   together, is task ft-bc5b and was not done here.
+
+### With tests again, after the function limit was raised (2026-11-12)
+
+`80a766b` raised `MaxFuncs` to 262,144 in both engines. The run with tests completes again, with
+cgo (the Rust engine), on the integration of `70ae4a8` with that commit (`0ff82c0`). The command
+is the one at the top of this file, with `-tests`, and its exit status was 0.
+
+- 52 s wall time, 8.7 GB peak RSS for the whole module. `internal/wisdev` with its tests is
+  analysed: 1,529 transfers, 106 of them hatched.
+- Module totals: 4,805 transfers, 444 needing `//gosree:unsafe` (9.2%), 3,111 flagged, 1,551
+  findings muted, 433 directives (5 mute nothing).
+- These figures are not comparable with the earlier with-tests figures in this record (1,798
+  transfers, 25.1%). Those were taken before the ownership changes of 2026-11-11 and 2026-11-12,
+  and nothing in this run is triaged.
