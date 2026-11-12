@@ -220,6 +220,15 @@ Done:
      262,144. It now completes: 4,805 transfers, 9.2% hatched, untriaged (2026-11-12). None of this is triaged,
      and the failure at `bb60b53` stands
      ([the triage log](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.md#re-measured-on-gosree-2026-11-10)).
+   - **Reopened as one experiment (2026-11-12): a parameter shared for reading.** Pre-registered,
+     with a gate before any build: under 69 of the 343 hatched transfers cleared, the claim is not
+     built. A scratch probe on `9167e27` ran the write walk from every parameter and checked every
+     call site. The claim would clear 1 hatched transfer (17 with the caller side waived and
+     escapes ignored), so the ratio would stay at 59.2%. It was not built, and the checker is
+     unchanged. The write check binds, not provenance: of the 164 claims the hand-overs need, the
+     walk finds a write, or cannot rule one out, through 118, at a callee's summary (55), a direct
+     write (30), a dynamic call (17) or an interface method (16)
+     ([the triage log](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.md#item-4-reopened-as-one-experiment-a-parameter-shared-for-reading-2026-11-12)).
 5. Open:
    - ownership of the channel's send end; joins through `select`;
    - `SafeGoWG`'s join (43 SAFE003-forkjoin findings);
@@ -227,6 +236,9 @@ Done:
    - SAFE006 for `sync.Once`-published variables, and B9's five lockset false positives;
    - claims for initialisation-time and goroutine-confined state. Item 4 showed these are what a
      later pin would need.
+   - what a called function does to memory it is handed: the write check at a module function's
+     summary, an interface method and a function value. The reopened experiment showed that no
+     claim about sharing clears a hatch until this is answered.
 
 The project should be abandoned if a `net/http` reference service has a hatch ratio above 20% (see
 [Measuring the escape hatch](../README.md#measuring-the-escape-hatch-on-a-module)) once the type and function

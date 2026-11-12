@@ -771,3 +771,152 @@ is the one at the top of this file, with `-tests`, and its exit status was 0.
 - These figures are not comparable with the earlier with-tests figures in this record (1,798
   transfers, 25.1%). Those were taken before the ownership changes of 2026-11-11 and 2026-11-12,
   and nothing in this run is triaged.
+
+## Item 4 reopened as one experiment: a parameter shared for reading (2026-11-12)
+
+One claim kind, pre-registered, with a gate before anything was built. The gate failed: **no claim
+was built, the checker is unchanged, and no corpus number moved.** Checker measured: `9167e27`
+(branch `rework/source`). Baseline: this ledger without its `unsafe` rows (its 66 `guarded_by`, 11
+`holds`, 6 `iso` and 1 `imm` rows kept): 578 transfers, 426 flagged, of which the ledger hatches 343
+(59.3%).
+
+### The claim
+
+Proposed as "a parameter the function only borrows". That name was wrong: `//gosree:rob` is that
+claim already, it is confined to the stack, and CAP003 refuses it at exactly these hand-overs. The
+claim tested is the opposite of a borrow:
+
+> A parameter shared for reading. Other goroutines may hold and read the memory it leads to, during
+> and after the call. Nobody writes it without a guard: not the function, not what it calls, not a
+> closure, goroutine or handler it hands the parameter to, and not the caller from the call on.
+
+Under it a hand-over to a goroutine or a handler clears when every unowned origin of its region is
+a parameter with a valid claim and no SAFE008 or SAFE004 is reported there (SAFE002 and SAFE003 go
+with the claim). A send on a channel, a context value, `sync.Pool.Put` and an atomic publish do not
+clear: the receiver there takes what it gets as its own. A claim is valid when the write walk from
+the parameter finds nothing (callee side), and every call of the function passes an argument led to
+only by parameters whose own claims are valid, or one owned there and not written or handed over
+again after the call (caller side).
+
+### The gate, written first
+
+228 of the 343 hatched transfers must clear to reach 20%. Under 69 (20% of the hatches): not built,
+and that is the result. 69 to 227: not built in this round, the numbers go to the owner. 228 or
+more: built and measured. Numbers already seen when this was written (first causes on the
+unannotated run, an older build's write summaries) were listed as seen, not predicted.
+
+### Method
+
+A scratch probe in the ownership pass (not in the repository), run over the module on the hatch-free
+annotated copy. For every transfer it records the unowned origins of the region, resolved through
+captured variables to parameters of declared functions. For every pointer-bearing parameter of a
+declared function it runs the handler write check's walk from that parameter, followed into the
+closures, goroutines and handlers the function hands it to. For every static call of a module
+function it records where each argument comes from and what the caller does with its region after
+the call. A script joins these with the findings and with the hatched copy.
+
+The join is by position. 7 transfers that are not flagged share a position with one that is, so the
+unit below is 350 transfers at hatched positions, of which 343 are the ledger's.
+
+### Result
+
+| Hatched transfers (350 at hatched positions) | Count |
+|---|---|
+| no unowned origin: flagged for a use after the hand-over, or an escape | 17 |
+| an origin that is not a parameter | 148 |
+| ... of those, a result of a call not known to be fresh | 136 |
+| every unowned origin is a parameter | 185 |
+| ... handed to a channel, a context or a pool (not covered) | 7 |
+| ... handed to a goroutine, a handler or a spawn wrapper's owned parameter | 178 |
+| ... of those, the walk finds a write through one of the parameters | 156 |
+| ... of those, every parameter is clean on the callee side | 22 |
+| **Ceiling:** callee side clean, no SAFE008 (SAFE004 counted as cleared, callers not checked) | **17** |
+| **Strict:** callee and caller side hold, no SAFE008, no SAFE004 | **1** |
+
+The claim would move the ratio from 59.3% to 59.2% (342 of 578), and to 56.4% at the ceiling. The
+178 hand-overs need 164 distinct (function, parameter) claims: the walk finds a write for 118 and
+none for 46, and the caller side then fails 44 of the 46 (35 on an argument that is the result of a
+call, 7 on a parameter of the caller whose own claim fails, 1 on both a package variable and a
+result, 1 method with callers out of sight).
+
+The one strict row is `requestFollowUpDecisionWithLLM` (`wisdev_contract_routes.go:1887`), and it
+is probably not real: the goroutine calls `StructuredOutput` on the result of
+`agentGateway.LLMClient.WithoutVertexDirect().WithTimeout(...)`, and the walk does not carry the
+parameter through those two results.
+
+80 of the 136 result-of-a-call transfers are in one function, `NewRouterWithShutdown`: it builds
+six values by calls (`ensureAgentGateway`, `buildRAGEngine`, `registerWisDevRoutes` and three more)
+and the handlers it registers capture them with `cfg`, one region.
+
+### What blocks the 118 claims
+
+By the first write the walk finds: a callee's summary 55, a direct write 30, a dynamic call 17, an
+interface method 16. By all the writes kept (up to 8 for each claim, 423 in all): a module
+function's summary 164, an interface method 95, a direct write 119, a dynamic call 32, a summary
+outside the module 13. By claim: 76 are blocked at calls only, 8 by direct writes that are all under
+a lock or in a `sync.Once.Do`, 5 by direct writes with at least one in no lock, 13 by both kinds,
+and 16 have more than 8 writes and were not classed.
+
+The direct writes, read by a script from the source around each (97 positions; not a checked
+claim): 54 follow a `Lock()` in the same function, 4 are in a `sync.Once.Do` closure, 1 is in a
+registration function, 38 are none of these. Four were read by hand: `detachedTasks.spawn` writes
+its map under `d.mu`; `registerFullPaperRoutes` sets `s.docService` while routes are registered;
+`ManuscriptPipeline.factCheckScorer` and `RuntimeJournal.startMirrorWorker` write once inside
+`Do`. Many of the 38 are writes to the working data of one request (`candidate.Title = title`,
+`working[n].Title = ""`, `papers[i].PdfUrl = ...`): for those parameters "shared for reading" is
+simply false. The hatches are not all read-only dependency containers.
+
+The summaries most often behind a block: `RuntimeStateStore.LoadAgentSession` (18),
+`RuntimeJournal.ReadSessionChecked` (15), `RuntimeJournal.Append` (14),
+`llm.Client.StructuredOutput` (10), and the interface method `Get` (21). Why each summary says it
+writes was not read.
+
+### Predictions
+
+| | Predicted | Result | |
+|---|---|---|---|
+| Hatched transfers with only parameters as origins | 200 to 270 | 185 | missed low |
+| Claims needed | 120 to 170 | 164 | hit |
+| Clean on the callee side | 15% to 30% | 28% (46) | hit |
+| First block is a call the walk cannot see into | at least 40% | 28% (33 of 118) | missed |
+| First block is a callee's summary | 20% to 40% | 47% (55) | missed high |
+| First block is a direct write | under 30% | 25% (30) | hit |
+| Ceiling | 25 to 60 | 17 | missed low |
+| Strict | 5 to 30 | 1 | missed low |
+| The caller side fails at least half of the callee-clean claims | at least 23 of 46 | 44 | hit |
+
+The refuter of my own predictions (strict of 69 or more) did not fire. I was too hopeful three
+times and never too cautious.
+
+### What the bound would be with more given away
+
+Not the gate, and not something the claim says: if a result of a call were accepted as shared as
+well (a second claim kind, on results) and the caller side were waived, 287 hatched transfers would
+have a covered hand-over and origins of the right kinds. 25 of them have every parameter clean on
+the callee side, 20 without a SAFE008. So provenance is not what binds. The write check is: it sees
+a write, or cannot rule one out, through 118 of the 164 parameters.
+
+### Limits
+
+All of these lean towards clearing more than a built checker could:
+- The walk does not follow a shared value stored into a fresh struct and loaded back. Five
+  hand-overs show it (`research_record.go:129` to `132`, `research_paper_suggestion.go:547`): the
+  walk from `store` is clean while the handler check reports the store's methods called through the
+  handler struct. The no-SAFE008 condition kept them out of the ceiling.
+- Escapes of the shared value are not checked beyond SAFE004 at the hand-over.
+- Call sites are matched by name across the module, and a method counts as having callers out of
+  sight when any package calls a method of that name through an interface.
+- The walk gives up after 3,000 function bodies or 4,096 values and counts that as not clean.
+
+And one that leans the other way: aliasing is by region, so one unowned value captured beside
+`cfg` taints every handler of the function (`NewRouterWithShutdown`).
+
+Not run: the suite, the race corpus and the other strata, because nothing in the checker changed.
+The probe, its two runs, the scripts and their output are scratch files outside the repository.
+
+### Decision
+
+By the rule written first: the claim is not built. Item 4's verdict at `bb60b53` stands. What a
+next claim would have to answer is the write check at calls: what a module function, an interface
+method or a function value does to memory it is handed, and the 54 direct writes made under a lock
+that carries no `guarded_by`.
