@@ -227,10 +227,14 @@ func (f *ImmFact) GobDecode(data []byte) error {
 }
 
 type summary struct {
-	leakParam  []bool
-	isoParam   []bool
-	spawnParam []bool
-	leakFree   []bool
+	leakParam []bool
+	// leakBesides[i]: the function does something with argument i that leaks it and that its
+	// contract at a call does not account for (event.byContract). Only a function of this package
+	// has it: no other function has a contract worked out from its body.
+	leakBesides []bool
+	isoParam    []bool
+	spawnParam  []bool
+	leakFree    []bool
 	// writeParam[i] / writeFree[j]: the function may write memory reachable from parameter i or free
 	// variable j.
 	writeParam  []bool
@@ -249,6 +253,14 @@ func (s *summary) leaks(i int) bool {
 		return true
 	}
 	return s.leakParam[i]
+}
+
+// leaksBesidesContract reports whether the function leaks argument i by something other than
+// what its contract at a call accounts for: the publish, and the forwards a caller resolves. A
+// summary that was not worked out from a body of this package answers no, also the pessimistic
+// one: such a callee has a contract only from the table, and the table speaks for all it does.
+func (s *summary) leaksBesidesContract(i int) bool {
+	return i < len(s.leakBesides) && s.leakBesides[i]
 }
 
 func (s *summary) isIso(i int) bool { return i < len(s.isoParam) && s.isoParam[i] }
@@ -308,10 +320,12 @@ func optimistic(fn *ssa.Function, st *state) *summary {
 		fr[k] = true
 	}
 	s := &summary{
-		leakParam:  make([]bool, len(fn.Params)),
-		isoParam:   make([]bool, len(fn.Params)),
-		spawnParam: make([]bool, len(fn.Params)),
-		leakFree:   make([]bool, len(fn.FreeVars)),
+		leakParam: make([]bool, len(fn.Params)),
+		isoParam:  make([]bool, len(fn.Params)),
+
+		leakBesides: make([]bool, len(fn.Params)),
+		spawnParam:  make([]bool, len(fn.Params)),
+		leakFree:    make([]bool, len(fn.FreeVars)),
 
 		writeParam:  make([]bool, len(fn.Params)),
 		writeFree:   make([]bool, len(fn.FreeVars)),
@@ -473,7 +487,7 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 	isWrite := func(e event) bool { return e.kind == evWrite }
 	for i, p := range fn.Params {
 		if n := g.val(p); n != nil {
-			s.leakParam[i] = regionScan(g, n, func(e event) bool {
+			leak := func(e event) bool {
 				switch {
 				case e.kind == evWrite:
 					return false
@@ -484,6 +498,27 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 					// holds the parameter's foreign event). An owned parameter has no foreign event to
 					// link by, so returning it stays a leak.
 					return s.isoParam[i]
+				}
+				return true
+			}
+			// What a publishing call hands back (a container returns what it holds) joins the
+			// memory of what was published. That is the publish too, not something else done
+			// with the parameter.
+			publishedAt := map[ssa.Instruction]bool{}
+			for c := range g.region(n) {
+				for _, e := range c.events {
+					if e.kind == evTransfer && e.accountedTo(i) && e.instr != nil {
+						publishedAt[e.instr] = true
+					}
+				}
+			}
+			// One scan: leak records links as it goes, so it must see each event once.
+			s.leakParam[i] = regionScan(g, n, func(e event) bool {
+				if !leak(e) {
+					return false
+				}
+				if !e.accountedTo(i) && !(e.kind == evForeign && publishedAt[e.instr]) {
+					s.leakBesides[i] = true
 				}
 				return true
 			})
@@ -608,6 +643,7 @@ func fwdHas(g *graph, n *node, bad func(event) bool) bool {
 func sameSummary(a, b *summary) bool {
 	return a.fresh == b.fresh && slices.Equal(a.freshResult, b.freshResult) &&
 		slices.Equal(a.leakParam, b.leakParam) && slices.Equal(a.spawnParam, b.spawnParam) &&
+		slices.Equal(a.leakBesides, b.leakBesides) &&
 		slices.Equal(a.leakFree, b.leakFree) &&
 		slices.Equal(a.writeParam, b.writeParam) && slices.Equal(a.writeFree, b.writeFree) && slices.Equal(a.links, b.links)
 }
@@ -739,6 +775,7 @@ func mergePessimistic(prev, next *summary) *summary {
 	out.fresh = prev.fresh && next.fresh
 	out.freshResult = andInto(prev.freshResult, next.freshResult)
 	out.leakParam = orInto(prev.leakParam, next.leakParam)
+	out.leakBesides = orInto(prev.leakBesides, next.leakBesides)
 	out.spawnParam = orInto(prev.spawnParam, next.spawnParam)
 	out.leakFree = orInto(prev.leakFree, next.leakFree)
 	out.writeParam = orInto(prev.writeParam, next.writeParam)

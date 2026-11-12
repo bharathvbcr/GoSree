@@ -41,7 +41,17 @@ type event struct {
 	param  int         // index of the parameter (or -1); the parameter's own foreign event is not a leak of itself
 	free   int         // index of the free variable (or -1)
 	global *ssa.Global // set when the event originates from a package variable
+	// byContract is 1 + the index of the parameter whose contract at a call of this function
+	// accounts for this event, or 0. Two kinds of event are accounted for: a publish of the
+	// parameter that the index records for the function (directPublish, or a callForwards rule
+	// that resolves to a publisher), and the call of a callable or receiver parameter that is
+	// handed the parameter, which is what a callForwards rule stands for. A caller that finds the
+	// argument published treats these as the publish and every other event as something else the
+	// function does with the argument (summary.leaksBesidesContract).
+	byContract int
 }
+
+func (e event) accountedTo(param int) bool { return e.byContract == param+1 }
 
 type node struct {
 	parent  *node
@@ -411,22 +421,99 @@ func (g *graph) deriveOrForeign(v, x ssa.Value, desc string) {
 }
 
 func (g *graph) transferWithCase(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Value, opPos token.Pos, index int, what string) {
-	g.transferFull(ins, cb, v, opPos, index, what, false)
+	g.transferFull(ins, cb, v, opPos, index, what, false, 0)
 }
 
 func (g *graph) transfer(ins ssa.Instruction, v ssa.Value, what string) {
-	g.transferFull(ins, nil, v, token.NoPos, -1, what, false)
+	g.transferFull(ins, nil, v, token.NoPos, -1, what, false, 0)
 }
 
 func (g *graph) transferWithOp(ins ssa.Instruction, v ssa.Value, opPos token.Pos, index int, what string) {
-	g.transferFull(ins, nil, v, opPos, index, what, false)
+	g.transferFull(ins, nil, v, opPos, index, what, false, 0)
 }
 
+// transferPublish records that a call contract publishes v. When v is one of this function's
+// parameters and the index holds that the function publishes it, the event is accounted to that
+// parameter (event.byContract).
 func (g *graph) transferPublish(ins ssa.Instruction, v ssa.Value, index int, what string, freezesToImm bool) {
-	g.transferFull(ins, nil, v, token.NoPos, index, what, freezesToImm)
+	g.transferFull(ins, nil, v, token.NoPos, index, what, freezesToImm, g.publishedParam(v))
 }
 
-func (g *graph) transferFull(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Value, opPos token.Pos, index int, what string, freezesToImm bool) {
+// publishedParam is 1 + the index of the parameter v comes from, when the index records that this
+// function publishes that parameter, by itself or through a forward; 0 otherwise.
+func (g *graph) publishedParam(v ssa.Value) int {
+	ci := g.st.contracts
+	if ci == nil {
+		return 0
+	}
+	body := canonicalBodyFn(g.fn)
+	p := paramFlowIndex(v, body)
+	if p < 0 {
+		return 0
+	}
+	if slices.ContainsFunc(ci.directPublish[body], func(s pubArgSpec) bool { return s.argIdx == p }) ||
+		slices.ContainsFunc(ci.callForwards[body], func(r callForwardRule) bool { return r.argParam == p }) {
+		return p + 1
+	}
+	return 0
+}
+
+// forwardedEscape is the escape of a, the argument in slot slot of the dynamic call cc. When the
+// call is a forward, that is, its target and a both come from this function's parameters and the
+// index holds the callForwards rule for it, the event is accounted to the parameter a comes from:
+// what such a call does with a is decided at each call of this function, by that rule.
+func (g *graph) forwardedEscape(ins ssa.Instruction, cc *ssa.CallCommon, slot int, a ssa.Value, desc string) event {
+	e := ev(evEscape, ins, desc)
+	ci := g.st.contracts
+	if ci == nil {
+		return e
+	}
+	body := canonicalBodyFn(g.fn)
+	target, ok := retForwardOf(cc, body)
+	if !ok {
+		return e
+	}
+	if p := paramFlowIndex(a, body); p >= 0 && slices.Contains(ci.callForwards[body], callForwardRule{targetParam: target.targetParam, methodName: target.methodName, slot: slot, argParam: p}) {
+		e.byContract = p + 1
+	}
+	return e
+}
+
+// handedOn is 1 + the index of the parameter a comes from when everything callee does with its
+// parameter i is a forward that this call hands on to this function's own parameters: every
+// callForwards rule of callee for parameter i has its target supplied by one of this function's
+// parameters, and the index holds the rule that results for this function. 0 otherwise.
+func (g *graph) handedOn(cc *ssa.CallCommon, callee *ssa.Function, i int, a ssa.Value) int {
+	ci := g.st.contracts
+	if ci == nil {
+		return 0
+	}
+	body := canonicalBodyFn(g.fn)
+	p := paramFlowIndex(a, body)
+	if p < 0 {
+		return 0
+	}
+	rules := 0
+	for _, cf := range ci.callForwards[canonicalBodyFn(callee)] {
+		if cf.argParam != i {
+			continue
+		}
+		rules++
+		if cf.targetParam >= len(cc.Args) {
+			return 0
+		}
+		outer := paramFlowIndex(cc.Args[cf.targetParam], body)
+		if outer < 0 || !slices.Contains(ci.callForwards[body], callForwardRule{targetParam: outer, methodName: cf.methodName, slot: cf.slot, argParam: p}) {
+			return 0
+		}
+	}
+	if rules == 0 {
+		return 0
+	}
+	return p + 1
+}
+
+func (g *graph) transferFull(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Value, opPos token.Pos, index int, what string, freezesToImm bool, byContract int) {
 	g.transfers = append(g.transfers, transfer{
 		instr:        ins,
 		caseBlock:    cb,
@@ -437,7 +524,9 @@ func (g *graph) transferFull(ins ssa.Instruction, cb *ssa.BasicBlock, v ssa.Valu
 		index:        index,
 		freezesToImm: freezesToImm,
 	})
-	g.add(g.val(v), ev(evTransfer, ins, what))
+	e := ev(evTransfer, ins, what)
+	e.byContract = byContract
+	g.add(g.val(v), e)
 }
 
 func selectCaseBlock(sel *ssa.Select, stateIdx int) *ssa.BasicBlock {
@@ -738,7 +827,11 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		g.add(g.val(cc.Value), ev(evEscape, ins, desc))
 		g.written(ins, cc.Value, wdesc)
 		for i, a := range cc.Args {
-			if !published[i] {
+			switch {
+			case !published[i]:
+				g.add(g.val(a), g.forwardedEscape(ins, cc, i, a, desc))
+			case rc.alsoEscapes(i):
+				// Published, and a callee does something else with it as well.
 				g.add(g.val(a), ev(evEscape, ins, desc))
 			}
 			if !hasContract || !rc.suppressWrite {
@@ -771,7 +864,11 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		}
 		published, rc, hasContract := g.applyCallContract(ins, cc)
 		for i, a := range cc.Args {
-			if !published[i] {
+			switch {
+			case !published[i]:
+				g.add(g.val(a), g.forwardedEscape(ins, cc, i, a, "passed to a dynamic function call"))
+			case rc.alsoEscapes(i):
+				// Published, and a callee does something else with it as well.
 				g.add(g.val(a), ev(evEscape, ins, "passed to a dynamic function call"))
 			}
 			if !hasContract || !rc.suppressWrite {
@@ -817,6 +914,12 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		}
 		switch {
 		case published[i]:
+			// The contract stands for the publish. Whatever else the callee does with the
+			// argument is still an escape: something its body does besides, or a callable it
+			// hands the argument to that may keep it (resolvedCallContract.escapeArgs).
+			if rc.alsoEscapes(i) {
+				g.add(an, ev(evEscape, ins, "passed to "+name+", which publishes it and may also retain or share it"+note))
+			}
 		case sum.isIso(i):
 			g.transferWithOp(ins, a, token.NoPos, i, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
 			g.writtenCaptures(ins, a, "captured by a closure passed to "+name+", which may write it")
@@ -828,7 +931,11 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 			g.transferWithOp(ins, a, token.NoPos, i, what)
 			g.writtenCaptures(ins, a, "captured by a callback started by "+name+", which may write it")
 		case sum.leaks(i):
-			g.add(an, ev(evEscape, ins, "passed to "+name+", which may retain or share it"+note))
+			e := ev(evEscape, ins, "passed to "+name+", which may retain or share it"+note)
+			if !sum.leaksBesidesContract(i) {
+				e.byContract = g.handedOn(cc, fn, i, a)
+			}
+			g.add(an, e)
 		}
 		if sum.writes(i) && (!hasContract || !rc.suppressWrite) {
 			g.written(ins, a, "passed to "+name+", which may write it"+note)

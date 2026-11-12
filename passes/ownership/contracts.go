@@ -353,7 +353,15 @@ type resolvedCallContract struct {
 	sharedReadOnlyLoad bool
 	suppressWrite      bool
 	displayName        string
+	// escapeArgs are the arguments some callee may let escape by something its publish does not
+	// account for: a callable or receiver it hands the argument to that has no publishing answer
+	// at this call, or something else its body does with it. It is a fact about any one callee,
+	// like a publish, and matters for an argument the contract publishes: the publish then does
+	// not stand for all that is done with it.
+	escapeArgs []int
 }
+
+func (rc resolvedCallContract) alsoEscapes(i int) bool { return slices.Contains(rc.escapeArgs, i) }
 
 type indexedCallSite struct {
 	caller *ssa.Function
@@ -1965,6 +1973,7 @@ func inferAtomicPointerElem(iface *types.Interface) types.Type {
 }
 
 type candOutcome struct {
+	escapeArgs         []int
 	publishArgs        []pubArgSpec
 	freshResult        bool
 	sharedReadOnlyLoad bool
@@ -1982,6 +1991,7 @@ func mergeCandidateOutcomes(cands []candOutcome, incomplete bool) (resolvedCallC
 	allAtomic := !incomplete
 	sharedLoad := false
 	var displayName string
+	var escapes []int
 
 	type pubAcc struct {
 		what         string
@@ -1993,6 +2003,11 @@ func mergeCandidateOutcomes(cands []candOutcome, incomplete bool) (resolvedCallC
 	for _, c := range cands {
 		if c.matched {
 			anyMatched = true
+		}
+		for _, idx := range c.escapeArgs {
+			if !slices.Contains(escapes, idx) {
+				escapes = append(escapes, idx)
+			}
 		}
 		if !c.freshResult {
 			allFresh = false
@@ -2039,6 +2054,7 @@ func mergeCandidateOutcomes(cands []candOutcome, incomplete bool) (resolvedCallC
 		sharedReadOnlyLoad: sharedLoad,
 		suppressWrite:      allAtomic,
 		displayName:        displayName,
+		escapeArgs:         escapes,
 	}, true
 }
 
@@ -2121,6 +2137,7 @@ func (st *question) evalInterfaceMethodContract(caller *ssa.Function, recvVal ss
 		return candOutcome{}, false
 	}
 	return candOutcome{
+		escapeArgs:         rc.escapeArgs,
 		publishArgs:        rc.publishArgs,
 		freshResult:        rc.freshResult,
 		sharedReadOnlyLoad: rc.sharedReadOnlyLoad,
@@ -2178,6 +2195,34 @@ func (st *question) evalValueAsCallable(caller *ssa.Function, fnVal ssa.Value, c
 	return mergeCandidateOutcomes(cands, incomplete)
 }
 
+// forwardKeeps reports whether the callable target, handed an argument in slot, may keep it. It
+// answers no only when every function target may be is known, each has a summary of its own body,
+// and none of them leaks, takes ownership of or starts a goroutine with that parameter. A target
+// that could not be followed to the end, a bound method or anything else answers yes.
+func (st *question) forwardKeeps(caller *ssa.Function, target ssa.Value, slot int) bool {
+	leaves, incomplete := st.traceSSAOrigins(caller, target, 0, map[valVisitKey]bool{})
+	if incomplete || len(leaves) == 0 {
+		return true
+	}
+	for _, lf := range leaves {
+		var fn *ssa.Function
+		switch x := lf.v.(type) {
+		case *ssa.Function:
+			fn = x
+		case *ssa.MakeClosure:
+			fn, _ = x.Fn.(*ssa.Function)
+		}
+		if fn == nil || isBoundMethodWrapper(fn) || isMethodThunk(fn) {
+			return true
+		}
+		s := st.summary(fn)
+		if s.leaks(slot) || s.isIso(slot) || s.spawns(slot) {
+			return true
+		}
+	}
+	return false
+}
+
 func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, callArgs []ssa.Value, bound bool, depth int) candOutcome {
 	if fn == nil {
 		return candOutcome{}
@@ -2224,6 +2269,9 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 				aIdx--
 			}
 			if tIdx < 0 || tIdx >= len(callArgs) || aIdx < 0 || aIdx >= len(callArgs) {
+				if aIdx >= 0 && aIdx < len(callArgs) {
+					out.escapeArgs = append(out.escapeArgs, aIdx)
+				}
 				continue
 			}
 			var inner resolvedCallContract
@@ -2235,9 +2283,26 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 			} else {
 				inner, hasInner = st.evalValueAsCallable(caller, callArgs[tIdx], nil, depth+1)
 			}
+			// keeps: the target has no publishing answer here, and may keep the argument. A
+			// receiver's method is not looked into; a callable is, through its summary. When
+			// the target and the argument are both parameters of caller, and the index holds
+			// the rule that follows for caller, the question is not caller's to answer: each
+			// call of caller answers it for its own target, by that rule.
+			keeps := func() bool {
+				cb := canonicalBodyFn(caller)
+				if outerT, outerA := paramFlowIndex(callArgs[tIdx], cb), paramFlowIndex(callArgs[aIdx], cb); outerT >= 0 && outerA >= 0 &&
+					slices.Contains(st.contracts.callForwards[cb], callForwardRule{targetParam: outerT, methodName: cf.methodName, slot: cf.slot, argParam: outerA}) {
+					return false
+				}
+				return cf.methodName != "" || st.forwardKeeps(caller, callArgs[tIdx], cf.slot)
+			}
 			if !hasInner {
+				if keeps() {
+					out.escapeArgs = append(out.escapeArgs, aIdx)
+				}
 				continue
 			}
+			publishes := false
 			for _, p := range inner.publishArgs {
 				if p.argIdx == cf.slot {
 					out.publishArgs = append(out.publishArgs, pubArgSpec{
@@ -2246,7 +2311,11 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 						freezesToImm: p.freezesToImm,
 					})
 					out.matched = true
+					publishes = true
 				}
+			}
+			if inner.alsoEscapes(cf.slot) || (!publishes && keeps()) {
+				out.escapeArgs = append(out.escapeArgs, aIdx)
 			}
 		}
 		forwardsFresh = st.contracts.retFreshButForwards[bodyFn] && len(st.contracts.retForwards[bodyFn]) > 0
@@ -2302,6 +2371,19 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 			freezesToImm: dp.freezesToImm,
 		})
 		out.matched = true
+	}
+	// What the body does with a published argument besides, for a callee reached as a value: a
+	// direct call reads the same from the summary. There are no summaries while the index is built.
+	if s := st.sums[bodyFn]; s != nil {
+		for _, p := range out.publishArgs {
+			param := p.argIdx
+			if bound {
+				param++
+			}
+			if s.leaksBesidesContract(param) && !slices.Contains(out.escapeArgs, p.argIdx) {
+				out.escapeArgs = append(out.escapeArgs, p.argIdx)
+			}
+		}
 	}
 	if desc := st.contracts.directSharedRet[bodyFn]; desc != "" {
 		out.sharedReadOnlyLoad = true
