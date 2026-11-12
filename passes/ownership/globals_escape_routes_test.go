@@ -1,6 +1,9 @@
 package ownership_test
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // A package variable written only at initialisation may be published frozen (into an
 // atomic.Pointer) without a finding, but only while its memory leaves by no other route. Whether it
@@ -44,5 +47,29 @@ func TestInitOnlyTablePublishedByEveryRoute(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			analyseWalk(t, escapeRoutes(false, parts[0]+parts[1]))
 		})
+	}
+}
+
+// A known miss, pinned so that closing it is a decision and not an accident. An unexported helper
+// stores the table into memory its caller gave it, and the caller hands that memory out. In the
+// helper the table only joins a parameter's memory, which the search for escapes does not count; in
+// the caller the table does not appear at all. So the table is taken for init-only and publishing
+// it frozen is not reported, although whoever calls Get can write it. (The same helper exported is
+// reported: its parameter is then memory other code can reach.)
+// TestAdv2DirectStoreToOtherGlobalPreExisting pins two more shapes of the same gap.
+func TestTableStoredIntoCallerMemoryIsAKnownMiss(t *testing.T) {
+	const tail = `
+type H struct{ m map[string]int }
+
+var g = map[string]int{"a": 1}
+
+func Get() *H { h := &H{}; put(h); return h }
+`
+	if hits := adv2Hits(t, tail+"func put(h *H) { h.m = g }\n"); len(hits) != 0 {
+		t.Fatalf("the miss is closed (good): update this test and tests/stress/FINDINGS.md. Got %v", hits)
+	}
+	exported := strings.ReplaceAll(tail, "put(h)", "Put(h)") + "func Put(h *H) { h.m = g }\n"
+	if hits := adv2Hits(t, exported); len(hits) == 0 {
+		t.Fatal("the exported helper is no longer reported: that one was a hit")
 	}
 }

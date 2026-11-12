@@ -2023,7 +2023,13 @@ func (st *state) evalInterfaceMethodContract(caller *ssa.Function, recvVal ssa.V
 }
 
 func (st *state) evalValueAsCallable(caller *ssa.Function, fnVal ssa.Value, callArgs []ssa.Value, depth int) (resolvedCallContract, bool) {
-	if depth > 6 || fnVal == nil {
+	if fnVal == nil {
+		return resolvedCallContract{}, false
+	}
+	if depth > 6 {
+		// A callable handed on through this many callables is not worked out. That is a cut like
+		// a trace out of budget, and is said the same way; it used to read as "has no contract".
+		st.originCut = true
 		return resolvedCallContract{}, false
 	}
 	leaves, incomplete := st.traceSSAOrigins(caller, fnVal, 0, map[valVisitKey]bool{})

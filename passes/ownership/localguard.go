@@ -61,8 +61,11 @@ func (st *state) guardedCells(fns []*ssa.Function) map[ssa.Value]localGuard {
 			}
 		})
 	}
-	// Carry cells into closures through their bindings, as deep as closures nest.
-	for changed, rounds := true, 0; changed && rounds < 32; rounds++ {
+	// Carry cells into closures through their bindings, as deep as closures nest. A round that
+	// changes something adds a cell to a closure that did not have it, so the rounds end by
+	// themselves and need no limit (fns lists a function before its closures, so in practice the
+	// first round does all of it and the second finds nothing to add).
+	for changed := true; changed; {
 		changed = false
 		for _, fn := range fns {
 			forEachInstr(fn, func(ins ssa.Instruction) {

@@ -1,0 +1,299 @@
+package ownership
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+// Two standing checks on this package's own source.
+//
+// Every miss found in the walks that follow a value backwards had one shape: a walk stopped (out of
+// budget, too deep, or at code it could not see) and the code that asked took "stopped" for
+// "nothing there". Tests of behaviour catch that one case at a time. These two read the source, so
+// that the next walk or the next limit cannot be added without being looked at:
+//
+//   - TestWalkAnswersAreNotDropped: a walk answers with what it found and whether that is all. The
+//     second part may be thrown away only at the places listed here, each with its reason.
+//   - TestEveryBoundOnAWalkIsListed: every fixed number that can end a walk or a fixpoint early is
+//     listed here with what the code does when it is reached.
+//
+// Both fail when the source and the list disagree in either direction, so a list entry cannot
+// outlive the code it describes.
+
+// ownSource parses the package's files that are not tests.
+func ownSource(t *testing.T) (*token.FileSet, []*ast.File) {
+	t.Helper()
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
+	}
+	if len(files) < 10 {
+		t.Fatalf("parsed %d files of the package; the test is not looking at the package", len(files))
+	}
+	return fset, files
+}
+
+// answersWhetherThatIsAll reports whether a function's results are a list of what a walk found
+// and a bool that says the list may not be all: ([]leafValue, bool) or ([]types.Type, bool).
+func answersWhetherThatIsAll(ft *ast.FuncType) bool {
+	if ft.Results == nil || len(ft.Results.List) != 2 {
+		return false
+	}
+	first, second := ft.Results.List[0], ft.Results.List[1]
+	if len(first.Names) != 0 || len(second.Names) != 0 {
+		return false
+	}
+	arr, ok := first.Type.(*ast.ArrayType)
+	if !ok || arr.Len != nil {
+		return false
+	}
+	if b, ok := second.Type.(*ast.Ident); !ok || b.Name != "bool" {
+		return false
+	}
+	switch elt := arr.Elt.(type) {
+	case *ast.Ident:
+		return elt.Name == "leafValue"
+	case *ast.SelectorExpr:
+		pkg, ok := elt.X.(*ast.Ident)
+		return ok && pkg.Name == "types" && elt.Sel.Name == "Type"
+	}
+	return false
+}
+
+func calledName(call *ast.CallExpr) string {
+	switch f := call.Fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	}
+	return ""
+}
+
+// droppedWalkAnswers lists, by the function it is in, every call that throws away a walk's "this
+// may not be all", with how many there are and why each is sound.
+var droppedWalkAnswers = map[string]struct {
+	n   int
+	why string
+}{
+	"traceStructPtrFieldOrigins":   {1, "the branch reads the stores to a field anywhere in the package and answers incomplete whatever each store's walk says"},
+	"traceDerefOrigins":            {2, "the branch reads the stores to an array's elements and answers incomplete whatever each store's walk says"},
+	"traceStructFieldValueOrigins": {1, "the branch reads the stores to a field anywhere in the package and answers incomplete whatever each store's walk says"},
+	"traceMapLookupOrigins":        {1, "a map lookup always answers incomplete: what the map holds is not all in sight"},
+	"checkSharedLoadWrites":        {1, "the callees of a dynamic call: a callee that is not in sight is not reported, by the rule in docs/RULES.md (SAFE005-incomplete); a walk that was cut is, through state.originCut, which this call site clears before and reads after"},
+	"propagateSharedToMethods":     {1, "the receivers of an interface call: as for checkSharedLoadWrites, a cut walk is reported through state.originCut and a receiver that is not in sight is not"},
+}
+
+func TestWalkAnswersAreNotDropped(t *testing.T) {
+	fset, files := ownSource(t)
+	walks := map[string]bool{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && answersWhetherThatIsAll(fd.Type) {
+				walks[fd.Name.Name] = true
+			}
+		}
+	}
+	for _, name := range []string{"traceSSAOrigins", "tracePtrBaseOrigins", "resolveInterfaceTypes"} {
+		if !walks[name] {
+			t.Fatalf("%s is not recognised as a walk; the test no longer sees what it is about", name)
+		}
+	}
+	if len(walks) < 10 {
+		t.Fatalf("%d walks recognised, fewer than the package had when this was written (11)", len(walks))
+	}
+
+	dropped := map[string]int{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			var stack []ast.Node
+			ast.Inspect(fd, func(n ast.Node) bool {
+				if n == nil {
+					stack = stack[:len(stack)-1]
+					return true
+				}
+				stack = append(stack, n)
+				call, ok := n.(*ast.CallExpr)
+				if !ok || !walks[calledName(call)] {
+					return true
+				}
+				at := fset.Position(call.Pos())
+				switch parent := stack[len(stack)-2].(type) {
+				case *ast.ReturnStmt:
+					// Handed up whole: allowed where the function itself answers the same way.
+					if len(parent.Results) != 1 || !answersWhetherThatIsAll(fd.Type) {
+						t.Errorf("%s: %s returns the answer of %s in a function that does not answer whether that is all", at, fd.Name.Name, calledName(call))
+					}
+				case *ast.AssignStmt:
+					if len(parent.Lhs) != 2 || len(parent.Rhs) != 1 {
+						t.Errorf("%s: the answer of %s is assigned in a form this test does not know", at, calledName(call))
+						return true
+					}
+					if id, ok := parent.Lhs[1].(*ast.Ident); ok && id.Name == "_" {
+						dropped[fd.Name.Name]++
+					}
+				default:
+					t.Errorf("%s: the answer of %s is used in a form this test does not know (%T)", at, calledName(call), parent)
+				}
+				return true
+			})
+		}
+	}
+	for fn, n := range dropped {
+		want, listed := droppedWalkAnswers[fn]
+		switch {
+		case !listed:
+			t.Errorf("%s throws away a walk's \"this may not be all\" %d time(s) and is not in droppedWalkAnswers: handle the answer, or list it with the reason it is sound", fn, n)
+		case n != want.n:
+			t.Errorf("%s throws away a walk's \"this may not be all\" %d time(s), droppedWalkAnswers says %d: look at the new one", fn, n, want.n)
+		}
+	}
+	for fn := range droppedWalkAnswers {
+		if dropped[fn] == 0 {
+			t.Errorf("droppedWalkAnswers lists %s, which no longer throws an answer away: remove the entry", fn)
+		}
+	}
+}
+
+// walkBounds lists every fixed number in this package that can end a walk or a fixpoint before it
+// is done, as "function: bound", with what the code does when the number is reached.
+var walkBounds = map[string]string{
+	"traceSSAOrigins: originDepth":              "answers incomplete and sets state.originCut; the checks that read it report SAFE002-incomplete or SAFE005-incomplete",
+	"traceSSAOrigins: originBudget":             "as originDepth",
+	"tracePtrBaseOrigins: originDepth":          "as in traceSSAOrigins",
+	"tracePtrBaseOrigins: originBudget":         "as in traceSSAOrigins",
+	"traceStructFieldValueOrigins: originDepth": "as in traceSSAOrigins",
+	"evalValueAsCallable: depth > 6":            "sets state.originCut and answers that no contract was found, so the call is reported as one whose callees could not all be found (not reached today: the nested call passes no arguments, so nesting stops at one)",
+	"releaseSummaries: maxReleaseSteps":         "the summary is cut to that many steps and the release is taken as one that may happen: errs toward reporting (docs/RULES.md)",
+	"releaseSummaries: maxReleasesPerFn":        "past that many releases the function is taken to release: errs toward reporting (docs/RULES.md)",
+	"acquireSummaries: maxAcquireRounds":        "the acquisition is not credited: errs toward reporting (docs/RULES.md)",
+	"sharedLoadRoot: for range 16":              "only the search for a reason not to check the write stops (a shareable type, a guarded field); the write is then checked like any other, so past 16 steps the check reports more, never less",
+	"sharedRootSeen: rootWalkBudget":            "the walk reports where it stopped (SAFE008-incomplete or SAFE005-incomplete, by the check that asked)",
+	"checkHandlerWrites: handlerStepLimit":      "the handler is reported as not fully examined (SAFE008-incomplete)",
+	"root: globalWalkBudget":                    "the walk reports where it stopped (SAFE006-incomplete) and the write is not attributed either way",
+	"immReturns: immMaxRounds":                  "the result that has not settled is used as it stands and reported (SAFE005-incomplete)",
+	"GobDecode: for range 4":                    "not a walk: a function fact holds four lists of bits and each is decoded",
+}
+
+var boundName = regexp.MustCompile(`(Budget|Depth|Limit|Rounds)$|^max[A-Z]`)
+
+// countedName names the variables a bound is compared with.
+var countedName = map[string]bool{"depth": true, "rounds": true, "steps": true, "iter": true, "work": true, "budget": true}
+
+func TestEveryBoundOnAWalkIsListed(t *testing.T) {
+	_, files := ownSource(t)
+	// Named bounds: constants and variables, of the package or declared inside a function.
+	named := map[string]bool{}
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			gd, ok := n.(*ast.GenDecl)
+			if !ok || (gd.Tok != token.CONST && gd.Tok != token.VAR) {
+				return true
+			}
+			for _, spec := range gd.Specs {
+				for _, n := range spec.(*ast.ValueSpec).Names {
+					if boundName.MatchString(n.Name) {
+						named[n.Name] = true
+					}
+				}
+			}
+			return true
+		})
+	}
+	for _, name := range []string{"originBudget", "originDepth", "maxAcquireRounds", "maxReleaseSteps"} {
+		if !named[name] {
+			t.Fatalf("%s is not recognised as a bound; the test no longer sees what it is about", name)
+		}
+	}
+	intLit := func(e ast.Expr) (int, bool) {
+		lit, ok := e.(*ast.BasicLit)
+		if !ok || lit.Kind != token.INT {
+			return 0, false
+		}
+		v, err := strconv.Atoi(strings.ReplaceAll(lit.Value, "_", ""))
+		return v, err == nil
+	}
+	counted := func(e ast.Expr) (string, bool) {
+		if id, ok := e.(*ast.Ident); ok && countedName[id.Name] {
+			return id.Name, true
+		}
+		return "", false
+	}
+	found := map[string]bool{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.RangeStmt:
+					if v, ok := intLit(x.X); ok && v >= 2 {
+						found[fd.Name.Name+": for range "+strconv.Itoa(v)] = true
+					}
+				case *ast.BinaryExpr:
+					switch x.Op {
+					case token.GTR, token.GEQ, token.LSS, token.LEQ, token.EQL, token.NEQ:
+						// A named bound counts where something is compared with it; a message
+						// that names the bound is not a place the walk can stop.
+						for _, side := range []ast.Expr{x.X, x.Y} {
+							if id, ok := side.(*ast.Ident); ok && named[id.Name] {
+								found[fd.Name.Name+": "+id.Name] = true
+							}
+						}
+						if name, ok := counted(x.X); ok && x.Op != token.EQL && x.Op != token.NEQ {
+							if v, ok := intLit(x.Y); ok && v >= 2 {
+								found[fd.Name.Name+": "+name+" "+x.Op.String()+" "+strconv.Itoa(v)] = true
+							}
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	var missing, stale []string
+	for k := range found {
+		if _, ok := walkBounds[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	for k := range walkBounds {
+		if !found[k] {
+			stale = append(stale, k)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(stale)
+	for _, k := range missing {
+		t.Errorf("a bound is not in walkBounds: %q. Say what the code does when it is reached; if it stops without saying so, that is the defect to fix first", k)
+	}
+	for _, k := range stale {
+		t.Errorf("walkBounds lists %q, which is no longer in the source: remove or rename the entry", k)
+	}
+}
