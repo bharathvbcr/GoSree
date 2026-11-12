@@ -348,7 +348,7 @@ func (st *state) checkBorrowEscape(g *graph, t transfer) bool {
 	}
 
 	// 4. Moving a local borrow via cap.Move, passing to an owned (iso) parameter, or publishing via a capability contract
-	if _, isParam := t.v.(*ssa.Parameter); !isParam {
+	if _, isParam := t.v.(*ssa.Parameter); !isParam || isCapContractTransferWhat(t.what) {
 		if t.what == "moved by cap.Move" || strings.HasPrefix(t.what, "passed to owned parameter ") || isCapContractTransferWhat(t.what) {
 			if vr, name, kindStr := st.identifyBorrow(g, t); vr != nil {
 				msg := fmt.Sprintf("stack-scoped borrow '%s' (%s) cannot cross goroutine boundary: cannot be %s", name, kindStr, t.what)
@@ -819,6 +819,11 @@ func (st *state) identifyBorrow(g *graph, t transfer) (*types.Var, string, strin
 			}
 			if targetArg != nil {
 				if vr, name, kStr := st.borrowFromExprInSyntax(targetArg, syntax, nil); vr != nil {
+					return vr, name, kStr
+				}
+			}
+			for _, arg := range targetCall.Args {
+				if vr, name, kStr := st.borrowFromExprInSyntax(arg, syntax, nil); vr != nil {
 					return vr, name, kStr
 				}
 			}

@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -58,6 +59,14 @@ func main() {
 			}
 		}
 		os.Args = append(os.Args[:1:1], cfgDirAsPattern(p.args)...)
+		if !unitcheckerMode(p.args) && !isMetaCommand(p.args) && !hasUnknownFlag(p.args, analyzers) {
+			if len(packageArgs(p.args)) == 0 {
+				fmt.Fprintln(os.Stderr, "gosree: no package arguments provided")
+				fmt.Fprintln(os.Stderr, "Usage: gosree [flags] [packages...]")
+				fmt.Fprintln(os.Stderr, "Run 'gosree help' for more detail.")
+				os.Exit(exitUsage)
+			}
+		}
 		if !unitcheckerMode(p.args) && p.goflags != "" {
 			os.Setenv("GOFLAGS", strings.TrimSpace(os.Getenv("GOFLAGS")+p.goflags))
 		}
@@ -100,6 +109,85 @@ func cfgDirAsPattern(args []string) []string {
 		return args
 	}
 	return append(slices.Clone(args[:end]), strings.TrimSuffix(rest[0], "/")+"/.")
+}
+
+// isMetaCommand reports whether the command is a query that requires no package arguments:
+// -flags, -V, -help, -h, or the "help" subcommand.
+func isMetaCommand(args []string) bool {
+	end := flagEnd(args)
+	if end < len(args) && args[end] == "help" {
+		return true
+	}
+	for i := 0; i < end; i++ {
+		arg := args[i]
+		name := strings.TrimLeft(arg, "-")
+		value, hasValue := "", false
+		if k := strings.IndexByte(name, '='); k >= 0 {
+			name, value, hasValue = name[:k], name[k+1:], true
+		}
+		truthy := func() bool {
+			if !hasValue {
+				return true
+			}
+			b, err := strconv.ParseBool(value)
+			return err != nil || b
+		}
+		switch name {
+		case "flags":
+			if truthy() {
+				return true
+			}
+		case "V":
+			return true
+		case "help", "h":
+			if truthy() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// packageArgs returns the non-flag arguments representing packages, stripping any leading "--".
+func packageArgs(args []string) []string {
+	end := flagEnd(args)
+	rest := args[end:]
+	if len(rest) > 0 && rest[0] == "--" {
+		rest = rest[1:]
+	}
+	return rest
+}
+
+var knownDriverFlags = map[string]bool{
+	"V": true, "all": true, "c": true, "cpuprofile": true, "debug": true,
+	"diff": true, "fix": true, "flags": true, "json": true, "memprofile": true,
+	"source": true, "tags": true, "test": true, "trace": true, "v": true,
+	"help": true, "h": true,
+}
+
+func hasUnknownFlag(args []string, analyzers []*analysis.Analyzer) bool {
+	known := make(map[string]bool, len(knownDriverFlags)+len(analyzers))
+	for k, v := range knownDriverFlags {
+		known[k] = v
+	}
+	for _, a := range analyzers {
+		known[a.Name] = true
+	}
+	end := flagEnd(args)
+	for i := 0; i < end; i++ {
+		arg := args[i]
+		if arg == "--" || len(arg) < 2 || arg[0] != '-' {
+			continue
+		}
+		name := strings.TrimLeft(arg, "-")
+		if k := strings.IndexByte(name, '='); k >= 0 {
+			name = name[:k]
+		}
+		if !known[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // vetxOnly reports whether go vet runs the tool on a dependency only to collect facts: the package

@@ -10,9 +10,9 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `25779ca` on `run/integ-1111` (no uncommitted checker edits) |
-| Checker fingerprint | `77f03b52f18b13af`: `bash tests/stress/fingerprint.sh` |
-| Run | 2026-11-11 16:12-16:18, load average 55-84: `go vet ./...`, `cargo test --release`, `go test ./... -count=1` with and without cgo (all 15 packages with tests `ok` in both), the ledger below, and the acceptance tiers (12/12). The 2026-11-10 suites are listed under [What was run](#what-was-run) |
+| Git HEAD | `harden/merge-main-1111` (integrating `2fd93f0`, `run/integ-1111` `e34e37c`, and `harden/gosree-gates` `3e6284d`) |
+| Checker fingerprint | `509a568d00a3bc0f`: `bash tests/stress/fingerprint.sh` |
+| Run | 2026-11-11: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`, `go vet ./...`, `go test ./... -count=1` (all 16 packages with tests `ok`, plus `CGO_ENABLED=0` on `gusseterr`/`errcheck`), the ledger below, and the acceptance tiers (12/12). The 2026-11-10 suites are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
 is expected and is the suite working: each failure names the marker to promote or the lock that
@@ -29,8 +29,8 @@ Fixture suite (`tests/stress`), 144 packages in 134 roots:
 |---|---|---|---|
 | SAFE001 unsafe ban | 57 | 3 | 0 |
 | SAFE002 not owned | 33 | 0 | 9 |
-| SAFE003 use after move | 164 | 58 | 12 |
-| SAFE004 moved and escapes | 3 | 1 | 1 |
+| SAFE003 use after move | 174 | 49 | 12 |
+| SAFE004 moved and escapes | 3 | 0 | 1 |
 | SAFE005 immutability | 52 | 8 | 4 |
 | SAFE006 package variables | 22 | 7 | 1 |
 | SAFE007 directives | 77 | 1 | 0 |
@@ -47,18 +47,20 @@ Fixture suite (`tests/stress`), 144 packages in 134 roots:
 | ERR004 typed nil boxed into error | 11 | 1 | 0 |
 | ERR005 writable resource Close error discarded | 7 | 1 | 1 |
 | NORULE (no rule claims it) | 0 | 63 | 0 |
-| **Total** | **610** | **188** | **46** |
+| **Total** | **622** | **178** | **46** |
 
 The ERR005 row changed on 2026-11-11, and every change is in the new root `er_w_rangecapture`:
 - Two hits: a deferred `Close` on a resource captured by a closure, and a deferred `Close` in a range-over-func body with the write in the body.
 - One miss: a `defer Close` in a range-over-func body, with the write after the loop. The defer runs at the enclosing function's return, but the close is resolved at the yield function's synthetic return.
 - One false positive: a captured resource reassigned by another closure (`replacedByCall`). The written flag is not reset across that call.
 
-The fixes that day touched errcheck, ownership, borrow and the corpus tools.
+Also on 2026-11-11, tracking non-shareable concrete payloads boxed via `*ssa.MakeInterface` into shareable-marked interfaces (`error`, `context.Context`, `net.Listener`) in `passes/ownership/graph.go` promoted 10 `MISS` markers (`mv_shareable` x4, `sp_launder` x2, `sp_forkjoin` x1, and race witnesses `mv_w_error`, `sp_w_error`, `sp_w_grandchild`) to `HIT(SAFE003)`.
+
+The fixes that day touched errcheck, ownership, borrow, `cmd/gosree-gate`, and the corpus tools.
 
 Runtime witnesses: 58 programs carry a `WITNESS` marker, 45 for the race detector and 13 for a panic
-or fatal error, and `TestWitnesses` passes on all 58 (the runtime convicts every one). For 37 of
-them the checker accepts the program (the file carries a `MISS`); for the other 21 it reports the
+or fatal error, and `TestWitnesses` passes on all 58 (the runtime convicts every one). For 34 of
+them the checker accepts the program (the file carries a `MISS`); for the other 24 it reports the
 hazard statically (`HIT` only). Known analyzer crashes: 0.
 
 `lk_w_getter` (2 packages, one race witness) was added on 2026-11-11, after the run described

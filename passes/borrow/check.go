@@ -202,7 +202,7 @@ func fallbackPos(pass *analysis.Pass, fn *ssa.Function) token.Pos {
 
 func (bc *borrowChecker) report(pos token.Pos, cat, msg string) {
 	pos, msg, located := locate(bc.pass, pos, bc.fn, msg)
-	if !pos.IsValid() || bc.ix.Mute(pos) {
+	if !pos.IsValid() || (bc.ix != nil && bc.ix.Mute(pos)) {
 		return
 	}
 	k := reportKey{pos: pos, cat: cat}

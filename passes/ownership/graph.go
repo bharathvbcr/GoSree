@@ -177,6 +177,10 @@ func (g *graph) val(v ssa.Value) *node {
 		if !g.st.cls.Shareable(v.Type()) {
 			n = g.newNode()
 		}
+	case *ssa.MakeInterface:
+		if !g.st.cls.Shareable(v.Type()) || !g.st.cls.Shareable(v.X.Type()) {
+			n = g.newNode()
+		}
 	default:
 		if !g.st.cls.Shareable(v.Type()) {
 			n = g.newNode()

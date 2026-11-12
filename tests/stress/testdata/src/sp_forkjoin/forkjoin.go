@@ -229,7 +229,7 @@ func grandchildViaError() {
 		go func(e error) { e.(*jobErr).j.ID = 2 }(&jobErr{j: j})
 	})
 	wg.Wait()
-	j.ID = 1 // MISS(SAFE003): the joined callback hands j to a grandchild through an error value (sp_launder); computeJoins sees no escape or transfer in its region and the Wait restores j while the grandchild writes it. Witness sp_w_grandchild
+	j.ID = 1 // HIT(SAFE003)
 }
 
 // control: the same hand-off as a plain pointer is a transfer, so the join is refused.

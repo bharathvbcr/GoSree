@@ -26,7 +26,7 @@ func (e *JobErr) Error() string { return "job" }
 func errorSend(ch chan error) {
 	e := &JobErr{}
 	ch <- e
-	e.Attempts++ // MISS(SAFE003): e was sent on ch boxed as an error; the receiver can assert it back and write it
+	e.Attempts++ // HIT(SAFE003)
 }
 
 // control: the same pointer sent with its own type.
@@ -40,7 +40,7 @@ func errorSendTyped(ch chan *JobErr) {
 func escapeViaError(ch chan *Job, errs chan error) {
 	j := &Job{}
 	errs <- &JobErr{J: j}
-	ch <- j // MISS(SAFE004): j is also reachable from the error sent on errs; two goroutines now hold it
+	ch <- j // HIT(SAFE003)
 }
 
 // control: the same escape through a typed channel is reported.
@@ -76,7 +76,7 @@ type mapCtx struct {
 func ctxCustom(ch chan context.Context) {
 	c := mapCtx{Context: context.Background(), m: map[string]int{}}
 	ch <- c
-	c.m["a"] = 1 // MISS(SAFE003): c.m is shared with the receiver of ch through the context value
+	c.m["a"] = 1 // HIT(SAFE003)
 }
 
 // net.Listener override: a user listener with mutable state.
@@ -89,7 +89,7 @@ func (l *fakeLn) Addr() net.Addr            { return nil }
 func listener(ch chan net.Listener) {
 	l := &fakeLn{}
 	ch <- l
-	l.accepted++ // MISS(SAFE003): the receiver's Accept writes l.accepted too
+	l.accepted++ // HIT(SAFE003)
 }
 
 // context.CancelFunc override: any func() converted to CancelFunc is shareable, closure and all

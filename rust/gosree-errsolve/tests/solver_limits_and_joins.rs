@@ -38,7 +38,9 @@ fn decoder_rejects_function_over_the_state_cell_budget() {
         flags: 0,
         slot_flags: vec![0; 4_096],
         tuples: vec![],
-        blocks: (0..n_blocks).map(|_| block(vec![], Terminator::Stop)).collect(),
+        blocks: (0..n_blocks)
+            .map(|_| block(vec![], Terminator::Stop))
+            .collect(),
     };
     let frame = encode_package(&[f]);
     assert_eq!(
@@ -55,7 +57,9 @@ fn decoder_rejects_function_over_the_state_cell_budget() {
         flags: 0,
         slot_flags: vec![0; 4_096],
         tuples: vec![],
-        blocks: (0..2_048).map(|_| block(vec![], Terminator::Stop)).collect(),
+        blocks: (0..2_048)
+            .map(|_| block(vec![], Terminator::Stop))
+            .collect(),
     };
     let frame = encode_package(&[ok]);
     assert!(decode_package(&frame).is_ok());
@@ -98,7 +102,9 @@ fn callgraph_cap_fails_closed_instead_of_exporting_optimistic_summaries() {
     let funcs = call_chain(10);
     let err = solve_package_capped(&funcs, &mut || true, 3).unwrap_err();
     assert_eq!(err, SolveError::CallgraphBudgetExceeded(3));
-    assert!(err.to_string().contains("did not converge within 3 iterations"));
+    assert!(err
+        .to_string()
+        .contains("did not converge within 3 iterations"));
 
     // With enough sweeps the same package converges and every summary is may-nil.
     let res = solve_package_capped(&funcs, &mut || true, 64).expect("converges");
@@ -197,7 +203,13 @@ fn two_branch_tuple(with_check: bool) -> FuncIR {
         join,
         // bb4: err != nil -> return; bb5: use the companion.
         block(vec![], ret(20, NONE_U32)),
-        block(vec![OpIR::UseCompanion { site_id: 30, slot: 6 }], ret(21, NONE_U32)),
+        block(
+            vec![OpIR::UseCompanion {
+                site_id: 30,
+                slot: 6,
+            }],
+            ret(21, NONE_U32),
+        ),
     ];
     // Without the check, bb3 jumps to bb5 and bb4 is unreachable; both are still valid blocks.
     FuncIR {
