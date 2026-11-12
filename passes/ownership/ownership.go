@@ -158,6 +158,10 @@ type state struct {
 	contracts      *contractIndex
 	globalWrites   map[*ssa.Global][]token.Pos
 	mutatedGlobals map[*ssa.Global]bool
+	// globalFns are the functions collectGlobalMutations read; escapedGlobals is built from them
+	// the first time globalEscapes is asked, and is nil until then.
+	globalFns      []*ssa.Function
+	escapedGlobals map[*ssa.Global]bool
 	// immRets caches what each callee's single-result returns trace to (see immReturns); only
 	// final results are kept here. immScratch holds provisional ones until the outermost trace
 	// returns, tagged with immRound; immStack and immBusy are the traces in progress.

@@ -78,7 +78,9 @@ func TestParamWalksRunToTheEnd(t *testing.T) {
 // that nothing writes is a projection of that variable. The walk used to give up after 32 steps.
 func TestDirectInitOnlyGlobalRunsToTheEnd(t *testing.T) {
 	pkg := buildWalk(t, "package p\n\n"+deepTypes(40)+"var table n0\n\nfunc far() *int {\n\treturn &table"+strings.Repeat(".in", 39)+".x\n}\n\nfunc near() *n1 {\n\treturn &table.in\n}\n")
-	st := &state{ssa: &buildssa.SSA{Pkg: pkg}, ix: &annot.Index{}}
+	// This state has no alias graphs, and the walk is what is under test, so the set of escaped
+	// package variables is given as already worked out, and empty.
+	st := &state{ssa: &buildssa.SSA{Pkg: pkg}, ix: &annot.Index{}, escapedGlobals: map[*ssa.Global]bool{}}
 	for _, name := range []string{"near", "far"} {
 		if !st.directInitOnlyGlobal(result(t, pkg.Func(name))) {
 			t.Errorf("%s: directInitOnlyGlobal of a field of a package variable nothing writes: got false, want true", name)

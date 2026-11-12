@@ -143,12 +143,23 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 			})
 		}
 	}
-	st.markEscapedGlobals(fns, mutated)
 	st.globalWrites = writes
 	st.mutatedGlobals = mutated
+	st.globalFns = fns
 }
 
-// markEscapedGlobals marks as mutated every package variable whose backing memory leaves the
+// globalEscapes reports whether g's memory leaves by a route that is not a freeze (see
+// findEscapedGlobals). The set is worked out the first time it is asked for. Only the init-only
+// exemption asks, and only for a publish that freezes, so a package with no such publish never
+// builds it, and one that has such a publish always does, however the publishing call is reached.
+func (st *state) globalEscapes(g *ssa.Global) bool {
+	if st.escapedGlobals == nil {
+		st.escapedGlobals = st.findEscapedGlobals()
+	}
+	return st.escapedGlobals[g]
+}
+
+// findEscapedGlobals lists every package variable whose backing memory leaves the
 // function that reads it by a route that is not a freeze: returned (from any function, since a
 // caller can hand the result on), retained by a callee, captured by a closure that retains it,
 // or stored where other code can reach it. The alias graph already records these as escape and
@@ -157,17 +168,11 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 // itself. Publishing into an atomic container is a transfer event and does not count: it is the
 // freeze the exemption exists for. A variable whose memory escapes this way can be written by
 // code gosree does not see, so it is not init-only and fails closed.
-func (st *state) markEscapedGlobals(fns []*ssa.Function, mutated map[*ssa.Global]bool) {
-	// The init-only exemption is consulted only where a call publishes through a container that
-	// freezes to imm (graph.call makes those transfers and check.go reads the exemption for them
-	// alone), so a package with no such call never reads what this finds, and building every
-	// function's alias graph here would be wasted.
-	if !st.hasFreezeSite(fns) {
-		return
-	}
-	scan := fns
+func (st *state) findEscapedGlobals() map[*ssa.Global]bool {
+	escaped := map[*ssa.Global]bool{}
+	scan := st.globalFns
 	if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil {
-		scan = append(append([]*ssa.Function(nil), fns...), pkgInit)
+		scan = append(append([]*ssa.Function(nil), scan...), pkgInit)
 	}
 	for _, fn := range scan {
 		if len(fn.Blocks) == 0 {
@@ -176,7 +181,7 @@ func (st *state) markEscapedGlobals(fns []*ssa.Function, mutated map[*ssa.Global
 		g := st.graphOf(fn)
 		for v, n := range g.nodes {
 			glob, ok := v.(*ssa.Global)
-			if !ok || n == nil || glob.Pkg != st.ssa.Pkg || mutated[glob] {
+			if !ok || n == nil || glob.Pkg != st.ssa.Pkg || st.mutatedGlobals[glob] || escaped[glob] {
 				continue
 			}
 			region := g.region(n)
@@ -186,13 +191,14 @@ func (st *state) markEscapedGlobals(fns []*ssa.Function, mutated map[*ssa.Global
 					// An event tied to a variable is the variable's own seed (it is "stored in"
 					// itself), not something done with its memory.
 					if e.global == nil && (e.kind == evEscape || e.kind == evReturn) && !g.formatsOnly(e, region) {
-						mutated[glob] = true
+						escaped[glob] = true
 						break scan
 					}
 				}
 			}
 		}
 	}
+	return escaped
 }
 
 // formatCallees are the calls that render their operands and keep none of them: the fmt and log
@@ -329,25 +335,6 @@ func typeCallsFormatMethod(t types.Type, seen map[types.Type]bool) bool {
 	return false
 }
 
-// hasFreezeSite reports whether any function calls, statically, a function whose cap contract
-// publishes into a container that freezes to imm.
-func (st *state) hasFreezeSite(fns []*ssa.Function) bool {
-	for _, fn := range fns {
-		for _, b := range fn.Blocks {
-			for _, ins := range b.Instrs {
-				call, ok := ins.(ssa.CallInstruction)
-				if !ok {
-					continue
-				}
-				if c, ok := capContractFor(call.Common().StaticCallee()); ok && c.freezesToImm && len(c.publishArgs) > 0 {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
 // rootsAtParam reports whether v is one of fn's parameters or memory reached from one. Each step
 // goes to an operand, defined strictly earlier, so the walk runs to the end; it used to give up
 // after 16 steps.
@@ -416,7 +403,8 @@ func (st *state) isInitOnlyImmutableGlobal(g *ssa.Global) bool {
 	if token.IsExported(g.Name()) && (g.Pkg.Pkg == nil || g.Pkg.Pkg.Name() != "main") {
 		return false
 	}
-	return true
+	// Asked last: it is the one question here that costs.
+	return !st.globalEscapes(g)
 }
 
 // directInitOnlyGlobal reports whether v is a direct read/projection of an init-only immutable
