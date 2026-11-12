@@ -45,13 +45,14 @@ func viaInterface() {
 	j.ID = 1 // MISS(SAFE003): j was passed to iso parameter j of S.Take, which started a goroutine writing it
 }
 
-// iso through a method value: the bound-method wrapper is synthetic and gets the pessimistic
-// summary, which has no iso flags.
+// iso through a method value: the wrapper made for the value has its method's summary, with the
+// parameters lined up, so j moves into the iso parameter as at a direct call. (The wrapper used
+// to get the pessimistic summary, which has no iso flags, and this was a known miss.)
 func viaMethodValue() {
 	f := S{}.Take
 	j := &Job{}
 	f(j)
-	j.ID = 1 // MISS(SAFE003): f is S.Take; j moved into its iso parameter
+	j.ID = 1 // HIT(SAFE003)
 }
 
 func apply(f func(*Job), j *Job) { f(j) }

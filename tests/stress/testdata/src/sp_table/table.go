@@ -29,13 +29,15 @@ func methodExpr() {
 	wg.Wait()
 }
 
-// A method value: the call goes through a bound-method wrapper, which is not in the table.
+// A method value: the call goes through a bound-method wrapper, which is not in the table. The
+// wrapper has its method's summary, and WaitGroup.Go's says it starts its argument on a
+// goroutine, so the callback is a transfer. Witness sp_w_methodvalue.
 func methodValue() {
 	var wg sync.WaitGroup
 	j := &Job{}
 	start := wg.Go
 	start(func() { j.ID = 2 })
-	j.ID = 1 // MISS(SAFE003): a method value (wg.Go) is a bound-method wrapper, not the static callee the spawner table is keyed on, so the callback is no transfer. Witness sp_w_methodvalue
+	j.ID = 1 // HIT(SAFE003)
 	wg.Wait()
 }
 
