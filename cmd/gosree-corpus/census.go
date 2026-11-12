@@ -38,7 +38,8 @@ import (
 //	X       a field of a non-shareable type from outside the module (an override would vouch for it)
 //	E       an exported field on an exported type outside internal/ (another module could write it)
 //	G       a field written after construction under a lock and read only in functions that take
-//	        one: a //gosree:guarded_by row would make it allowed (annotation work, not a blocker)
+//	        one: a //gosree:guarded_by row would make it allowed (annotation work, not a blocker).
+//	        Like a guarded field, what it holds is not walked: the rule takes it at any type
 //	OK      only slots the rule allows: shareable, guarded_by, imm-candidate structs, interface and
 //	        func fields whose stored values are themselves candidates
 //
@@ -850,6 +851,13 @@ func (c *census) own(n *types.Named) ownResult {
 		case f.Exported() && exportedType:
 			add(classE, "exported field "+f.Name())
 		}
+		if c.guardable(n, f.Name()) {
+			// Written after construction and every access under a lock: a guarded_by row would
+			// cover the field (G), and the rule takes a guarded field of any type, so it is treated
+			// as the guarded field above is: what it holds is not walked.
+			add(classG, fmt.Sprintf("%s written and read only under a lock", f.Name()))
+			continue
+		}
 		if !isSlot(ft) {
 			// Every module struct the field's type names is a child, whether or not the type is
 			// shareable: the struct itself, a generic's type arguments, and the elements of arrays,
@@ -886,11 +894,7 @@ func (c *census) own(n *types.Named) ownResult {
 				// An array of module structs (or of pointers to them) holds no slot of its own: its
 				// elements are the children above, as a lone struct or pointer field would be.
 			case isCollection(ft):
-				if c.allAccessLocked(n, f.Name()) && (c.contentWrites[n][f.Name()] != "" || c.reassigned(n, f.Name()) != "") {
-					// Every use after construction goes through a load of the field, so if each load
-					// and each reassignment holds a lock, a guarded_by row would cover the contents.
-					add(classG, fmt.Sprintf("collection %s written and read only under a lock", f.Name()))
-				} else if why := c.contentWrites[n][f.Name()]; why != "" {
+				if why := c.contentWrites[n][f.Name()]; why != "" {
 					add(classCWritten, fmt.Sprintf("unguarded %s field %s: %s", ft, f.Name(), why))
 				} else if w := c.reassigned(n, f.Name()); w != "" {
 					add(classCWritten, fmt.Sprintf("unguarded %s field %s: reassigned in %s", ft, f.Name(), w))
@@ -929,6 +933,14 @@ func (c *census) own(n *types.Named) ownResult {
 	slices.Sort(ct.Children)
 	ct.Children = slices.Compact(ct.Children)
 	return ownResult{ct, children}
+}
+
+// guardable reports whether a field is written after construction (assigned, or its collection's
+// contents written) and every access to it after construction holds a lock: the field a guarded_by
+// row would cover. Every use of a field goes through a load of it, so a collection's contents are
+// covered too when each load holds a lock.
+func (c *census) guardable(n *types.Named, field string) bool {
+	return c.allAccessLocked(n, field) && (c.contentWrites[n][field] != "" || c.reassigned(n, field) != "")
 }
 
 // allAccessLocked reports whether every load and every reassignment of the field after construction
