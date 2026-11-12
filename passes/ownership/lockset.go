@@ -639,6 +639,16 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 				return
 			}
 			cc := c.Common()
+			if callsCutVariable(cc) {
+				// A closure fn made over anything it can name may be what the call runs: fn may
+				// leave unlocked whatever its parameters and free variables reach.
+				for i := range fn.Params {
+					add(fn, release{param: i, free: -1, prefix: true})
+				}
+				for i := range fn.FreeVars {
+					add(fn, release{param: -1, free: i, prefix: true})
+				}
+			}
 			// Every function the call may run: a release by any one of them is a release.
 			for _, t := range lockCallTargets(cc) {
 				if k, recv := lockTargetOp(t); k != 0 {
@@ -1221,6 +1231,18 @@ func lockCallTargetsAll(cc *ssa.CallCommon) ([]lockTarget, bool) {
 	return targets, all
 }
 
+// callsCutVariable says whether a call is of a variable whose walk was cut short (restCut): the
+// variable may then hold any closure made where it is in sight, over any value there, and the
+// call may unlock anything those values reach. A call of a function by name, of an interface
+// method, or of a variable whose walk read every name is not.
+func callsCutVariable(cc *ssa.CallCommon) bool {
+	if cc.IsInvoke() || cc.StaticCallee() != nil {
+		return false
+	}
+	_, rest := callTargets(cc.Value)
+	return restCut(rest)
+}
+
 // lockCallTargets is lockCallTargetsAll for a caller that asks what any one target may do.
 func lockCallTargets(cc *ssa.CallCommon) []lockTarget {
 	targets, _ := lockCallTargetsAll(cc)
@@ -1245,6 +1267,13 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 		}
 		return
 	}
+	if callsCutVariable(cc) {
+		// What the variable may hold includes a closure made here over any of this function's
+		// values, and run here or as a goroutine it may unlock any of them: nothing is known to
+		// be held after the call.
+		clear(s)
+		return
+	}
 	if _, isGo := ins.(*ssa.Go); isGo {
 		// The goroutine may unlock what it is handed or captures.
 		for _, a := range cc.Args {
@@ -1261,15 +1290,6 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 	// one of them releases is released. A lock is held afterwards only if every one of them
 	// returns holding it and the list is known to be all of them.
 	targets, all := lockCallTargetsAll(cc)
-	if !all && !cc.IsInvoke() && cc.StaticCallee() == nil {
-		// A variable whose walk was cut short (restCut) may hold a closure made here over any
-		// of this function's values, and that closure may unlock any of them: nothing is known
-		// to be held after the call.
-		if _, rest := callTargets(cc.Value); restCut(rest) {
-			clear(s)
-			return
-		}
-	}
 	if len(targets) == 0 {
 		// An interface method, or a called value nothing is known about: anything it receives
 		// may be unlocked.
