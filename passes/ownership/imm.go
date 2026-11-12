@@ -162,7 +162,7 @@ func (st *state) immInValueType(t types.Type) types.Type {
 }
 
 func (st *state) immInValueTypeSeen(t types.Type, seen map[types.Type]bool) types.Type {
-	if t == nil || seen[t] || len(seen) >= 16 {
+	if t == nil || seen[t] || len(seen) >= 128 {
 		return nil
 	}
 	seen[t] = true

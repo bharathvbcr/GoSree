@@ -395,9 +395,11 @@ type guardState struct {
 	visiting map[*ssa.Function]bool
 }
 
+var releaseObserver func(pkgPath string, work, stepCaps, countCaps int)
+
 // checkGuarded runs SAFE009 over the package's functions.
 func (st *state) checkGuarded(fns []*ssa.Function) {
-	if len(st.ix.Guarded) == 0 && len(st.ix.Holds) == 0 {
+	if len(st.ix.Guarded) == 0 && len(st.ix.Holds) == 0 && releaseObserver == nil {
 		return
 	}
 	gs := st.ensureGuardSummaries(fns)
@@ -525,6 +527,9 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 		maxReleaseSteps  = 8
 		maxReleasesPerFn = 32
 	)
+	work := 0
+	stepCaps := 0
+	countCaps := 0
 	out := map[*ssa.Function][]release{}
 	seen := map[*ssa.Function]map[release]bool{}
 	inPkg := make(map[*ssa.Function]bool, len(fns))
@@ -561,10 +566,12 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 	}
 	add := func(fn *ssa.Function, r release) bool {
 		if stepCount(r.steps) > maxReleaseSteps {
+			stepCaps++
 			r.steps = truncateSteps(r.steps, maxReleaseSteps)
 			r.prefix = true
 		}
 		if len(out[fn]) >= maxReleasesPerFn {
+			countCaps++
 			r.steps = ""
 			r.prefix = true
 		}
@@ -647,6 +654,7 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 	}
 
 	propagate := func(fn *ssa.Function) bool {
+		work++
 		changed := false
 		for _, e := range edgesOf[fn] {
 			for _, r := range out[e.callee] {
@@ -714,6 +722,9 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 				enqueue(caller)
 			}
 		}
+	}
+	if releaseObserver != nil && st.pass != nil && st.pass.Pkg != nil {
+		releaseObserver(st.pass.Pkg.Path(), work, stepCaps, countCaps)
 	}
 	return out
 }

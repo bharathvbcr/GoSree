@@ -628,7 +628,7 @@ func TestVetCLIContract(t *testing.T) {
 	vetExpectCode(t, got, "gosree clean", 0)
 	vetExpectCode(t, got, "vet findings", 1)
 	vetExpectCode(t, got, "vet clean", 0)
-	vetExpectCode(t, got, "gosree no args", 1)
+	vetExpectCode(t, got, "gosree no args", 2)
 
 	// Fail-closed on input it cannot analyse: a non-zero exit and no claim of a clean result.
 	for _, name := range []string{"gosree type error", "gosree syntax error", "gosree one broken file", "gosree missing import",

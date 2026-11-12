@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 )
 
-var requests int64
+var requests int64 // HIT(SAFE006)
 
 func main() {
 	var wg sync.WaitGroup

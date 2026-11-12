@@ -24,6 +24,6 @@ func main() {
 	}()
 	e := &RetryErr{}
 	errs <- e
-	e.Attempts++ // MISS(SAFE003): e was sent on errs as an error; the receiver writes it
+	e.Attempts++ // HIT(SAFE003)
 	wg.Wait()
 }

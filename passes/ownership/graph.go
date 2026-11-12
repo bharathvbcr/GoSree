@@ -173,6 +173,10 @@ func (g *graph) val(v ssa.Value) *node {
 		if !g.st.cls.Shareable(v.Type()) {
 			n = g.newNode()
 		}
+	case *ssa.MakeInterface:
+		if !g.st.cls.Shareable(v.Type()) || !g.st.cls.Shareable(v.X.Type()) {
+			n = g.newNode()
+		}
 	default:
 		if !g.st.cls.Shareable(v.Type()) {
 			n = g.newNode()
@@ -624,7 +628,36 @@ func (g *graph) goStmt(ins *ssa.Go) {
 }
 
 func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) {
+	g.callDepth(ins, cc, result, 0)
+}
+
+func (g *graph) callDepth(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value, depth int) {
 	if cc.IsInvoke() {
+		if contract, ok := contractForInvoke(cc); ok {
+			for _, idx := range contract.publishArgs {
+				argIdx := idx - 1
+				if argIdx < 0 || argIdx >= len(cc.Args) {
+					continue
+				}
+				payload := unwrapPublishedArg(cc.Args[argIdx])
+				if payload == nil {
+					continue
+				}
+				if _, isConst := payload.(*ssa.Const); isConst || g.st.cls.Shareable(payload.Type()) {
+					continue
+				}
+				g.transferPublish(ins, payload, argIdx, contract.what, contract.freezesToImm)
+				g.writtenCaptures(ins, payload, "captured by a closure "+contract.what+", which may write it")
+			}
+			if result != nil {
+				if contract.freshResult {
+					g.val(result)
+				} else if !contract.sharedReadOnlyLoad {
+					g.add(g.val(result), ev(evForeign, ins, "result of interface method "+cc.Method.Name()))
+				}
+			}
+			return
+		}
 		desc := "passed to interface method " + cc.Method.Name() + " (dynamic dispatch may retain it)"
 		wdesc := "passed to interface method " + cc.Method.Name() + ", which may write it"
 		g.add(g.val(cc.Value), ev(evEscape, ins, desc))
@@ -643,6 +676,44 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		return
 	}
 	fn := cc.StaticCallee()
+	var bindings []ssa.Value
+	if fn == nil {
+		callee, b := directCallee(cc.Value)
+		if callee != nil {
+			fn = callee
+			bindings = b
+		}
+	} else {
+		if _, b := directCallee(cc.Value); len(b) > 0 {
+			bindings = b
+		}
+	}
+	isBound := fn != nil && (strings.HasPrefix(fn.Synthetic, "bound method wrapper") || strings.HasPrefix(fn.Synthetic, "interface method wrapper") || strings.HasSuffix(fn.Name(), "$bound"))
+	contract, hasContract := capContractFor(fn)
+	if !hasContract && len(bindings) > 0 {
+		contract, hasContract = capContractForBindings(fn, bindings)
+	}
+	if !hasContract && depth < 2 && fn != nil && fn != g.fn {
+		if fwdCC, ok := forwarderCall(fn, cc); ok {
+			fwdHasContract := false
+			if fwdCC.IsInvoke() {
+				_, fwdHasContract = contractForInvoke(fwdCC)
+			} else {
+				callee2, b2 := directCallee(fwdCC.Value)
+				if callee2 == nil {
+					callee2 = fwdCC.StaticCallee()
+				}
+				_, fwdHasContract = capContractFor(callee2)
+				if !fwdHasContract && len(b2) > 0 {
+					_, fwdHasContract = capContractForBindings(callee2, b2)
+				}
+			}
+			if fwdHasContract {
+				g.callDepth(ins, fwdCC, result, depth+1)
+				return
+			}
+		}
+	}
 	if fn == nil {
 		if mc := rangeOverFuncClosure(g.fn, ins, cc); mc != nil {
 			yieldSum := g.st.summary(mc.Fn.(*ssa.Function))
@@ -688,22 +759,27 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		g.transfer(ins, sp.fn, sp.what(sp.fn))
 		g.writtenCaptures(ins, sp.fn, "captured by a callback started by "+sp.via+", which may write it")
 	}
+
 	var published map[int]bool
-	if contract, ok := capContractFor(fn); ok && len(contract.publishArgs) > 0 {
+	if hasContract && len(contract.publishArgs) > 0 {
 		published = make(map[int]bool, len(contract.publishArgs))
 		for _, idx := range contract.publishArgs {
-			if idx < 0 || idx >= len(cc.Args) {
+			argIdx := idx
+			if isBound {
+				argIdx = idx - 1
+			}
+			if argIdx < 0 || argIdx >= len(cc.Args) {
 				continue
 			}
-			published[idx] = true
-			payload := unwrapPublishedArg(cc.Args[idx])
+			published[argIdx] = true
+			payload := unwrapPublishedArg(cc.Args[argIdx])
 			if payload == nil {
 				continue
 			}
 			if _, isConst := payload.(*ssa.Const); isConst || g.st.cls.Shareable(payload.Type()) {
 				continue
 			}
-			g.transferPublish(ins, payload, idx, contract.what, contract.freezesToImm)
+			g.transferPublish(ins, payload, argIdx, contract.what, contract.freezesToImm)
 			g.writtenCaptures(ins, payload, "captured by a closure "+contract.what+", which may write it")
 		}
 	}
@@ -735,24 +811,30 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 			g.written(ins, a, "passed to "+name+", which may write it"+note)
 		}
 	}
-	if mc, ok := cc.Value.(*ssa.MakeClosure); ok {
-		for j, b := range mc.Bindings {
-			if sum.freeLeaks(j) {
-				g.add(g.val(b), ev(evEscape, ins, "captured by a closure that may retain or share it"))
-			}
-			if sum.writesFree(j) {
-				g.written(ins, b, "captured by a closure that may write it")
+	if !hasContract {
+		if mc, ok := cc.Value.(*ssa.MakeClosure); ok {
+			for j, b := range mc.Bindings {
+				if sum.freeLeaks(j) {
+					g.add(g.val(b), ev(evEscape, ins, "captured by a closure that may retain or share it"))
+				}
+				if sum.writesFree(j) {
+					g.written(ins, b, "captured by a closure that may write it")
+				}
 			}
 		}
 	}
 	if result != nil {
-		if cc.Signature().Results().Len() > 1 && result.Referrers() != nil {
+		if hasContract && contract.freshResult && phiAllEdgesHaveFreshResult(cc.Value) {
+			g.val(result)
+		} else if hasContract && contract.sharedReadOnlyLoad {
+			// Read-only load handled by checkSharedLoadWrites
+		} else if cc.Signature().Results().Len() > 1 && result.Referrers() != nil {
 			for _, r := range *result.Referrers() {
 				if ext, ok := r.(*ssa.Extract); ok && ext.Tuple == result && !sum.isFreshResult(ext.Index) {
 					g.add(g.val(ext), ev(evForeign, ins, "result of "+name+" (not known to return a fresh value)"+note))
 				}
 			}
-		} else if !sum.fresh {
+		} else if !sum.fresh || (hasContract && contract.freshResult && !phiAllEdgesHaveFreshResult(cc.Value)) {
 			g.add(g.val(result), ev(evForeign, ins, "result of "+name+" (not known to return a fresh value)"+note))
 		}
 	}

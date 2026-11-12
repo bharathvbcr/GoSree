@@ -66,7 +66,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 				if _, guarded := st.slotOf(w.addr); guarded {
 					return // SAFE009 checks guarded memory at every access
 				}
-				if root, ok := sharedRoot(w.addr, r); ok && once(ins) {
+				if root, ok := st.sharedRoot(w.addr, r); ok && once(ins) {
 					st.report(posOf(ins, ins), HandlerWrite, fmt.Sprintf(
 						"%s is written here by a handler registered with %s%s, which shares it with every concurrent request",
 						r[root], sp.via, st.at(regPos)))
@@ -83,7 +83,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 					if _, guarded := st.slotOf(v); guarded {
 						continue
 					}
-					if root, ok := sharedRoot(v, r); ok && !st.cls.Shareable(v.Type()) && once(ins) {
+					if root, ok := st.sharedRoot(v, r); ok && !st.cls.Shareable(v.Type()) && once(ins) {
 						st.report(posOf(ins, ins), HandlerWrite, fmt.Sprintf(
 							"%s is passed to interface method %s, which may write it, by a handler registered with %s%s, which shares it with every concurrent request",
 							r[root], cc.Method.Name(), sp.via, st.at(regPos)))
@@ -98,7 +98,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 					if _, guarded := st.slotOf(v); guarded {
 						continue
 					}
-					if root, ok := sharedRoot(v, r); ok && !st.cls.Shareable(v.Type()) && once(ins) {
+					if root, ok := st.sharedRoot(v, r); ok && !st.cls.Shareable(v.Type()) && once(ins) {
 						st.report(posOf(ins, ins), HandlerWrite, fmt.Sprintf(
 							"%s is passed to a dynamic function call, which may write it, by a handler registered with %s%s, which shares it with every concurrent request",
 							r[root], sp.via, st.at(regPos)))
@@ -111,7 +111,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 				if mc := resolveClosureVal(a, 0); mc != nil {
 					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
 						for j, b := range mc.Bindings {
-							if root, ok := sharedRoot(b, r); ok && j < len(argFn.FreeVars) {
+							if root, ok := st.sharedRoot(b, r); ok && j < len(argFn.FreeVars) {
 								add(argFn, argFn.FreeVars[j], r[root])
 							}
 						}
@@ -126,12 +126,12 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 				if i >= len(callee.Params) {
 					break
 				}
-				if root, ok := sharedRoot(a, r); ok {
+				if root, ok := st.sharedRoot(a, r); ok {
 					add(callee, callee.Params[i], r[root])
 				}
 			}
 			for j, b := range bindings {
-				if root, ok := sharedRoot(b, r); ok && j < len(callee.FreeVars) {
+				if root, ok := st.sharedRoot(b, r); ok && j < len(callee.FreeVars) {
 					add(callee, callee.FreeVars[j], r[root])
 				}
 			}
@@ -146,7 +146,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 func (st *state) checkCalleeWrites(ins ssa.Instruction, cc *ssa.CallCommon, callee *ssa.Function, r map[ssa.Value]string, sp spawnSite, regPos token.Pos, once func(ssa.Instruction) bool) {
 	sum := st.summary(callee)
 	for i, a := range cc.Args {
-		root, ok := sharedRoot(a, r)
+		root, ok := st.sharedRoot(a, r)
 		if !ok || !sum.writes(i) || st.cls.Shareable(a.Type()) || !once(ins) {
 			continue
 		}
@@ -163,7 +163,16 @@ func (st *state) followable(fn *ssa.Function) bool {
 	if fn.Pkg == st.ssa.Pkg {
 		return true
 	}
-	return fn.Pkg == nil && fn.Synthetic != "" && !strings.HasPrefix(fn.Synthetic, "from type information")
+	if fn.Pkg == nil && fn.Synthetic != "" && !strings.HasPrefix(fn.Synthetic, "from type information") {
+		if o := fn.Origin(); o != nil && o.Pkg != nil {
+			return o.Pkg == st.ssa.Pkg
+		}
+		if obj := fn.Object(); obj != nil && obj.Pkg() != nil {
+			return obj.Pkg() == st.pass.Pkg
+		}
+		return false
+	}
+	return false
 }
 
 // handlerRoots returns the function a repeated spawner runs and the values in it that every
@@ -185,8 +194,10 @@ func handlerRoots(prog *ssa.Program, sp spawnSite) (*ssa.Function, map[ssa.Value
 				for _, b := range callee.Blocks {
 					for _, ins := range b.Instrs {
 						if ret, ok := ins.(*ssa.Return); ok && len(ret.Results) == 1 {
-							retVal = ret.Results[0]
-							break
+							if _, isConst := ret.Results[0].(*ssa.Const); !isConst {
+								retVal = ret.Results[0]
+								break
+							}
 						}
 					}
 					if retVal != nil {
@@ -259,16 +270,7 @@ func unwrapToClosure(mi *ssa.MakeInterface) (ssa.Value, bool) {
 // directCallee returns the function a call runs when it is known statically, with the closure's
 // bindings when the callee is a closure built in place.
 func directCallee(v ssa.Value) (*ssa.Function, []ssa.Value) {
-	switch x := v.(type) {
-	case *ssa.Function:
-		return x, nil
-	case *ssa.MakeClosure:
-		return x.Fn.(*ssa.Function), x.Bindings
-	}
-	if mc := resolveClosureVal(v, 0); mc != nil {
-		return mc.Fn.(*ssa.Function), mc.Bindings
-	}
-	return nil, nil
+	return resolveFuncVal(v, 0, map[ssa.Value]bool{})
 }
 
 // write is one instruction writing memory: what it writes through (a pointer, map or slice).
@@ -302,20 +304,59 @@ func writeOf(ins ssa.Instruction) (write, bool) {
 	return write{}, false
 }
 
-// sharedRoot follows v back through derivations and loads to one of roots.
-func sharedRoot(v ssa.Value, roots map[ssa.Value]string) (ssa.Value, bool) {
-	return sharedRootSeen(v, roots, map[ssa.Value]bool{})
+type callKey struct {
+	call   *ssa.Call
+	resIdx int
 }
 
-func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]bool) (ssa.Value, bool) {
+type getterSearch struct {
+	st       *state
+	roots    map[ssa.Value]string
+	visited  map[ssa.Value]bool
+	valMemo  map[ssa.Value]ssa.Value
+	valFail  map[ssa.Value]bool
+	callMemo map[callKey]ssa.Value
+	callFail map[callKey]bool
+}
+
+// sharedRoot follows v back through derivations and loads to one of roots.
+func (st *state) sharedRoot(v ssa.Value, roots map[ssa.Value]string) (ssa.Value, bool) {
+	gs := &getterSearch{
+		st:       st,
+		roots:    roots,
+		visited:  map[ssa.Value]bool{},
+		valMemo:  map[ssa.Value]ssa.Value{},
+		valFail:  map[ssa.Value]bool{},
+		callMemo: map[callKey]ssa.Value{},
+		callFail: map[callKey]bool{},
+	}
+	return gs.search(v)
+}
+
+func sharedRoot(v ssa.Value, roots map[ssa.Value]string) (ssa.Value, bool) {
+	var st *state
+	return st.sharedRoot(v, roots)
+}
+
+func (gs *getterSearch) search(v ssa.Value) (ssa.Value, bool) {
 	for range 64 {
-		if _, ok := roots[v]; ok {
-			return v, true
-		}
-		if v == nil || seen[v] || len(seen) >= 64 {
+		if v == nil {
 			return nil, false
 		}
-		seen[v] = true
+		if _, ok := gs.roots[v]; ok {
+			return v, true
+		}
+		if gs.valFail[v] {
+			return nil, false
+		}
+		if r, ok := gs.valMemo[v]; ok {
+			return r, true
+		}
+		if gs.visited[v] || len(gs.visited) >= 128 {
+			return nil, false
+		}
+		gs.visited[v] = true
+
 		switch x := v.(type) {
 		case *ssa.FieldAddr:
 			v = x.X
@@ -328,6 +369,14 @@ func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]
 		case *ssa.Lookup:
 			v = x.X
 		case *ssa.Extract:
+			if call, ok := x.Tuple.(*ssa.Call); ok {
+				if r, ok := gs.searchCall(call, x.Index); ok {
+					gs.valMemo[v] = r
+					return r, true
+				}
+				gs.valFail[v] = true
+				return nil, false
+			}
 			v = x.Tuple
 		case *ssa.Slice:
 			v = x.X
@@ -341,6 +390,7 @@ func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]
 			v = x.X
 		case *ssa.UnOp:
 			if x.Op != token.MUL {
+				gs.valFail[v] = true
 				return nil, false
 			}
 			var alloc *ssa.Alloc
@@ -351,15 +401,17 @@ func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]
 			}
 			if alloc != nil && alloc.Referrers() != nil {
 				for _, ref := range *alloc.Referrers() {
-					if st, ok := ref.(*ssa.Store); ok && st.Addr == alloc {
-						if r, ok := sharedRootSeen(st.Val, roots, seen); ok {
+					if stInst, ok := ref.(*ssa.Store); ok && stInst.Addr == alloc {
+						if r, ok := gs.search(stInst.Val); ok {
+							gs.valMemo[v] = r
 							return r, true
 						}
 					}
 					if fa, ok := ref.(*ssa.FieldAddr); ok && fa.Referrers() != nil {
 						for _, r2 := range *fa.Referrers() {
-							if st, ok := r2.(*ssa.Store); ok && st.Addr == fa {
-								if r, ok := sharedRootSeen(st.Val, roots, seen); ok {
+							if stInst, ok := r2.(*ssa.Store); ok && stInst.Addr == fa {
+								if r, ok := gs.search(stInst.Val); ok {
+									gs.valMemo[v] = r
 									return r, true
 								}
 							}
@@ -367,8 +419,9 @@ func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]
 					}
 					if ia, ok := ref.(*ssa.IndexAddr); ok && ia.Referrers() != nil {
 						for _, r2 := range *ia.Referrers() {
-							if st, ok := r2.(*ssa.Store); ok && st.Addr == ia {
-								if r, ok := sharedRootSeen(st.Val, roots, seen); ok {
+							if stInst, ok := r2.(*ssa.Store); ok && stInst.Addr == ia {
+								if r, ok := gs.search(stInst.Val); ok {
+									gs.valMemo[v] = r
 									return r, true
 								}
 							}
@@ -378,49 +431,116 @@ func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]
 			}
 			v = x.X
 		case *ssa.Call:
-			callee := x.Call.StaticCallee()
-			if callee == nil || len(callee.Blocks) == 0 {
-				return nil, false
+			if r, ok := gs.searchCall(x, 0); ok {
+				gs.valMemo[v] = r
+				return r, true
 			}
-			paramRoots := map[ssa.Value]string{}
-			paramToRoot := map[ssa.Value]ssa.Value{}
-			for i, a := range x.Call.Args {
-				if i < len(callee.Params) {
-					if r, ok := sharedRootSeen(a, roots, seen); ok {
-						paramRoots[callee.Params[i]] = roots[r]
-						paramToRoot[callee.Params[i]] = r
-					}
+			gs.valFail[v] = true
+			return nil, false
+		case *ssa.Phi:
+			for _, e := range x.Edges {
+				if r, ok := gs.search(e); ok {
+					gs.valMemo[v] = r
+					return r, true
 				}
 			}
-			if len(paramRoots) == 0 {
-				return nil, false
+			gs.valFail[v] = true
+			return nil, false
+		default:
+			gs.valFail[v] = true
+			return nil, false
+		}
+	}
+	gs.valFail[v] = true
+	return nil, false
+}
+
+func (gs *getterSearch) searchCall(call *ssa.Call, resIdx int) (ssa.Value, bool) {
+	k := callKey{call, resIdx}
+	if gs.callFail[k] {
+		return nil, false
+	}
+	if r, ok := gs.callMemo[k]; ok {
+		return r, true
+	}
+
+	callee := call.Call.StaticCallee()
+	if callee == nil {
+		callee, _ = directCallee(call.Call.Value)
+	}
+	if callee == nil {
+		gs.callFail[k] = true
+		return nil, false
+	}
+	np := len(callee.Params)
+	if np == 0 {
+		if callee.Signature != nil {
+			np = callee.Signature.Params().Len()
+			if callee.Signature.Recv() != nil {
+				np++
+			}
+		}
+		if np == 0 && gs.st != nil {
+			sum := gs.st.summary(callee)
+			np = len(sum.writeParam)
+		}
+	}
+
+	// 1. Local callee blocks in same package
+	if len(callee.Blocks) > 0 {
+		paramRoots := map[ssa.Value]string{}
+		paramToRoot := map[ssa.Value]ssa.Value{}
+		for i, a := range call.Call.Args {
+			if i < len(callee.Params) {
+				if r, ok := gs.search(a); ok {
+					paramRoots[callee.Params[i]] = gs.roots[r]
+					paramToRoot[callee.Params[i]] = r
+				}
+			}
+		}
+		if len(paramRoots) > 0 {
+			subGS := &getterSearch{
+				st:       gs.st,
+				roots:    paramRoots,
+				visited:  map[ssa.Value]bool{},
+				valMemo:  map[ssa.Value]ssa.Value{},
+				valFail:  map[ssa.Value]bool{},
+				callMemo: gs.callMemo,
+				callFail: gs.callFail,
 			}
 			for _, b := range callee.Blocks {
 				for _, ins := range b.Instrs {
-					if ret, ok := ins.(*ssa.Return); ok && len(ret.Results) == 1 {
-						subSeen := make(map[ssa.Value]bool, len(seen))
-						for k, val := range seen {
-							subSeen[k] = val
-						}
-						if pRoot, ok := sharedRootSeen(ret.Results[0], paramRoots, subSeen); ok {
+					if ret, ok := ins.(*ssa.Return); ok && resIdx < len(ret.Results) {
+						if pRoot, ok := subGS.search(ret.Results[resIdx]); ok {
 							if orig, ok := paramToRoot[pRoot]; ok {
+								gs.callMemo[k] = orig
 								return orig, true
 							}
 						}
 					}
 				}
 			}
-			return nil, false
-		case *ssa.Phi:
-			for _, e := range x.Edges {
-				if r, ok := sharedRootSeen(e, roots, seen); ok {
+		}
+	} else if gs.st != nil {
+		// 2. Cross-package getters when callee.Blocks == 0 using summary links
+		sum := gs.st.summary(callee)
+		targetB := np + resIdx
+		for _, l := range sum.links {
+			paramIdx := -1
+			if l.B == targetB && l.A < np {
+				paramIdx = l.A
+			} else if l.A == targetB && l.B < np {
+				paramIdx = l.B
+			}
+			if paramIdx >= 0 && paramIdx < len(call.Call.Args) {
+				if r, ok := gs.search(call.Call.Args[paramIdx]); ok {
+					gs.callMemo[k] = r
 					return r, true
 				}
 			}
-			return nil, false
-		default:
-			return nil, false
 		}
 	}
+
+	gs.callFail[k] = true
 	return nil, false
 }

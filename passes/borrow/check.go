@@ -182,8 +182,28 @@ func CheckBorrows(pass *analysis.Pass, ix *annot.Index, ssaProg *buildssa.SSA) {
 	}
 }
 
+func (bc *borrowChecker) fallbackPos() token.Pos {
+	if bc.fn != nil && bc.fn.Pos().IsValid() {
+		return bc.fn.Pos()
+	}
+	if bc.pass != nil {
+		for _, f := range bc.pass.Files {
+			if f.Pos().IsValid() {
+				return f.Pos()
+			}
+			if f.Package.IsValid() {
+				return f.Package
+			}
+		}
+	}
+	return token.NoPos
+}
+
 func (bc *borrowChecker) report(pos token.Pos, cat, msg string) {
-	if !pos.IsValid() || bc.ix.Mute(pos) {
+	if !pos.IsValid() {
+		pos = bc.fallbackPos()
+	}
+	if !pos.IsValid() || (bc.ix != nil && bc.ix.Mute(pos)) {
 		return
 	}
 	k := reportKey{pos, cat}

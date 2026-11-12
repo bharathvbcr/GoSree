@@ -148,6 +148,9 @@ func (f *FuncFact) GobDecode(data []byte) error {
 		return errors.New("corrupt FuncFact links length")
 	}
 	rest = rest[r:]
+	if nLinks > uint64(len(rest))/4 {
+		return errors.New("corrupt FuncFact links length")
+	}
 	if nLinks > 0 {
 		f.Links = make([]Link, int(nLinks))
 		for i := range f.Links {
@@ -170,6 +173,9 @@ func (f *FuncFact) GobDecode(data []byte) error {
 		return errors.New("corrupt FuncFact acquires length")
 	}
 	rest = rest[r:]
+	if nAcq > uint64(len(rest))/4 {
+		return errors.New("corrupt FuncFact acquires length")
+	}
 	if nAcq > 0 {
 		f.Acquires = make([]acquire, int(nAcq))
 		for i := range f.Acquires {
@@ -184,10 +190,13 @@ func (f *FuncFact) GobDecode(data []byte) error {
 			}
 			rest = rest[nr:]
 			sLen, nr := binary.Uvarint(rest)
-			if nr <= 0 || int(sLen) > len(rest)-nr-1 {
+			if nr <= 0 {
 				return errors.New("truncated FuncFact acquire steps")
 			}
 			rest = rest[nr:]
+			if sLen >= uint64(len(rest)) {
+				return errors.New("truncated FuncFact acquire steps")
+			}
 			steps := string(rest[:sLen])
 			rest = rest[sLen:]
 			mode := lockMode(rest[0])

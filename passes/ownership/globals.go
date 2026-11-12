@@ -52,6 +52,9 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 				return
 			}
 			if cc.IsInvoke() {
+				if _, ok := contractForInvoke(cc); ok {
+					return
+				}
 				for _, v := range append([]ssa.Value{cc.Value}, cc.Args...) {
 					if g, ok := st.globalMutArg(v); ok {
 						mutated[g] = true
@@ -61,6 +64,26 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 				return
 			}
 			callee := cc.StaticCallee()
+			if callee == nil {
+				callee, _ = directCallee(cc.Value)
+			}
+			if callee != nil {
+				if fwdCC, ok := forwarderCall(callee, cc); ok {
+					if fwdCC.IsInvoke() {
+						if _, ok := contractForInvoke(fwdCC); ok {
+							return
+						}
+					} else {
+						callee2, _ := directCallee(fwdCC.Value)
+						if callee2 == nil {
+							callee2 = fwdCC.StaticCallee()
+						}
+						if contract, ok := capContractFor(callee2); ok && (contract.freezesToImm || contract.displayName != "") {
+							return
+						}
+					}
+				}
+			}
 			if callee == nil {
 				for _, v := range cc.Args {
 					if g, ok := st.globalMutArg(v); ok {
@@ -76,14 +99,20 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 			if callee.Pkg != nil && callee.Pkg.Pkg != nil && callee.Pkg.Pkg.Path() == "testing" && callee.Name() == "MainStart" {
 				return
 			}
+			if contract, ok := capContractFor(callee); ok && (contract.freezesToImm || contract.displayName != "") {
+				return
+			}
 			sum := st.summary(callee)
 			for i, a := range cc.Args {
-				if !sum.writes(i) {
-					continue
-				}
-				if g, ok := st.globalMutArg(a); ok {
-					mutated[g] = true
-					writes[g] = append(writes[g], posOf(ins, ins))
+				if sum.writes(i) {
+					if g, ok := st.globalMutArg(a); ok {
+						mutated[g] = true
+						writes[g] = append(writes[g], posOf(ins, ins))
+					}
+				} else if sum.leaks(i) {
+					if g, ok := st.globalMutArg(a); ok {
+						mutated[g] = true
+					}
 				}
 			}
 		})
@@ -376,11 +405,116 @@ func (st *state) globalMutArg(v ssa.Value) (*ssa.Global, bool) {
 	if _, guarded := st.slotOf(v); guarded {
 		return nil, false
 	}
-	g, ok := globalRoot(v)
-	if !ok || g.Pkg != st.ssa.Pkg {
+	if g, ok := globalRoot(v); ok && g.Pkg == st.ssa.Pkg {
+		return g, true
+	}
+	if g, ok := st.globalValueEscape(v, map[ssa.Value]bool{}); ok && g.Pkg == st.ssa.Pkg {
+		return g, true
+	}
+	return nil, false
+}
+
+func (st *state) allocRootsAtGlobal(alloc *ssa.Alloc, seen map[ssa.Value]bool) (*ssa.Global, bool) {
+	if alloc == nil || alloc.Referrers() == nil {
 		return nil, false
 	}
-	return g, true
+	for _, ref := range *alloc.Referrers() {
+		if storeInst, ok := ref.(*ssa.Store); ok && storeInst.Addr == alloc {
+			if g, ok := st.globalValueEscape(storeInst.Val, seen); ok {
+				return g, true
+			}
+		}
+		if fa, ok := ref.(*ssa.FieldAddr); ok && fa.Referrers() != nil {
+			for _, r2 := range *fa.Referrers() {
+				if storeInst, ok := r2.(*ssa.Store); ok && storeInst.Addr == fa {
+					if g, ok := st.globalValueEscape(storeInst.Val, seen); ok {
+						return g, true
+					}
+				}
+			}
+		}
+		if ia, ok := ref.(*ssa.IndexAddr); ok && ia.Referrers() != nil {
+			for _, r2 := range *ia.Referrers() {
+				if storeInst, ok := r2.(*ssa.Store); ok && storeInst.Addr == ia {
+					if g, ok := st.globalValueEscape(storeInst.Val, seen); ok {
+						return g, true
+					}
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+func (st *state) globalValueEscape(v ssa.Value, seen map[ssa.Value]bool) (*ssa.Global, bool) {
+	for range 64 {
+		if v == nil || seen[v] || len(seen) >= 64 {
+			return nil, false
+		}
+		seen[v] = true
+		switch x := v.(type) {
+		case *ssa.Global:
+			return x, true
+		case *ssa.Alloc:
+			return st.allocRootsAtGlobal(x, seen)
+		case *ssa.MakeClosure:
+			for _, b := range x.Bindings {
+				if g, ok := st.globalValueEscape(b, seen); ok {
+					return g, true
+				}
+			}
+			if fn, ok := x.Fn.(*ssa.Function); ok && fn != nil {
+				for _, b := range fn.Blocks {
+					for _, ins := range b.Instrs {
+						if ret, ok := ins.(*ssa.Return); ok {
+							for _, res := range ret.Results {
+								if g, ok := st.globalValueEscape(res, seen); ok {
+									return g, true
+								}
+							}
+						}
+					}
+				}
+			}
+			return nil, false
+		case *ssa.MakeInterface:
+			v = x.X
+		case *ssa.ChangeInterface:
+			v = x.X
+		case *ssa.TypeAssert:
+			v = x.X
+		case *ssa.ChangeType:
+			v = x.X
+		case *ssa.Convert:
+			v = x.X
+		case *ssa.FieldAddr:
+			v = x.X
+		case *ssa.IndexAddr:
+			v = x.X
+		case *ssa.Field:
+			v = x.X
+		case *ssa.Index:
+			v = x.X
+		case *ssa.Slice:
+			v = x.X
+		case *ssa.UnOp:
+			if x.Op == token.MUL {
+				v = x.X
+			} else {
+				return nil, false
+			}
+		case *ssa.Phi:
+			for _, e := range x.Edges {
+				if g, ok := st.globalValueEscape(e, seen); ok {
+					return g, true
+				}
+			}
+			return nil, false
+		default:
+			return globalRootSeen(v, seen)
+		}
+	}
+	return nil, false
 }
 
 // globalRoot follows field, index, slice, phi, local cell store, and getter call steps back to a package variable.

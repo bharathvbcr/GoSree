@@ -24,6 +24,6 @@ func main() {
 		}(&jobErr{j: j})
 	})
 	wg.Wait()
-	j.ID = 1 // MISS(SAFE003): Wait joined the callback, not the grandchild that still holds j
+	j.ID = 1 // HIT(SAFE003)
 	<-done
 }
