@@ -177,6 +177,12 @@ func (g *graph) val(v ssa.Value) *node {
 		if !g.st.cls.Shareable(v.Type()) {
 			n = g.newNode()
 		}
+	case *ssa.MakeInterface:
+		// An interface value is tracked when the value boxed in it is, whatever the interface: a
+		// pointer boxed as an error is still that pointer, though error itself counts as shareable.
+		if !g.st.cls.Shareable(v.Type()) || !g.st.cls.Shareable(v.X.Type()) {
+			n = g.newNode()
+		}
 	default:
 		if !g.st.cls.Shareable(v.Type()) {
 			n = g.newNode()

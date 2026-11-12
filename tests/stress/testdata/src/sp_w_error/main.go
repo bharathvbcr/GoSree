@@ -18,6 +18,6 @@ func main() {
 		e.(*jobErr).j.ID = 2
 		close(done)
 	}(&jobErr{j: j})
-	j.ID = 1 // MISS(SAFE003): j crossed inside an error value, which the checker treats as shareable
+	j.ID = 1 // HIT(SAFE003)
 	<-done
 }

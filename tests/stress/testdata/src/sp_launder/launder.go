@@ -29,14 +29,14 @@ func viaError() {
 	j := &Job{}
 	var err error = &jobErr{j: j}
 	go func(e error) { e.(*jobErr).j.ID = 2 }(err)
-	j.ID = 1 // MISS(SAFE003): a pointer boxed as error is classified shareable (kinds.go override "error", an unchecked convention), so the go argument is no transfer. Witness sp_w_error
+	j.ID = 1 // HIT(SAFE003)
 }
 
 // error sent on a channel: same laundering through a send.
 func errorSend(ch chan error) {
 	j := &Job{}
 	ch <- &jobErr{j: j}
-	j.ID = 1 // MISS(SAFE003): the same laundering through a channel send of an error value
+	j.ID = 1 // HIT(SAFE003)
 }
 
 // context.CancelFunc is an override; every func() converts to it, so a closure over a local is

@@ -29,8 +29,8 @@ Fixture suite (`tests/stress`), 144 packages in 134 roots:
 |---|---|---|---|
 | SAFE001 unsafe ban | 57 | 3 | 0 |
 | SAFE002 not owned | 33 | 0 | 9 |
-| SAFE003 use after move | 164 | 58 | 12 |
-| SAFE004 moved and escapes | 3 | 1 | 1 |
+| SAFE003 use after move | 174 | 49 | 12 |
+| SAFE004 moved and escapes | 3 | 0 | 1 |
 | SAFE005 immutability | 52 | 8 | 4 |
 | SAFE006 package variables | 22 | 7 | 1 |
 | SAFE007 directives | 77 | 1 | 0 |
@@ -47,7 +47,7 @@ Fixture suite (`tests/stress`), 144 packages in 134 roots:
 | ERR004 typed nil boxed into error | 11 | 1 | 0 |
 | ERR005 writable resource Close error discarded | 7 | 1 | 1 |
 | NORULE (no rule claims it) | 0 | 63 | 0 |
-| **Total** | **612** | **188** | **46** |
+| **Total** | **622** | **178** | **46** |
 
 The ERR005 row changed on 2026-11-11, and every change is in the new root `er_w_rangecapture`:
 - Two hits: a deferred `Close` on a resource captured by a closure, and a deferred `Close` in a range-over-func body with the write in the body.
