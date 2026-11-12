@@ -216,7 +216,8 @@ Done:
      if the 41 newly flagged transfers each take a hatch; SAFE006 is 117. After the container
      contracts and the cross-package unsafe rule (`6b12630`) it is 562 transfers, 415 flagged, 344
      hatched: 61.2%, or 73.8% if every flagged transfer takes a hatch; SAFE001 remaining is 370.
-     `-tests` fails closed on the error solver's 16,384-function limit. None of this is triaged,
+     `-tests` failed closed on the error solver's 16,384-function limit until `80a766b` raised it to
+     262,144. It now completes: 4,805 transfers, 9.2% hatched, untriaged (2026-11-12). None of this is triaged,
      and the failure at `bb60b53` stands
      ([the triage log](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.md#re-measured-on-gosree-2026-11-10)).
 5. Open:

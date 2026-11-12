@@ -64,6 +64,7 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 	var order []string           // analyzer flags in the order first given
 	var kept []string
 	testsOff := false
+	printFlags := false // the last value of -flags
 	i := 0
 	for ; i < len(args); i++ {
 		arg := args[i]
@@ -101,11 +102,10 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 			// any value, so -h=false would pass code it never analysed. Drop it and keep checking.
 			continue
 		case name == "flags":
-			// -flags prints the flag set and exits only when true; -flags=false is a no-op to the
-			// driver, so the rest of the command line still needs checking.
-			if truthy() {
-				return plan{args: args}, nil
-			}
+			// The driver reads -flags only after parsing the whole command line, so its last value
+			// decides whether it prints the flag set and exits. Every other flag is still checked:
+			// with -flags -flags=false the driver analyses.
+			printFlags = truthy()
 		case name == "fix" || name == "diff":
 			if truthy() {
 				return plan{}, errors.New("-" + name + " is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings")
@@ -135,6 +135,9 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 		kept = append(kept, args[start:i+1]...)
 	}
 	p.args = append(kept, args[i:]...)
+	if printFlags {
+		return plan{args: args}, nil // the driver prints its flags and exits without analysing
+	}
 
 	if testsOff {
 		p.warnings = append(p.warnings, "-test=false: test files are not analysed, so findings in them are not reported")

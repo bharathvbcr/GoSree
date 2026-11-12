@@ -15,7 +15,13 @@ const NoneU32 uint32 = ^uint32(0)
 
 // Limits matching rust/gosree-errsolve/src/lib.rs.
 const (
-	MaxFuncs             = 16_384
+	// MaxFuncs bounds the functions in one package frame, set by real packages: ScholarLM's
+	// internal/wisdev with its tests has 18,973. Every per-package structure is linear in it,
+	// and phase 1 costs O((solves + call edges) x log functions). The solves are not linear: a
+	// caller is solved again for each sweep in which a callee flipped, so a function calling
+	// every member of a caller-first chain is solved about once per member (186 s at this limit,
+	// docs/ERROR_DISCIPLINE.md). No whole-package work budget bounds that.
+	MaxFuncs             = 262_144
 	MaxSlots             = 262_144
 	MaxTuples            = 16_384
 	MaxBlocks            = 32_768
@@ -33,6 +39,13 @@ const (
 	// holds for the Rust engine only. States are freed between functions, so the bound does not
 	// multiply with MaxFuncs. Mirrors MAX_STATE_CELLS_PER_FUNC in rust/gosree-errsolve/src/lib.rs.
 	MaxStateCells = 8_388_608
+
+	// MaxFrameBytes bounds a GSE1 request frame: 1 GiB, gusset.MaxBufferBytes, the largest
+	// payload the linked engine can be handed at all. The encoder and both decoders enforce it,
+	// so the build without cgo refuses the same frames as the native one instead of solving
+	// what the native build cannot be sent. Mirrors MAX_FRAME_BYTES in
+	// rust/gosree-errsolve/src/lib.rs.
+	MaxFrameBytes = 1 << 30
 )
 
 // checkStateCells enforces MaxStateCells for one function; every encoder and decoder uses it so
@@ -215,10 +228,16 @@ type PackageResult struct {
 
 // EncodePackage serializes funcs into a GSE1 binary request frame.
 func EncodePackage(funcs []FuncIR) ([]byte, error) {
+	return encodePackage(funcs, MaxFrameBytes)
+}
+
+// encodePackage is EncodePackage with an explicit frame-size bound (tests pass a small one). The
+// bound is checked after each function, so an oversized package stops within one function of it.
+func encodePackage(funcs []FuncIR, maxFrameBytes int) ([]byte, error) {
 	if len(funcs) > MaxFuncs {
 		return nil, fmt.Errorf("gusseterr: func count %d exceeds %d", len(funcs), MaxFuncs)
 	}
-	buf := make([]byte, 0, 64+len(funcs)*128)
+	buf := make([]byte, 0, min(64+len(funcs)*128, maxFrameBytes))
 	buf = append(buf, reqMagic[:]...)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(funcs)))
 
@@ -325,6 +344,9 @@ func EncodePackage(funcs []FuncIR) ([]byte, error) {
 					return nil, fmt.Errorf("gusseterr: func %d block %d op %d invalid kind %d", fi, bi, oi, op.Kind)
 				}
 			}
+		}
+		if len(buf) > maxFrameBytes {
+			return nil, fmt.Errorf("gusseterr: GSE1 limit exceeded: frame bytes %d after func %d exceeds %d", len(buf), fi, maxFrameBytes)
 		}
 	}
 	return buf, nil

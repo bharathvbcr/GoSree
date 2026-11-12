@@ -244,16 +244,16 @@ func (st *state) immReturns(callee *ssa.Function) []immRet {
 		return rs
 	}
 	if i, busy := st.immBusy[callee]; busy {
-		st.immStack[i].read = true
-		for j := i + 1; j < len(st.immStack); j++ {
-			st.immStack[j].provisional = true // they read callee before its returns were known
-		}
+		st.readOpen(i) // the frames above i read callee before its returns were known
 		return st.immStack[i].partial
 	}
 	prev, seen := st.immScratch[callee]
 	if seen && prev.round == st.immRound {
-		for j := range st.immStack {
-			st.immStack[j].provisional = true // a provisional result makes its readers provisional
+		// A provisional result stands for a read of the frame it depends on, and only that frame
+		// and those above it become provisional. Marking every frame provisional stopped the
+		// cycle head after one round whenever a cycle member was called twice in a round.
+		if i := st.openDep(prev); i >= 0 {
+			st.readOpen(i)
 		}
 		return prev.rets
 	}
@@ -264,7 +264,7 @@ func (st *state) immReturns(callee *ssa.Function) []immRet {
 	}
 	top := len(st.immStack)
 	st.immBusy[callee] = top
-	st.immStack = append(st.immStack, immFrame{partial: prev.rets})
+	st.immStack = append(st.immStack, immFrame{fn: callee, partial: prev.rets, dep: -1})
 	defer func() {
 		delete(st.immBusy, callee)
 		if len(st.immStack) == 0 {
@@ -273,25 +273,26 @@ func (st *state) immReturns(callee *ssa.Function) []immRet {
 	}()
 	var rs []immRet
 	for round := 1; ; round++ {
-		st.immStack[top].read, st.immStack[top].provisional = false, false
+		st.immStack[top].read, st.immStack[top].dep = false, -1
 		rs = st.traceReturns(callee)
 		f := st.immStack[top]
-		if !f.read || f.provisional || immRetsEqual(rs, f.partial) {
+		if !f.read || f.dep >= 0 || immRetsEqual(rs, f.partial) {
 			break
 		}
 		if round == immMaxRounds {
 			st.report(callee.Pos(), ImmCut, fmt.Sprintf(
 				"what %s returns did not settle after %d passes over its recursive calls, so the result of the last pass is used: a write through what it returns may be missed, or reported against the wrong value",
 				callee.Name(), immMaxRounds))
+			st.immRound++ // results read from the unsettled partial result are stale
 			break
 		}
 		st.immStack[top].partial = rs
 		st.immRound++ // results computed from the old partial result are stale
 	}
-	provisional := st.immStack[top].provisional
+	dep := st.immStack[top].dep
 	st.immStack = st.immStack[:top]
-	if provisional {
-		st.immScratch[callee] = immScratchEntry{rets: rs, round: st.immRound}
+	if dep >= 0 {
+		st.immScratch[callee] = immScratchEntry{rets: rs, round: st.immRound, dep: st.immStack[dep].fn}
 	} else {
 		st.immRets[callee] = rs
 	}
@@ -331,18 +332,53 @@ func immRetsEqual(a, b []immRet) bool {
 }
 
 // immFrame is one immReturns trace in progress. partial is its latest result, read by recursive
-// calls; read says a recursive call read it this round; provisional says the trace read the
-// partial result of a function further out, so its own result is not final.
+// calls; read says a recursive call read it this round. dep is the outermost frame further out
+// whose partial result this round's trace read, directly or through a scratch entry, or -1: a
+// frame with a dep is provisional, its result not final.
 type immFrame struct {
-	partial     []immRet
-	read        bool
-	provisional bool
+	fn      *ssa.Function
+	partial []immRet
+	read    bool
+	dep     int
 }
 
-// immScratchEntry is a provisional result and the round it was computed in.
+// immScratchEntry is a provisional result, the round it was computed in, and the function in
+// progress, further out, whose partial result it read.
 type immScratchEntry struct {
 	rets  []immRet
 	round int
+	dep   *ssa.Function
+}
+
+// readOpen records that the trace on top read the partial result of frame i: frame i repeats
+// until that result settles, and every frame above it depends on it.
+func (st *state) readOpen(i int) {
+	st.immStack[i].read = true
+	for j := i + 1; j < len(st.immStack); j++ {
+		if d := st.immStack[j].dep; d < 0 || i < d {
+			st.immStack[j].dep = i
+		}
+	}
+}
+
+// openDep is the frame in progress that a scratch entry of this round depends on, or -1 if none
+// is in progress. A dependency that has finished is followed through its own scratch entry when
+// it was provisional (it stopped without settling because it read a frame further out), so the
+// read lands on that frame. A dependency that finished final in this round ended on the partial
+// result the entry read: a frame that went on to another round would have started a new round,
+// which makes the entry stale.
+func (st *state) openDep(e immScratchEntry) int {
+	for fn := e.dep; fn != nil; {
+		if i, busy := st.immBusy[fn]; busy {
+			return i
+		}
+		next, ok := st.immScratch[fn]
+		if !ok || next.round != st.immRound {
+			return -1
+		}
+		fn = next.dep
+	}
+	return -1
 }
 
 func (st *state) traceImmAddr(v ssa.Value, seen map[ssa.Value]bool) (types.Type, ssa.Value, token.Pos) {

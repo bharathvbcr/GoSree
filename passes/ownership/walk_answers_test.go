@@ -297,7 +297,9 @@ func TestCallersThatAskForAnyTargetAreListed(t *testing.T) {
 var walkBounds = map[string]string{
 	"follow: originDepth":                  "answers incomplete and marks its question as cut; the checks that asked report SAFE002-incomplete or SAFE005-incomplete",
 	"follow: originBudget":                 "as originDepth",
-	"anotherName: cellViewLimit":           "the memory is taken as open: the trace answers that what it holds may not be all, and callTargets lists the load among what it could not resolve",
+	"anotherName: cellViewLimit":           "the memory is taken as open: the trace answers that what it holds may not be all, and callTargets lists the load among what it could not resolve; the walk is marked cut (restCut), and a lock held across a call of the load is no longer counted on",
+	"spend: cellWalkBudget":                "as cellViewLimit, for the names read by a walk and every keptIn walk it asks for together",
+	"rootHere: rootPathLimit":              "the value is lost: the call is taken as one that may release what it was handed, and a write after it to memory that lock guards is reported (TestLockHelperRecursingOnAFieldEnds)",
 	"evalValueAsCallable: depth > 6":       "marks its question as cut and answers that no contract was found, so the call is reported as one whose callees could not all be found (not reached today: the nested call passes no arguments, so nesting stops at one)",
 	"releaseSummaries: maxReleaseSteps":    "the summary is cut to that many steps and the release is taken as one that may happen: errs toward reporting (docs/RULES.md)",
 	"releaseSummaries: maxReleasesPerFn":   "past that many releases the function is taken to release: errs toward reporting (docs/RULES.md)",

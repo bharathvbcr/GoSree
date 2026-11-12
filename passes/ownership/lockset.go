@@ -1261,6 +1261,15 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 	// one of them releases is released. A lock is held afterwards only if every one of them
 	// returns holding it and the list is known to be all of them.
 	targets, all := lockCallTargetsAll(cc)
+	if !all && !cc.IsInvoke() && cc.StaticCallee() == nil {
+		// A variable whose walk was cut short (restCut) may hold a closure made here over any
+		// of this function's values, and that closure may unlock any of them: nothing is known
+		// to be held after the call.
+		if _, rest := callTargets(cc.Value); restCut(rest) {
+			clear(s)
+			return
+		}
+	}
 	if len(targets) == 0 {
 		// An interface method, or a called value nothing is known about: anything it receives
 		// may be unlocked.
@@ -1436,18 +1445,33 @@ func valuesHere(here *ssa.Function, v ssa.Value, steps string, entered map[*ssa.
 		from := functionOf(v)
 		return nil, from != nil && from != here
 	}
-	return rootHere(here, guardPath{p.root, p.steps + steps}, entered, map[guardPath]bool{})
+	return rootHere(here, guardPath{p.root, p.steps + steps}, entered, &rootSeen{paths: map[guardPath]bool{}, perRoot: map[ssa.Value]int{}})
 }
 
-func rootHere(here *ssa.Function, p guardPath, entered map[*ssa.Function][]*ssa.Call, seen map[guardPath]bool) (paths []guardPath, lost bool) {
+// rootSeen is what one valuesHere walk has brought: each path once, and how many distinct paths
+// it met for each root. A helper that calls itself on a field of its parameter is entered with a
+// longer path every time, so no path repeats; past rootPathLimit paths for one root the value is
+// lost (reported as unknown) instead of followed without end.
+type rootSeen struct {
+	paths   map[guardPath]bool
+	perRoot map[ssa.Value]int
+}
+
+const rootPathLimit = 8
+
+func rootHere(here *ssa.Function, p guardPath, entered map[*ssa.Function][]*ssa.Call, seen *rootSeen) (paths []guardPath, lost bool) {
 	from := functionOf(p.root)
 	if from == nil || from == here {
 		return []guardPath{p}, false
 	}
-	if seen[p] {
+	if seen.paths[p] {
 		return nil, false
 	}
-	seen[p] = true
+	if seen.perRoot[p.root] >= rootPathLimit {
+		return nil, true
+	}
+	seen.paths[p] = true
+	seen.perRoot[p.root]++
 	bring := func(v ssa.Value, steps string) {
 		vp, ok := pathOf(v)
 		if !ok {
