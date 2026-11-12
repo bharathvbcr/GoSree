@@ -13,7 +13,8 @@
 //!
 //! Wire format: little-endian `GSE1` request frame -> `GSR1` response frame.
 
-use std::collections::VecDeque;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, VecDeque};
 use std::fmt;
 
 pub const REQ_MAGIC: [u8; 4] = *b"GSE1";
@@ -21,7 +22,12 @@ pub const RESP_MAGIC: [u8; 4] = *b"GSR1";
 
 pub const NONE_U32: u32 = u32::MAX;
 
-pub const MAX_FUNCS: usize = 16_384;
+/// Functions in one package frame. Every per-package structure is linear in this count (summary
+/// bits, caller lists, the phase-1 worklists), and phase 1 costs O((functions + call edges) x
+/// log functions) plus one solve per function and per callee flip, so the bound is set by real
+/// packages, not by solver cost: a package with its tests has reached 18,973 (ScholarLM
+/// `internal/wisdev`). `MaxFuncs` in `internal/gusseterr/wire.go` is the mirror.
+pub const MAX_FUNCS: usize = 262_144;
 pub const MAX_SLOTS: usize = 262_144;
 pub const MAX_TUPLES: usize = 16_384;
 pub const MAX_BLOCKS: usize = 32_768;
@@ -41,6 +47,12 @@ pub const MAX_ITERATIONS_PER_FUNC: usize = 250_000;
 /// dropped before the next function is solved, so the peak is the largest function, not the
 /// sum over functions. `MaxStateCells` in `internal/gusseterr/wire.go` is the mirror.
 pub const MAX_STATE_CELLS_PER_FUNC: u64 = 8_388_608;
+
+/// Largest `GSE1` request frame either engine accepts: 1 GiB, gusset's `MaxBufferBytes`, the
+/// largest payload the linked engine can be handed at all. The pure-Go oracle enforces the same
+/// bound so both builds refuse the same frames. `MaxFrameBytes` in `internal/gusseterr/wire.go`
+/// is the mirror.
+pub const MAX_FRAME_BYTES: usize = 1 << 30;
 
 // Function flags.
 pub const FUNC_RETURNS_ERROR: u8 = 1 << 0;
@@ -328,6 +340,9 @@ fn check_block(bb: u32, num_blocks: u32) -> Result<(), SolveError> {
 
 /// Decodes a `GSE1` binary request frame into validated `FuncIR` records.
 pub fn decode_package(frame: &[u8]) -> Result<Vec<FuncIR>, SolveError> {
+    if frame.len() > MAX_FRAME_BYTES {
+        return Err(SolveError::LimitExceeded("frame_bytes"));
+    }
     let mut cur = Cursor::new(frame);
     let magic = cur.read_exact(4)?;
     if magic != REQ_MAGIC {
@@ -1033,6 +1048,16 @@ where
     // its callees flipped (its result depends on nothing else), so a long chain costs one solve
     // per function and per call edge, not one per sweep. Missing the cap would export
     // optimistic (too-small) summaries that hide ERR004 findings, so it is an error.
+    //
+    // A sweep visits the dirty functions in index order. It used to scan every index on every
+    // sweep, which made a chain whose callers precede their callees cost one scan of the whole
+    // package per function (quadratic: 0.3 s at 16,384 functions, minutes at 262,144). The
+    // dirty functions are kept in two min-heaps instead: `this_sweep` holds those still ahead of
+    // the sweep's position and `next_sweep` those behind it, which is the order the scan visited
+    // them in, so the sweeps, the solves and their order are unchanged and the cost is
+    // O((solves + call edges) x log functions). `dirty[i]` is true while `i` is in a heap, or
+    // when `i` can never be solved again (its summary is already may-nil or it returns no
+    // concrete error pointer), so no index is queued twice.
     let mut callers: Vec<Vec<u32>> = vec![Vec::new(); n_funcs];
     for (idx, fn_ir) in funcs.iter().copied().enumerate() {
         for block in &fn_ir.blocks {
@@ -1047,13 +1072,17 @@ where
         }
     }
     let mut dirty = vec![true; n_funcs];
+    let mut this_sweep: BinaryHeap<Reverse<u32>> = (0..n_funcs as u32).map(Reverse).collect();
+    let mut next_sweep: BinaryHeap<Reverse<u32>> = BinaryHeap::new();
     let mut converged = false;
     for _iter in 0..max_callgraph_iters {
         if !check_cancel() {
             return Err(SolveError::Cancelled);
         }
         let mut any_changed = false;
-        for (idx, fn_ir) in funcs.iter().copied().enumerate() {
+        while let Some(Reverse(idx32)) = this_sweep.pop() {
+            let idx = idx32 as usize;
+            let fn_ir = funcs[idx];
             if may_return_nil[idx]
                 || !dirty[idx]
                 || (fn_ir.flags & FUNC_RETURNS_CONCRETE_ERR_PTR == 0)
@@ -1066,12 +1095,20 @@ where
                 any_changed = true;
                 continue;
             }
-            let solved = solve_function(idx as u32, fn_ir, &may_return_nil, false, check_cancel)?;
+            let solved = solve_function(idx32, fn_ir, &may_return_nil, false, check_cancel)?;
             if solved.func_may_return_nil {
                 may_return_nil[idx] = true;
                 any_changed = true;
                 for &c in &callers[idx] {
+                    if dirty[c as usize] {
+                        continue;
+                    }
                     dirty[c as usize] = true;
+                    if c > idx32 {
+                        this_sweep.push(Reverse(c));
+                    } else {
+                        next_sweep.push(Reverse(c));
+                    }
                 }
             }
         }
@@ -1079,6 +1116,7 @@ where
             converged = true;
             break;
         }
+        std::mem::swap(&mut this_sweep, &mut next_sweep);
     }
     if !converged {
         return Err(SolveError::CallgraphBudgetExceeded(max_callgraph_iters));
@@ -1906,7 +1944,7 @@ mod tests {
         );
         // Oversized num_funcs.
         let mut huge = Vec::from(&b"GSE1"[..]);
-        huge.extend_from_slice(&(100_000u32).to_le_bytes());
+        huge.extend_from_slice(&(MAX_FUNCS as u32 + 1).to_le_bytes());
         assert_eq!(
             solve_frame(&huge, || true),
             Err(SolveError::LimitExceeded("num_funcs"))
