@@ -35,7 +35,13 @@ flowchart TD
 # Build the binary
 go build -o build/gosree ./cmd/gosree
 ```
-This is a local build from a checkout. A cgo build needs the Rust archive and the `../gusset` sibling checkout described in 1.5; `CGO_ENABLED=0 go build -o build/gosree ./cmd/gosree` needs neither. Installing with `go install` from the module path has not been verified, so it is not documented here.
+This is a local build from a checkout. A cgo build needs the Rust archive and the `../gusset` sibling checkout described in 1.5; `CGO_ENABLED=0 go build -o build/gosree ./cmd/gosree` needs neither.
+
+Without a checkout, install the pure-Go build. It uses the reference oracle (1.5), so its findings are the same and only speed and heap use differ:
+```bash
+CGO_ENABLED=0 go install github.com/bharathvbcr/gosree/cmd/gosree@latest
+```
+`go install` cannot build the Rust archive. With cgo on, the same command fails at link time with `ld: library 'gusset' not found`, so a checkout build is the only route to the Rust solver.
 
 ### 1.2 Usage with `go vet`
 ```bash
@@ -87,8 +93,9 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      # go.mod replaces github.com/bharathvbcr/gusset with ../gusset, so the two
-      # repositories are checked out side by side.
+      # rust/gusset-engine depends on ../../../gusset/crates/gusset by path, so the
+      # two repositories are checked out side by side. Check out the gusset commit
+      # that go.mod pins (see 1.5).
       - uses: actions/checkout@v4
         with:
           path: gosree
@@ -99,7 +106,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27'
-      # Without the Rust archive a cgo build fails at link time (undefined gosree_gusset_init);
+      # Without the Rust archive a cgo build fails at link time (library 'gusset' not found);
       # drop this step and build with CGO_ENABLED=0 to use the pure-Go oracle instead.
       - name: Build Rust engine
         working-directory: gosree
@@ -122,8 +129,8 @@ Rules for a trustworthy gate, all derived from the behaviour above:
 
 ### 1.5 Build Prerequisites (Rust Engine and the Pure-Go Fallback)
 The `safeerr` pass solves its dataflow in an in-process Rust engine hosted through [gusset](https://github.com/bharathvbcr/gusset). To link it you need:
-- a **sibling `../gusset` checkout**: `go.mod` has `replace github.com/bharathvbcr/gusset => ../gusset`, and `rust/gusset-engine` has a Cargo path dependency on `../../../gusset/crates/gusset`;
-- the Rust library built first: `cd rust && cargo build --release`. This produces `rust/target/release/libgusset.a` (the `gusset-engine` staticlib is named `gusset`), which the cgo directive finds with `-L${SRCDIR}/../../rust/target/release` (`internal/gusseterr/engine_unix.go`). Gusset's own `-lgusset` link line (`internal/ffi/ffi.go` in the gusset checkout) then resolves to this archive. `rust/target/` is gitignored;
+- a **sibling `../gusset` checkout, at the commit `go.mod` pins**: `rust/gusset-engine` has a Cargo path dependency on `../../../gusset/crates/gusset`. The Go half of gusset comes from the module version in `go.mod` (`v0.0.4-0.20261110083725-0ab48cae95fe`, commit `0ab48ca`), not from the sibling. So the sibling's commit must match it, or the Rust and Go halves can disagree. CI checks the match, but nothing checks it locally. To build against uncommitted Go changes in the sibling, add a temporary `go mod edit -replace github.com/bharathvbcr/gusset=../gusset` and do not commit it. A `replace` in `go.mod` breaks `go install`, and a root `go.work` breaks `cmd/gosree-corpus` on its nested test modules (`.gitignore` excludes it);
+- the Rust library built first: `cd rust && cargo build --release`. This produces `rust/target/release/libgusset.a` (the `gusset-engine` staticlib is named `gusset`), which the cgo directive finds with `-L${SRCDIR}/../../rust/target/release` (`internal/gusseterr/engine_unix.go`). Gusset's own `-lgusset` link line (`internal/ffi/ffi.go` in the gusset module) then resolves to this archive. That file also adds two search paths inside the module cache, which has no `target/` directory, so every cgo link prints `ld: warning: search path '.../target/release' not found` and the same for `target/debug`. Both warnings are harmless. `rust/target/` is gitignored;
 - cgo enabled, on a unix platform.
 
 ```bash
@@ -132,8 +139,8 @@ go build -o build/gosree ./cmd/gosree
 ```
 
 Observed failures when a prerequisite is missing, in a scratch copy of the checkout:
-- cgo build, no `../gusset`: `go build` stops while loading packages with `replacement directory ../gusset does not exist`.
-- cgo build, `gusset` present, no `rust/target/release/libgusset.a`: the link fails with `Undefined symbols ... gosree_gusset_init`.
+- no `../gusset`: `cargo build --release` stops with ``failed to read `.../gusset/crates/gusset/Cargo.toml` `` (`No such file or directory`). `go build` itself no longer needs the sibling, so with an archive already built the cgo build still links.
+- cgo build, no `rust/target/release/libgusset.a`: the link fails with `ld: library 'gusset' not found`.
 
 On `!unix || !cgo` the build selects `internal/gusseterr/engine_other.go` instead (`//go:build !unix || !cgo`): `NativeActive()` is false and `SolveFrame` runs the pure-Go reference oracle, documented in that file as bit-exact. No Rust toolchain or `../gusset` checkout is needed for that path: `CGO_ENABLED=0 go build ./cmd/gosree` exits 0 in a scratch copy of the checkout with no `../gusset` beside it. The error-discipline summary reports which engine ran (`UsedRustGusset` in the `Summary` of `passes/errcheck`), and `TestDifferentialParityRandomizedCFGs` in `internal/gusseterr/parity_test.go` compares the native engine with the oracle on randomized control-flow graphs when the native engine is active. The same diagnostics come out of the native build and the `CGO_ENABLED=0` build for every example in [Borrow & NLL](BORROW_CHECKING_AND_NLL.md).
 

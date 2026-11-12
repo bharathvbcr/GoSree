@@ -304,7 +304,7 @@ With the Rust library built (Section 6), both packages pass (`go test -count=1`,
 
 The native engine needs three things to be true at link time.
 
-1. **A sibling Gusset checkout.** `go.mod` has `replace github.com/bharathvbcr/gusset => ../gusset`, and the umbrella crate has a Cargo path dependency on `../../../gusset/crates/gusset` (`rust/gusset-engine/Cargo.toml`). Both resolve to the same checkout, next to this repository's root.
+1. **A sibling Gusset checkout at the pinned commit.** The umbrella crate has a Cargo path dependency on `../../../gusset/crates/gusset` (`rust/gusset-engine/Cargo.toml`), which resolves to a checkout next to this repository's root. The Go half of Gusset comes from the module version in `go.mod` (commit `0ab48ca`), so the sibling must be at that commit. CI asserts that the two match.
 2. **The Rust static library.** From `rust/`, run:
 
    ```bash
@@ -312,11 +312,11 @@ The native engine needs three things to be true at link time.
    ```
 
    The workspace (`rust/Cargo.toml`) has two members: `gosree-errsolve` (the solver, an ordinary library) and `gusset-engine`. The latter's `[lib]` is named `gusset` with `crate-type = ["staticlib", "rlib"]`, so it produces `libgusset.a`. That name is required because the Go package `gusset` links with `-lgusset`; Gusset's own `AGENTS.md` records that the umbrella crate's `[lib] name`, not its package name, controls the archive name. The package name is `gosree-gusset-engine`. The output lands in `rust/target/release/`, which is git-ignored.
-3. **The linker path.** `engine_unix.go` adds `-L${SRCDIR}/../../rust/target/release` to `LDFLAGS`. Gusset's own cgo file, `internal/ffi/ffi.go` in the Gusset checkout, links `-lgusset` from its own `target/release` and `target/debug`. The comment in `gusset-engine/Cargo.toml` says the umbrella archive is meant to replace Gusset's placeholder archive on the linker search path.
+3. **The linker path.** `engine_unix.go` adds `-L${SRCDIR}/../../rust/target/release` to `LDFLAGS`. Gusset's own cgo file, `internal/ffi/ffi.go` in the Gusset module, links `-lgusset` and adds its own `target/release` and `target/debug` to the search path. In the module cache those directories do not exist, so the linker warns `search path ... not found` and finds the archive through `engine_unix.go`'s path. The comment in `gusset-engine/Cargo.toml` says the umbrella archive is meant to replace Gusset's placeholder archive on the linker search path.
 
 The umbrella is the single Rust staticlib in the Go binary. It owns the `Counting<System>` global allocator, installs the solver on opcode 0, and registers the self-test panic opcode (the crate comment of `rust/gusset-engine/src/lib.rs`).
 
-**Without cgo, or off unix.** `engine_unix.go` is excluded and `engine_other.go` is used: no Rust toolchain is needed and no Gusset code is linked into this package, the build needs no `rust/target`, and `Summary.UsedRustGusset` is false. The analyzer's results are the oracle's, which parity testing holds equal to the native engine's on the tested inputs. With cgo enabled on unix but no `rust/target/release/libgusset.a` built, a build of `./cmd/gosree` fails at link time with an undefined `_gosree_gusset_init` (reproduced 2026-11-10 by pointing `-L` at a nonexistent directory: the linker then falls back to Gusset's own `target/release` archive, which does not define the symbol). There is no fallback at link time, since the choice is made by build tags, not by probing for the library. `CGO_ENABLED=0` builds and uses the pure-Go oracle.
+**Without cgo, or off unix.** `engine_unix.go` is excluded and `engine_other.go` is used: no Rust toolchain is needed and no Gusset code is linked into this package, the build needs no `rust/target`, and `Summary.UsedRustGusset` is false. The analyzer's results are the oracle's, which parity testing holds equal to the native engine's on the tested inputs. With cgo enabled on unix but no `rust/target/release/libgusset.a` built, a build of `./cmd/gosree` fails at link time with `ld: library 'gusset' not found` (observed 2026-11-11 in a clean clone, with Gusset coming from the module cache). Under the old `replace => ../gusset` the error was an undefined `_gosree_gusset_init` instead, because the linker fell back to the placeholder archive in the sibling's `target/release`. There is no fallback at link time, since the choice is made by build tags, not by probing for the library. `CGO_ENABLED=0` builds and uses the pure-Go oracle.
 
 ---
 

@@ -135,8 +135,9 @@ The error-discipline pass (`safeerr`) solves its dataflow lattice in a Rust engi
 go build -o build/gosree ./cmd/gosree
 ```
 
-- **Sibling checkout:** `go.mod` has `replace github.com/bharathvbcr/gusset => ../gusset`, and `rust/gusset-engine` depends on `../../../gusset/crates/gusset` by path, so gusset must sit next to this repository.
-- **Skipping `cargo build` fails at link time:** the cgo directive in [`internal/gusseterr/engine_unix.go`](internal/gusseterr/engine_unix.go) adds `-L rust/target/release` and expects the symbol `gosree_gusset_init`. Without that archive `go build ./cmd/gosree` ends with `Undefined symbols ... _gosree_gusset_init`.
+- **Sibling checkout:** `rust/gusset-engine` depends on `../../../gusset/crates/gusset` by path, so gusset must sit next to this repository. Check it out at the commit `go.mod` pins (`0ab48ca`). The Go half of gusset comes from that module version, and the two halves must match ([Tooling §1.5](docs/TOOLING_AND_ERASURE.md#15-build-prerequisites-rust-engine-and-the-pure-go-fallback)).
+- **Skipping `cargo build` fails at link time:** the cgo directive in [`internal/gusseterr/engine_unix.go`](internal/gusseterr/engine_unix.go) adds `-L rust/target/release`. Without that archive `go build ./cmd/gosree` ends with `ld: library 'gusset' not found`.
+- **No checkout:** `CGO_ENABLED=0 go install github.com/bharathvbcr/gosree/cmd/gosree@latest` installs the pure-Go build. `go install` cannot build the Rust archive, so the Rust solver needs a checkout.
 - **Without cgo (`CGO_ENABLED=0`) or on a non-unix target** no Rust is needed: [`engine_other.go`](internal/gusseterr/engine_other.go) solves with the pure-Go reference oracle ([`oracle.go`](internal/gusseterr/oracle.go)), whose output is byte-identical to the Rust engine's (`TestDifferentialParityRandomizedCFGs` compares them on 250 randomized frames when the native engine is active). Findings are the same; only speed and heap use differ. `errcheck.Summary.UsedRustGusset` reports which engine ran.
 
 ### 2. Run Verification via `go vet` (or Standalone)
