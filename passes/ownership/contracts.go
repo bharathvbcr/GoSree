@@ -267,6 +267,30 @@ func isMethodThunk(fn *ssa.Function) bool {
 	return fn != nil && (strings.HasPrefix(fn.Synthetic, "thunk") || strings.HasSuffix(fn.Name(), "$thunk"))
 }
 
+// methodBehind returns the method a method value's wrapper (g := r.m) or a method expression's
+// thunk (g := (*R).m) stands for: the method as declared, for a generic type the one all its
+// instances share. It is nil for anything else, and for a method of an interface, which has no
+// one function behind it.
+//
+// What is known of a method is recorded for the method: its summary, what it publishes, the
+// calls it is called by. A wrapper has its own parameters (the method's without the receiver,
+// which it captures) and a thunk has the method's, so whoever reads the method's facts for one of
+// them goes through here and then lines the parameters up.
+func methodBehind(fn *ssa.Function) *ssa.Function {
+	if !isBoundMethodWrapper(fn) && !isMethodThunk(fn) {
+		return nil
+	}
+	obj, ok := fn.Object().(*types.Func)
+	if !ok {
+		return nil
+	}
+	recv := obj.Signature().Recv()
+	if recv == nil || types.IsInterface(recv.Type()) {
+		return nil
+	}
+	return fn.Prog.FuncValue(obj.Origin())
+}
+
 func canonicalBodyFn(fn *ssa.Function) *ssa.Function {
 	if fn != nil && fn.Origin() != nil {
 		return fn.Origin()
@@ -519,6 +543,9 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 		}
 	}
 
+	// wrappers are the method values' wrappers and method expressions' thunks the functions name.
+	// Each calls its method, and that call is read below as one of the method's calls.
+	var wrappers []*ssa.Function
 	var opBuf [8]*ssa.Value
 	for _, fn := range scanFns {
 		bodyFn := canonicalBodyFn(fn)
@@ -593,7 +620,28 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 					if bf != directFn {
 						ci.openCallers[bf] = true
 					}
+					if methodBehind(f) != nil && len(f.Blocks) > 0 && !slices.Contains(wrappers, f) {
+						wrappers = append(wrappers, f)
+					}
 				}
+			}
+		})
+	}
+	// A method called through a method value or a method expression is called by the wrapper made
+	// for the value, which passes its own parameters on (and for a method value the receiver it
+	// captured). That call is one of the method's calls: what a parameter of the method may be is
+	// asked at it, goes to the wrapper's parameter, and from there to the calls of the value,
+	// which are listed under the wrapper. Without it a method reached only through a value had no
+	// call in sight, and one that also had direct calls was read as if those were all.
+	for _, w := range wrappers {
+		forEachInstr(w, func(ins ssa.Instruction) {
+			c, ok := ins.(ssa.CallInstruction)
+			if !ok || c.Common().IsInvoke() {
+				return
+			}
+			if callee := c.Common().StaticCallee(); callee != nil {
+				target := canonicalBodyFn(callee)
+				ci.callSitesOf[target] = append(ci.callSitesOf[target], indexedCallSite{caller: canonicalBodyFn(w), ins: c})
 			}
 		})
 	}
@@ -1499,7 +1547,13 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 		return outcomeFromCapContract(c, pkgPath)
 	}
 
+	// The facts are the method's, also for a method value's wrapper (bound, and the method's
+	// parameters are one further on than the call's arguments) and a method expression's thunk
+	// (the same parameters as the method).
 	bodyFn := canonicalBodyFn(fn)
+	if m := methodBehind(fn); m != nil {
+		bodyFn = canonicalBodyFn(m)
+	}
 	if st.contracts == nil || bodyFn == nil {
 		return candOutcome{}
 	}

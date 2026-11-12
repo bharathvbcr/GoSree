@@ -954,11 +954,8 @@ func (g *graph) closureRetains(mc *ssa.MakeClosure) {
 	leaks := func(j int) bool { return true }
 	if fn != nil {
 		if strings.HasPrefix(fn.Synthetic, "bound method wrapper") {
-			if m, ok := fn.Object().(*types.Func); ok && !types.IsInterface(m.Signature().Recv().Type()) {
-				if target := fn.Prog.FuncValue(m); target != nil {
-					s := g.st.summary(target)
-					leaks = func(int) bool { return s.leaks(0) }
-				}
+			if methodBehind(fn) != nil {
+				leaks = g.st.summary(fn).freeLeaks
 			}
 		} else {
 			s := g.st.summary(fn)

@@ -37,13 +37,13 @@ func funcVarIso() {
 	j.ID = 1 // MISS(SAFE003): Submit through a package-level func variable is a dynamic call: no owned parameter, no move
 }
 
-// The same method as a method value: a bound-method wrapper has no summary (summary(): synthetic
-// functions are pessimistic), which leaks but does not move.
+// The same method as a method value: the wrapper has its method's summary, read from the other
+// package's facts, so j moves as at the direct call. (A wrapper used to have no summary.)
 func methodValueIso() {
 	j := &sub.Job{}
 	f := sub.Worker{}.Submit
 	f(j)
-	j.ID = 1 // MISS(SAFE003): a method value calls a bound-method wrapper, which summary() makes pessimistic: it leaks j but does not move it
+	j.ID = 1 // HIT(SAFE003)
 }
 
 // control: a generic spawner with owned parameters, instantiated here.

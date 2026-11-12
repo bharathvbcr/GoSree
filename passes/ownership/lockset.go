@@ -379,16 +379,13 @@ func methodValue(t callTarget) (*ssa.Function, ssa.Value) {
 	if t.mc == nil || len(t.mc.Bindings) != 1 || !isBoundMethodWrapper(t.fn) {
 		return nil, nil
 	}
-	obj, ok := t.fn.Object().(*types.Func)
-	if !ok {
-		return nil, nil
-	}
-	recv := obj.Signature().Recv()
-	if recv == nil || types.IsInterface(recv.Type()) || !types.Identical(recv.Type(), t.mc.Bindings[0].Type()) {
-		return nil, nil
-	}
-	method := t.fn.Prog.FuncValue(obj.Origin())
+	method := methodBehind(t.fn)
 	if method == nil {
+		return nil, nil
+	}
+	// The receiver as the method takes it: a promoted method's receiver is a field of what the
+	// value was made from, and no path from the one is a path from the other.
+	if recv := method.Signature.Recv(); recv == nil || !types.Identical(recv.Type(), t.mc.Bindings[0].Type()) {
 		return nil, nil
 	}
 	return method, t.mc.Bindings[0]

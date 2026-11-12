@@ -378,8 +378,11 @@ func (st *state) summary(fn *ssa.Function) *summary {
 			return &summary{leakParam: leaks, writeParam: make([]bool, nParams), leakFree: freeLeaks, writeFree: make([]bool, nFree)}
 		}
 	}
-	// Functions of other packages are built from type information; wrappers, thunks and bound
-	// methods have their own parameter layout and get no summary.
+	if m := methodBehind(fn); m != nil {
+		return wrapperSummary(fn, m, st.summary(m))
+	}
+	// Functions of other packages are built from type information; other synthetic functions
+	// have their own parameter layout and get no summary.
 	if !ok || (fn.Synthetic != "" && !strings.HasPrefix(fn.Synthetic, "from type information")) {
 		return pessimistic
 	}
@@ -428,6 +431,81 @@ func (st *state) summary(fn *ssa.Function) *summary {
 	if obj.Pkg().Path() == atomicPkg {
 		s.writeParam = make([]bool, len(f.Writes))
 	}
+	return s
+}
+
+// wrapperSummary is the summary of a method value's wrapper or a method expression's thunk w, from
+// the summary ms of its method: the same facts, with the parameters lined up. A thunk has the
+// method's parameters. A wrapper has them without the receiver, which is its one free variable.
+//
+// A link that involves the receiver is kept only for a thunk whose first parameter is the
+// method's receiver as it stands. A wrapper has no position for its receiver, and a wrapper or
+// thunk of a promoted method, or of a value method reached through a pointer, gets to the
+// method's receiver from its own by a field or a load, so the depths would not be the method's.
+// What such a link joined is then taken the safe way: a parameter joined to the receiver leaks, a
+// result joined to it is not fresh, and the receiver itself is retained.
+func wrapperSummary(w, method *ssa.Function, ms *summary) *summary {
+	if ms.pessimistic {
+		return pessimistic
+	}
+	shift := 0
+	if isBoundMethodWrapper(w) {
+		shift = 1
+	}
+	n := len(w.Params)
+	s := &summary{
+		leakParam:   make([]bool, n),
+		leakBesides: make([]bool, n),
+		isoParam:    make([]bool, n),
+		spawnParam:  make([]bool, n),
+		writeParam:  make([]bool, n),
+		leakFree:    make([]bool, len(w.FreeVars)),
+		writeFree:   make([]bool, len(w.FreeVars)),
+		fresh:       ms.fresh,
+		freshResult: slices.Clone(ms.freshResult),
+	}
+	for i := range n {
+		s.leakParam[i] = ms.leaks(i + shift)
+		s.leakBesides[i] = ms.leaksBesidesContract(i + shift)
+		s.isoParam[i] = ms.isIso(i + shift)
+		s.spawnParam[i] = ms.spawns(i + shift)
+		s.writeParam[i] = ms.writes(i + shift)
+	}
+	keepReceiver := func() {
+		switch {
+		case shift == 1 && len(s.leakFree) > 0:
+			s.leakFree[0] = true
+		case shift == 0 && n > 0:
+			s.leakParam[0] = true
+		}
+	}
+	if shift == 1 && len(s.leakFree) > 0 {
+		// A receiver the method owns or starts a goroutine with is handed over when the value is
+		// called; a captured variable has no such fact, so it is retained.
+		s.leakFree[0] = ms.leaks(0) || ms.isIso(0) || ms.spawns(0)
+		s.writeFree[0] = ms.writes(0)
+	}
+	sameReceiver := shift == 0 && n > 0 && len(method.Params) > 0 && types.Identical(w.Params[0].Type(), method.Params[0].Type())
+	var links []Link
+	for _, l := range ms.links {
+		if l.A != 0 || sameReceiver {
+			links = append(links, newLink(l.A-shift, l.DepthA, l.B-shift, l.DepthB))
+			continue
+		}
+		// l.A is the receiver, and A is the smaller position: l.B is another parameter or a result.
+		keepReceiver()
+		if other := l.B - shift; other < n {
+			if other >= 0 {
+				s.leakParam[other] = true
+			}
+		} else {
+			s.fresh = false
+			if k := other - n; k < len(s.freshResult) {
+				s.freshResult[k] = false
+			}
+		}
+	}
+	s.links = mergeLinks(nil, links)
 	return s
 }
 
@@ -724,10 +802,8 @@ func (st *state) computeSummaries(fns []*ssa.Function) {
 					case *ssa.MakeClosure:
 						target, _ = x.Fn.(*ssa.Function)
 					}
-					if target != nil && strings.HasPrefix(target.Synthetic, "bound method wrapper") {
-						if m, ok := target.Object().(*types.Func); ok && !types.IsInterface(m.Signature().Recv().Type()) {
-							target = target.Prog.FuncValue(m)
-						}
+					if m := methodBehind(target); m != nil {
+						target = m
 					}
 					if target != nil && target.Origin() != nil {
 						target = target.Origin()
