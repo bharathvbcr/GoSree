@@ -973,20 +973,25 @@ are. Same checker (`9167e27`), same hatch-free annotated copy, the same scratch 
 
 ### Method
 
-The walk now keeps every write it finds for a parameter (up to 600; no parameter reached that),
-with whether the pass's own lockset holds a lock before the instruction, or the walk entered the
-function from a call made under one. A write the walk cannot enter (a function of another package,
+The walk keeps every write it finds for a parameter (up to 600; no parameter reached that), with
+whether the pass's own lockset holds a lock before the instruction, or the walk entered the
+function from a call made under one. A write the walk cannot enter (a function of another package
 whose summary says it may write the argument) is traced further: for every parameter and captured
 variable of a module function whose summary says "writes", the probe records the write events on
 its forward pointee chain, and at a call which parameter of the callee the event stands for. A
-script follows these to leaves.
+script follows these to leaves, as a fixpoint.
 
-A leaf is a direct write, an interface method call, a call through a function value, a function
-outside the module (15 of them, not traced further), or a function with no summary. Each leaf is
-**on the path** when the path walk (the handler check's `root`) leads from the written address, or
-the argument at every call on the way, back to the parameter, and **class only** when it does not:
-then only the alias class put the event on the parameter's chain. That is the roadmap's "writes to
-fresh or local memory unified with the receiver".
+A leaf is a direct write, an interface method call, a call through a function value, or a function
+outside the module (not traced further). Each leaf is **on the path** when the path walk (the
+handler check's `root`) leads from the written address, and from the argument at every call on the
+way, back to the parameter. It is **class only** when it does not: then only the alias class put
+the event on the parameter's chain, which is the roadmap's "writes to fresh or local memory unified
+with the receiver".
+
+The interface call sites were then joined, by position, with the whole-program call graph built
+earlier in this work (x/tools VTA over the unannotated pin, 3,527 interface call sites): which
+functions each can reach, whether they are in the module, and whether any of their summaries
+writes a parameter.
 
 ### Result
 
@@ -999,9 +1004,9 @@ direct writes and calls:
 | at least one direct write on the path | 23 (22%) |
 | every leaf is class only: the bit is an over-count as far as the path walk can tell | 6 (6%) |
 
-Distinct leaves behind the 118 claims: 1,120 direct writes that are class only; on the path, 239
-direct writes (151 with a lock held, 4 within a `sync.Once.Do` by a text match, 84 with neither),
-161 interface method calls, 39 dynamic calls, 15 functions outside the module.
+Distinct leaves behind the 118 claims: 1,128 direct writes that are class only; on the path, 244
+direct writes (156 with a lock held, 4 within a `sync.Once.Do` by a text match, 84 with neither),
+161 interface call sites, 41 dynamic calls, 15 functions outside the module.
 
 Allowing one family after another (a claim unblocks only when every one of its writes is allowed;
 the transfers are hatched hand-overs clean on the callee side with no SAFE008, the ceiling of the
@@ -1014,35 +1019,71 @@ experiment above, callers not checked):
 | direct writes with a lock held | 13 | 23 | 6 | 17 |
 | direct writes in a `sync.Once.Do` | 13 | 23 | 6 | 17 |
 | interface method and dynamic calls | 78 | 63 | 16 | 47 |
-| functions outside the module | 96 | 78 | 19 | 59 |
-| no summary (one function, `usage.Recorder`'s outbox drain), and one chain not kept whole | 106 | 87 | 26 | 61 |
+| functions outside the module | 104 | 87 | 26 | 61 |
+| one chain the probe did not keep whole | 106 | 87 | 26 | 61 |
 | direct writes with no lock | 118 | 108 | 36 | 72 |
 
 70 of the 106 handler hand-overs carry a SAFE008 of their own, which is why they stop at 36.
 
-- **The over-count is real and does not matter here.** Nearly five times as many direct-write
-  leaves are class only as are on the path (1,120 to 239), and 6 summaries are nothing else. But no claim is blocked by them alone:
-  allowing every one unblocks 0 of 118.
-- **Locks are a small part.** 63% of the direct writes on the path are under a lock, and declaring
-  those locks would unblock 13 claims and 6 hand-overs, all of them goroutines.
-- **What is left is calls the checker cannot see into.** They are the only thing left in 65 claims
-  once class-only leaves and locked writes are allowed. The 161 interface call sites use 62 method
-  names: `Name` 39, `Exec` 13, `Query` 11, `Close` 10, `QueryRow` 8, `Get` 5, `Now` 4. Of the 39
-  dynamic calls, 13 call something named like a clock or a sleep (`r.now()`, `s.clock()`), by the
-  text of the line.
-- **The unlocked direct writes are mostly working data.** All 84 lines were read as text: 39 set
-  fields of a manuscript's sections and paragraphs (`manuscript_coordination.go`), 28 set a research
-  run's state (`state.Workers[idx]`, `state.DurableTasks`, `board.*`), and 10 more set a paper, a
-  report, a section or a hypothesis being worked on. If those objects are what their names say,
-  "shared for reading" is not what the code does with them: the function is handed the object in
-  order to change it. The other seven: three were read in their functions (`registerFullPaperRoutes`
-  sets `s.docService` while routes are registered; `RuntimeStateStore.startRetentionLoop` sets
-  `s.retentionStop` before it starts its goroutine; `scholarDocLifecycle.ensureDoc` sets `l.doc`
-  behind a nil check with no lock, where the one production value built with a nil `doc` is a
-  local in a sequential sweep, so no race was found and none was ruled out for other callers);
-  `startProbeLocked` sets `entry.probe` and by its name runs with a lock held, which the probe did
-  not see; `resp = nil` assigns a captured local; `builder.truncated` and `metered.reservation`
-  were not read.
+**The over-count is real and is not what holds the hatches.** Nearly five times as many
+direct-write leaves are class only as are on the path, and 6 summaries are nothing else. Allowing
+every one of them unblocks 0 of 118 claims. As a bound on how wrong the path walk could be: if
+every write that comes through a summary were dismissed, whatever it is, 29 claims would unblock
+and 28 hand-overs would clear instead of 17. The other 89 claims are blocked by what the walk sees
+in the function itself and the functions it enters, 52 of them by an interface or dynamic call
+alone.
+
+**Locks are a small part.** 64% of the direct writes on the path have a lock held. Allowing them
+unblocks at most 13 claims and 6 hand-overs, all goroutines. At most, because a lock held at a
+write is not yet a `guarded_by` row that passes SAFE009.
+
+**The calls are of three kinds.** The 161 interface call sites, by what the call graph reaches:
+
+| Interface call sites | Sites | Example |
+|---|---|---|
+| every target is in the module and none writes a parameter | 55 | `p.Name()` on a search provider, 39 sites, 20 implementations |
+| every target is in the module and one writes a parameter | 51 | `gateway.Store.Get`: `InMemorySessionStore.Get` evicts under its own mutex |
+| the only target is `pgxpool.Pool` | 35 | `s.db.Exec`, `Query`, `QueryRow`, `Begin` |
+| another target outside the module | 20 | `resp.Body.Close()`: every `io.ReadCloser` in the build |
+
+As if the checker resolved each interface call to those targets and looked into the ones in the
+module:
+
+| Allowed, cumulatively | Claims unblocked (of 118) | Transfers (of 178) | Handlers | Goroutines |
+|---|---|---|---|---|
+| class-only leaves, locked and `Once` writes | 17 | 26 | 6 | 20 |
+| interface calls on `pgxpool.Pool` | 24 | 31 | 6 | 25 |
+| dynamic calls | 44 | 41 | 6 | 35 |
+| other interface targets outside the module | 47 | 42 | 6 | 36 |
+| functions outside the module whose summaries say they write | 74 | 68 | 15 | 53 |
+| unlocked direct writes | 118 | 108 | 36 | 72 |
+
+So resolving interface targets is worth 4 claims by itself (13 to 17): the implementations it
+opens write too, mostly under their own locks, and they call function values in turn. What is left
+is spread over four things of similar size, none of which clears much alone: function values (41
+sites; 15 named like a clock or a sleep, by the text of the line), the database pool, functions of
+the standard library and of dependencies whose summaries say they write (`http.Client.Do`,
+`json.Marshal`, `semaphore.Weighted.Acquire`, `grpc.Server.GracefulStop` among 15), and unlocked
+direct writes, which 44 of the 118 claims reach once the interface targets are opened.
+
+**The unlocked direct writes are mostly working data.** The 84 the walk reaches without opening
+interface targets were all read as text: 39 set fields of a manuscript's sections and paragraphs
+(`manuscript_coordination.go`), 28 set a research run's state (`state.Workers[idx]`,
+`state.DurableTasks`, `board.*`), and 10 more set a paper, a report, a section or a hypothesis
+being worked on. If those objects are what their names say, "shared for reading" is not what the
+code does with them: the function is handed the object in order to change it. The other seven:
+three were read in their functions (`registerFullPaperRoutes` sets `s.docService` while routes are
+registered; `RuntimeStateStore.startRetentionLoop` sets `s.retentionStop` before it starts its
+goroutine; `scholarDocLifecycle.ensureDoc` sets `l.doc` behind a nil check with no lock, where the
+one production value built with a nil `doc` is a local in a sequential sweep, so no race was found
+and none was ruled out for other callers); `startProbeLocked` sets `entry.probe` and by its name
+runs with a lock held, which the probe did not see; `resp = nil` assigns a captured local;
+`builder.truncated` and `metered.reservation` were not read. The 76 more that opening the interface
+targets adds were not read.
+
+This closes a line of the section above: for the journal, `RuntimeJournal.Append`'s write bit comes
+down to `j.now()` (a clock kept in a function-valued field) and `j.shared.AppendEntry` (an
+interface method on the shared mirror). The assignments to its by-value entry are class only.
 
 ### Predictions
 
@@ -1051,7 +1092,7 @@ experiment above, callers not checked):
 | Summaries with a direct write on the path | 40% to 60% | 22% | missed low |
 | Summaries that are class only | 10% to 25% | 6% | missed low |
 | Summaries with only calls it cannot see into | 20% to 35% | 72% | missed high |
-| Direct writes on the path with a lock held | at least 50% | 63% | hit |
+| Direct writes on the path with a lock held | at least 50% | 64% | hit |
 | Claims unblocked by class-only leaves | 3 to 10 | 0 | missed low |
 | ... then by locked writes | 10 to 30 | 13 | hit |
 | ... then by `Once` writes | at most 5 more | 0 more | hit |
@@ -1059,37 +1100,51 @@ experiment above, callers not checked):
 | Claims left to an unlocked direct write | 18 to 58 | 12 | missed low |
 | Transfers with class-only allowed, then locks | at most 25, at most 45 | 17, 23 | hit |
 
-I expected the summaries to hide direct writes and over-counts. They mostly hide calls.
+Five hit and five missed. I expected the summaries to hide direct writes and over-counts. They
+mostly hide calls.
 
 ### What changed while measuring
 
-The probe ran three times to the end. The first complete run counted a store into a local
-variable's own cell as a write through the value kept in it; it gave 110 unlocked direct writes and
-56 summaries with a direct write on the path. Corrected, the figures above (84 and 23). An earlier
-attempt traced every package of the build and was stopped after eleven minutes; the tracing was
-then limited to the module, so a function outside it is a leaf.
+The probe was run to the end three times after one attempt that traced every package of the build
+and was stopped after eleven minutes (the tracing was then limited to the module, so a function
+outside it is a leaf).
+- The first complete run counted a store into a local variable's own cell as a write through the
+  value kept in it: 110 unlocked direct writes, 56 summaries with a direct write on the path.
+- The second corrected that: 84 and 23.
+- The third also stopped counting the address of such a cell as an argument on the path, and a
+  store to a captured variable as a write through what it holds. No class moved by more than 8
+  leaves, and the split of the summaries and the first five rows of the waterfall did not move.
+
+Splitting the interface calls by the call graph, and the second waterfall, were added after the
+first table was seen. They were not predicted.
 
 ### Limits
 
 - "On the path" follows a result of a call back to its arguments by the callee's summary, so a
-  write to a copy a callee returned can count as on the path. "Class only" is an upper bound on the
-  over-count in the other direction: the path walk loses a value stored into a fresh struct and
-  loaded back.
+  value a callee made and returned can count as the parameter's memory. `resp.Body.Close()` is one:
+  the response is the result of `c.httpClient.Do(req)`. That leans towards more blocks.
+- "Class only" leans the other way: the path walk loses a value stored into a fresh struct and
+  loaded back. The bound above (29 claims) is the most that could hide.
 - A lock is "held" by the pass's must-hold lockset in the function, or at a call above it in the
-  same trace. A helper that is always called under a lock from elsewhere reads as unlocked
-  (`startProbeLocked`).
+  same trace. A helper always called under a lock from elsewhere reads as unlocked.
 - `sync.Once` is a text match within eight lines.
-- The transfer counts are callee side only. The experiment above showed the caller side then fails
-  almost every claim that passes.
-- Hand reading: the 84 unlocked lines by their text; 9 writes in their functions (5 under a lock or
-  a `Once`, 4 with neither); none of the interface call sites.
+- The call graph is of the unannotated pin and over-approximates: an interface call with many
+  implementations in the build reaches all of them.
+- Opening an interface target takes every parameter its summary writes, not the one the call
+  passes the value to.
+- The transfer counts are callee side only. The experiment above showed that the caller side then
+  fails almost every claim that passes.
+- Hand reading: the 84 unlocked lines by their text; 9 direct writes in their functions (5 under a
+  lock or a `Once`, 4 with neither); 4 of the calls (`InMemorySessionStore.Get`, the hindsight
+  clock, `rt.citationFn`, `resp.Body.Close()`); the 161 interface sites by their line and the call
+  graph's targets.
 
 ### What it means
 
 By the outcomes written first: class-only leaves unblock no claim (the line was 20), so fixing the
-write bit's over-count would not take a hatch off; declaring locks takes off few; what is left is
-calls the checker cannot see into. Nothing short of a claim about what a called function does,
-through an interface or a function value, clears these hatches, and item 4 stays where it is. For
-the goroutine hand-overs that claim would reach 47 of 72 on the callee side. For the handler
-hand-overs it would reach 16 of 106, because most handlers are reported as writing in their own
-right (SAFE008 at 70).
+write bit's over-count would not take a hatch off. Declaring locks takes off few. What is left is
+calls the checker cannot see into, and they are not one thing. In the order of the second table,
+resolving interface targets adds 3 hand-overs on the callee side, the database pool 5, function
+values 10, other interface targets 1, and the standard library's and dependencies' write summaries
+26; the order matters, because most claims need several of them. Together they reach 68 of 178,
+before the caller side. Item 4 stays where it is.

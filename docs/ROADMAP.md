@@ -240,8 +240,10 @@ Done:
      The reopened experiment showed that no claim about sharing clears a hatch until this is
      answered, and the measurement after it showed what the blocks are: once the write bit's
      over-count and writes under a lock are both set aside, calls the checker cannot see into are
-     the only thing left in 65 of the 118 blocked claims (161 interface call sites, 39 dynamic
-     calls). Setting the over-count aside unblocks none of the 118 by itself
+     the only thing left in 65 of the 118 blocked claims (161 interface call sites, 41 dynamic
+     calls). The calls are several things, none decisive alone: implementations in the module that
+     write under their own locks, the database pool, function-valued fields, and write summaries
+     of the standard library. Setting the over-count aside unblocks none of the 118 by itself
      ([the triage log](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.md#why-the-write-check-blocks-those-claims-2026-11-12)).
 
 The project should be abandoned if a `net/http` reference service has a hatch ratio above 20% (see
