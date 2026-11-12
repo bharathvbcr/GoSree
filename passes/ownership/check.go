@@ -346,7 +346,7 @@ func (st *state) checkBorrowEscape(g *graph, t transfer) bool {
 	}
 
 	// 4. Moving a local borrow via cap.Move, passing to an owned (iso) parameter, or publishing via a capability contract
-	if _, isParam := t.v.(*ssa.Parameter); !isParam {
+	if _, isParam := t.v.(*ssa.Parameter); !isParam || isCapContractTransferWhat(t.what) {
 		if t.what == "moved by cap.Move" || strings.HasPrefix(t.what, "passed to owned parameter ") || isCapContractTransferWhat(t.what) {
 			if vr, name, kindStr := st.identifyBorrow(g, t); vr != nil {
 				msg := fmt.Sprintf("stack-scoped borrow '%s' (%s) cannot cross goroutine boundary: cannot be %s", name, kindStr, t.what)
@@ -965,18 +965,6 @@ func (st *state) identifyCapturedBorrowsSpawn(g *graph, sp spawnSite) []captured
 	}
 	targetLine := st.pass.Fset.Position(sp.ins.Pos()).Line
 
-	// 1. Try SSA resolution: if sp.fn resolves to MakeClosure
-	if mc := resolveClosureVal(sp.fn, 0); mc != nil {
-		if fn, ok := mc.Fn.(*ssa.Function); ok && fn != nil {
-			if fl, ok := fn.Syntax().(*ast.FuncLit); ok {
-				if borrows := st.findBorrowsInLitInSyntax(fl, syntax, nil); len(borrows) > 0 {
-					return borrows
-				}
-			}
-		}
-	}
-
-	// 2. Try AST walk at targetLine
 	var foundBorrows []capturedBorrow
 	seen := map[*types.Var]bool{}
 	addBorrows := func(borrows []capturedBorrow) {
@@ -987,6 +975,21 @@ func (st *state) identifyCapturedBorrowsSpawn(g *graph, sp spawnSite) []captured
 			}
 		}
 	}
+
+	// 1. Try SSA resolution: every closure sp.fn may be. The goroutine runs whichever it is, so what
+	// any of them borrows crosses; taking the first one found left the others' borrows out.
+	for _, mc := range closureCandidates(sp.fn) {
+		if fn, ok := mc.Fn.(*ssa.Function); ok && fn != nil {
+			if fl, ok := fn.Syntax().(*ast.FuncLit); ok {
+				addBorrows(st.findBorrowsInLitInSyntax(fl, syntax, nil))
+			}
+		}
+	}
+	if len(foundBorrows) > 0 {
+		return foundBorrows
+	}
+
+	// 2. Try AST walk at targetLine
 
 	ast.Inspect(syntax, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -1004,10 +1007,10 @@ func (st *state) identifyCapturedBorrowsSpawn(g *graph, sp spawnSite) []captured
 			// Case 2b: Variable-bound closure (go fn())
 			if id, ok := unparen(node.Call.Fun).(*ast.Ident); ok {
 				if v, ok := st.pass.TypesInfo.ObjectOf(id).(*types.Var); ok {
+					// Every closure the variable may hold: the goroutine runs whichever it holds then.
 					for _, fl := range st.closureBindings(syntax)[v] {
 						if borrows := st.findBorrowsInLitInSyntax(fl, syntax, nil); len(borrows) > 0 {
 							addBorrows(borrows)
-							break
 						}
 					}
 				}

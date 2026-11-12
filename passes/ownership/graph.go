@@ -518,6 +518,41 @@ func resolveClosureValSeen(v ssa.Value, seen map[ssa.Value]bool) *ssa.MakeClosur
 	return nil
 }
 
+// closureCandidates lists every closure v may be: resolveClosureVal names one of them (the first
+// edge of a phi that leads to a closure, the last store to a variable's cell), which is enough to
+// ask what kind of value v is and not enough where the answer must hold for whichever closure runs.
+func closureCandidates(v ssa.Value) []*ssa.MakeClosure {
+	var out []*ssa.MakeClosure
+	seen := map[ssa.Value]bool{}
+	var walk func(v ssa.Value)
+	walk = func(v ssa.Value) {
+		if v == nil || seen[v] {
+			return
+		}
+		seen[v] = true
+		switch val := v.(type) {
+		case *ssa.MakeClosure:
+			out = append(out, val)
+		case *ssa.ChangeType:
+			walk(val.X)
+		case *ssa.UnOp:
+			if alloc, ok := val.X.(*ssa.Alloc); ok && val.Op == token.MUL && alloc.Referrers() != nil {
+				for _, ref := range *alloc.Referrers() {
+					if store, ok := ref.(*ssa.Store); ok && store.Addr == alloc {
+						walk(store.Val)
+					}
+				}
+			}
+		case *ssa.Phi:
+			for _, edge := range val.Edges {
+				walk(edge)
+			}
+		}
+	}
+	walk(v)
+	return out
+}
+
 // closureRetains records what a closure's body retains of its captures (its summary's freeLeaks) as
 // escapes at the closure's creation, unless every use of the closure is one whose call site already
 // accounts for the body: a static call or defer of the closure itself (call applies freeLeaks there),

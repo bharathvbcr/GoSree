@@ -942,11 +942,11 @@ fn canonical_tuples<F: FnMut() -> bool>(
             std::collections::BTreeMap::new();
         for &t in members {
             for &bb in &bind_blocks[t as usize] {
-                if !reach.contains_key(&bb) {
+                if let std::collections::btree_map::Entry::Vacant(e) = reach.entry(bb) {
                     if !check_cancel() {
                         return Err(SolveError::Cancelled);
                     }
-                    reach.insert(bb, reachable_blocks_from(fn_ir, bb));
+                    e.insert(reachable_blocks_from(fn_ir, bb));
                 }
             }
         }
