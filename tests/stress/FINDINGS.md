@@ -10,9 +10,9 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `3f0c738` on `rework/source`: seven commits that change a checker file, on top of `b2f480c` and a merge of `main` at `3322a22` (`a2801ef`), and the commit after it that carries this text |
-| Checker fingerprint | `0e10f1465156690c`: `bash tests/stress/fingerprint.sh` |
-| Run | 2026-11-12 afternoon, at `3f0c738`, with nothing else of this run alongside: `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo, 17 packages with tests, all `ok`. The markers were not edited and `TestStress` holds, so the ledger below stands as counted at `dcbc28b`. Not run at this commit: the tests with cgo and the Rust suite; no Rust or cgo file changed. Before that, 2026-11-12 morning, at `dcbc28b`, load average 50-65: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; `passes/ownership` takes about twelve minutes at that load). The ledger below was counted at that commit by `go test ./tests/stress -run '^(TestStress|TestWitnesses)$' -v` without cgo (58 of 58 witnesses convicted). The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
+| Git HEAD | `1b5b79a` on `rework/source`: `main` at `2ef069c` merged into the branch at `a11ce98`, and the commit after the merge that carries this text. The branch at `a11ce98` is `3f0c738` (seven commits that change a checker file, on top of `b2f480c` and a merge of `main` at `3322a22`, `a2801ef`) and six commits after it that change no checker file. `2ef069c` changes `lockset.go`, comments in `graph.go` and two test files |
+| Checker fingerprint | `84db323e0c9300ae`: `bash tests/stress/fingerprint.sh`. It was `0e10f1465156690c` at `3f0c738` and up to `a11ce98` |
+| Run | 2026-11-12 evening, at `1b5b79a`, load average 100 to 230 from other work on the machine: `go vet ./...` and `go test ./... -count=1 -timeout 90m` without cgo, 17 packages with tests, all `ok` (`passes/ownership` took 23 minutes at that load). The merge had no conflict and no marker was edited, so the ledger below stands as counted at `dcbc28b`. Not run at this commit: the tests with cgo and the Rust suite; neither side of the merge changed a Rust or cgo file. Before that, 2026-11-12 afternoon, at `3f0c738`, with nothing else of this run alongside: `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo, 17 packages with tests, all `ok`. The markers were not edited and `TestStress` holds, so the ledger below stands as counted at `dcbc28b`. Not run at this commit: the tests with cgo and the Rust suite; no Rust or cgo file changed. Before that, 2026-11-12 morning, at `dcbc28b`, load average 50-65: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; `passes/ownership` takes about twelve minutes at that load). The ledger below was counted at that commit by `go test ./tests/stress -run '^(TestStress|TestWitnesses)$' -v` without cgo (58 of 58 witnesses convicted). The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
 is expected and is the suite working: each failure names the marker to promote or the lock that
@@ -1166,6 +1166,18 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
       reworded (the same rows as above); with tests 87 gone, 13 new, 9 reworded; annotated 4
       gone; standard library with tests 19 gone, 10 new, 2 reworded, the 19 being those 14 and
       the 5 above. Race corpus the same at both.
+    - **Against `main` as it moved again.** `main` went on to `2ef069c` (a call of a variable
+      whose walk was cut short releases every lock when it is started as a goroutine or made in a
+      helper, too) and was merged into the branch a second time (`1b5b79a`, no conflict). On
+      `main`, `2ef069c` against `3322a22`: production (2,037 rows), the annotated copy (694) and
+      the race corpus are the same row for row; the two corpora with tests were not run there.
+      The merge against `3f0c738`: all five are the same row for row (production 1,958, annotated
+      690 with 426 of 578 transfers flagged and 343 hatched, the service with tests 7,645, the
+      standard library with tests 13,071, race corpus 229 of 234 and 37 of 129, 43 annotated).
+      So `2ef069c` moves no corpus row on either base: what it restores is held by its own test
+      (`TestWalkCutShortLosesWhatIsHeld`), not by code in these corpora. The first run of the
+      standard library on the merge was killed from outside at 158 s holding 20 GB, with the
+      machine short of memory; the figure is from a second run that ran to the end.
     - **The walk's complete answers against the oracle** (made at `ba9c7f4`; the rules added
       after it only turn "complete" into "may not be all"). Reference service: at every call
       through a value, with memory handed over or not, where the walk says it has every target
