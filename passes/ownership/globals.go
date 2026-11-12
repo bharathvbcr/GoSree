@@ -242,7 +242,7 @@ func (g *graph) formatsOnly(e event, region map[*node]bool) bool {
 		return ok && n != nil && region[n.find()]
 	}
 	for _, a := range call.Common().Args {
-		for _, op := range formatOperands(a) {
+		for _, op := range formatOperands(a, e.instr) {
 			if relevant(op) && typeCallsFormatMethod(op.Type(), map[types.Type]bool{}) {
 				return false
 			}
@@ -258,9 +258,13 @@ func calleeFullName(fn *ssa.Function) string {
 	return ""
 }
 
-// formatOperands lists the values a printing call receives for argument a: the elements of a
-// ...any slice built in place, a boxed value's own value, or a itself.
-func formatOperands(a ssa.Value) []ssa.Value {
+// formatOperands lists the values the printing call receives for argument a: the elements of a
+// ...any slice built in place, a boxed value's own value, or a itself. A slice is built in place
+// when its array is written only through the array's own element addresses and the slice goes
+// nowhere but to this call. A slice that is indexed, sliced again or handed to anything else can
+// be given an element this does not see, so it is returned as it is, for the caller to judge by
+// its type.
+func formatOperands(a ssa.Value, call ssa.Instruction) []ssa.Value {
 	if mi, ok := a.(*ssa.MakeInterface); ok {
 		return []ssa.Value{mi.X}
 	}
@@ -276,6 +280,14 @@ func formatOperands(a ssa.Value) []ssa.Value {
 	for _, r := range *alloc.Referrers() {
 		switch r := r.(type) {
 		case *ssa.Slice:
+			if r != sl || r.Referrers() == nil {
+				return []ssa.Value{a, ssa.Value(alloc)}
+			}
+			for _, u := range *r.Referrers() {
+				if u != call {
+					return []ssa.Value{a, ssa.Value(alloc)}
+				}
+			}
 		case *ssa.IndexAddr:
 			if r.Referrers() == nil {
 				continue
@@ -285,7 +297,7 @@ func formatOperands(a ssa.Value) []ssa.Value {
 				if !ok || st.Addr != ssa.Value(r) {
 					return []ssa.Value{a, ssa.Value(alloc)}
 				}
-				ops = append(ops, formatOperands(st.Val)...)
+				ops = append(ops, formatOperands(st.Val, call)...)
 			}
 		default:
 			return []ssa.Value{a, ssa.Value(alloc)}

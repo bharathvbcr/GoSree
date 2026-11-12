@@ -337,11 +337,15 @@ func read() { log.Fatalf("%v", g) }
 `, false},
 }
 
-// BREAK: the table is stored into the backing array of a []any through the slice variable, then
-// the slice is spread into a printing call. formatOperands only walks the stores made through the
-// array Alloc's own IndexAddr referrers, so a store made through the Slice value is not seen, the
-// operand g is dropped, and the call is judged formatsOnly although fmt runs g's String, which
-// keeps it. The correct answer is a finding (aa6d62f reports it). This test fails on b1c8585.
+// The table is stored into the backing array of a []any through the slice variable, then the slice
+// is spread into a printing call. formatOperands walked only the stores made through the array
+// Alloc's own IndexAddr referrers, so a store made through the Slice value was not seen, the
+// operand g was dropped, and the call was judged formatsOnly although fmt runs g's String, which
+// keeps it. The correct answer is a finding (aa6d62f reports it). This test failed on b1c8585 and
+// on 404bb00, which added it. formatOperands now takes a slice for built in place only when the
+// slice goes nowhere but to the printing call, so the last case, where the element arrives through
+// a second slice of the array, is reported as well. (An element stored by a helper the slice is
+// handed to is still missed, for another reason: see TestAdv2DirectStoreToOtherGlobalPreExisting.)
 func TestAdv2SliceStoreThenSpreadBreak(t *testing.T) {
 	named := `
 type N map[string]int
@@ -354,6 +358,9 @@ func read() { s := []any{1, 2}; s[0] = g; fmt.Println(s...) }
 `,
 		"store through helper, array literal": named + `
 func read() { var a [2]any; s := a[:]; s[1] = g; fmt.Println(s...) }
+`,
+		"stored through a second slice of the array": named + `
+func read() { var a [2]any; w := a[:1]; w[0] = g; fmt.Println(a[:]...) }
 `,
 	}
 	for name, src := range cases {
