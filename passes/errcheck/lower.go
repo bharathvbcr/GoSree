@@ -813,13 +813,20 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 				} else {
 					if fv, ok := x.Addr.(*ssa.FreeVar); ok {
 						// Reassigning a captured variable replaces the resource that resourceSlot
-						// tracks: the new value starts read-only (a nil-source assign resets the
-						// written flag and touches no state a load's own slot carries).
+						// tracks, so the FreeVar slot takes the stored value's written state. Only
+						// loads through the FreeVar read this slot (via resourceSlot), so what a
+						// copy-assign also carries (nilness, error-variable state) is never observed
+						// here. An error-typed value is not a closable resource and its copy-assign
+						// would move its error-variable state, so it resets the flag instead.
+						src := gusseterr.NoneU32
+						if slotFlagsForType(x.Val.Type())&gusseterr.SlotIsError == 0 {
+							src = fl.resourceSlot(x.Val)
+						}
 						ops = append(ops, gusseterr.OpIR{
 							Kind:    gusseterr.OpAssignSlot,
 							SiteID:  0,
 							SlotA:   fl.slot(fv),
-							SlotB:   gusseterr.NoneU32,
+							SlotB:   src,
 							NilHint: gusseterr.AssignNilMayNil,
 						})
 					}
