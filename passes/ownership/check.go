@@ -67,6 +67,14 @@ func (st *state) checkTransfer(g *graph, t transfer) {
 			}
 			switch e.kind {
 			case evForeign:
+				// What the transferring call itself hands back (LoadOrStore returns the value
+				// now in the map) is joined to what it was handed, and is not known to be fresh.
+				// It did not exist before the call, so it does not say who held the value when
+				// it was handed over, unless the call can run again: the value may then be what
+				// an earlier round handed back.
+				if e.instr != nil && e.instr == t.instr && !after(e.instr) {
+					continue
+				}
 				foreign = append(foreign, e)
 			case evEscape:
 				// An escape after the move is itself a use after the move; SAFE003 reports it.
