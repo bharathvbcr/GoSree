@@ -32,6 +32,8 @@ const (
 	askField
 	// askStored: as askValue, for what may be stored at an address.
 	askStored
+	// askElem: as askValue, for the elements of an array value.
+	askElem
 )
 
 type ask struct {
@@ -89,7 +91,8 @@ func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafV
 		return nil, true
 	}
 	bodyFn := canonicalBodyFn(fn)
-	if a.kind == askValue || a.kind == askBase {
+	if a.kind == askValue || a.kind == askBase || a.kind == askElem {
+		// An array value is asked for its elements and for nothing else, so one set serves.
 		key := valVisitKey{fn: bodyFn, v: v}
 		if t.seen[key] {
 			return nil, false
@@ -162,8 +165,9 @@ func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafV
 		switch a.kind {
 		case askValue, askBase:
 			return t.arguments(bodyFn, x, a, depth)
-		case askField:
-			// With no call site that says anything, the field is looked up by its type below.
+		case askField, askElem:
+			// With no call site that says anything, a field is looked up by its type below, and
+			// the elements of an array are not known.
 			if out, incomplete := t.arguments(bodyFn, x, a, depth); len(out) > 0 {
 				return out, incomplete
 			}
@@ -174,6 +178,8 @@ func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafV
 			return t.follow(bodyFn, x.X, ask{kind: askStored}, depth+1)
 		case x.Op == token.MUL && a.kind == askField:
 			return t.fieldBehind(bodyFn, x.X, a.field, depth)
+		case x.Op == token.MUL && a.kind == askElem:
+			return t.elemsBehind(bodyFn, x.X, depth)
 		case x.Op == token.MUL && a.kind == askBase:
 			if alloc, ok := x.X.(*ssa.Alloc); ok && alloc.Referrers() != nil {
 				return t.storedInCell(alloc, bodyFn, a, depth)
@@ -196,6 +202,11 @@ func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafV
 		if a.kind == askStored {
 			return t.elements(fn, x, depth)
 		}
+	case *ssa.Index:
+		// An element read out of an array value: a range over an array, an array a call returned.
+		if a.kind == askValue {
+			return t.follow(bodyFn, x.X, ask{kind: askElem}, depth+1)
+		}
 	case *ssa.Lookup:
 		if a.kind == askValue {
 			return t.looked(bodyFn, x.X, depth+1)
@@ -209,13 +220,13 @@ func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafV
 				return t.received(bodyFn, recv.X, depth+1)
 			}
 		}
-		if a.kind == askValue || a.kind == askBase {
+		if a.kind == askValue || a.kind == askBase || a.kind == askElem {
 			if callIns, ok := x.Tuple.(*ssa.Call); ok {
 				return t.returned(bodyFn, callIns, x.Index, a, depth+1)
 			}
 		}
 	case *ssa.Call:
-		if a.kind == askValue || a.kind == askBase {
+		if a.kind == askValue || a.kind == askBase || a.kind == askElem {
 			return t.returned(bodyFn, x, 0, a, depth+1)
 		}
 	}
@@ -527,39 +538,63 @@ func (t *trace) fieldByType(structVal ssa.Value, field int, depth int) ([]leafVa
 	return nil, true
 }
 
-// elements walks the stores to the elements of a local array, directly and through slices of it.
-// Which element is read is not followed, so the answer may never be all.
+// elements walks what an element of an array may hold, for an element reached by its address: the
+// array's own, or a slice's of it.
 func (t *trace) elements(fn *ssa.Function, ia *ssa.IndexAddr, depth int) ([]leafValue, bool) {
 	base := ia.X
 	if sl, ok := base.(*ssa.Slice); ok {
 		base = sl.X
 	}
-	baseAlloc, ok := base.(*ssa.Alloc)
-	if !ok || baseAlloc.Referrers() == nil {
-		return nil, true
-	}
+	return t.elemsBehind(fn, base, depth)
+}
+
+// elemsBehind walks what the elements of the local array a pointer points to may hold. The array
+// is read as any local memory is (usesOfCell), through every name it has: its own, a closure's
+// that captures it, a parameter's of a function it is passed to. What may be in an element is
+// what is stored through an element's address, taken from any of those names or from a slice of
+// the array, and the elements of every array stored to it whole. An array built as a value is
+// stored whole: the literal is built in memory of its own first.
+//
+// Which element is read is not followed, and a slice of the array may be written through where
+// that is not read, so the answer may never be all.
+func (t *trace) elemsBehind(fn *ssa.Function, ptr ssa.Value, depth int) ([]leafValue, bool) {
+	fresh := &trace{q: t.q, seen: map[valVisitKey]bool{}}
+	bases, _ := fresh.follow(fn, ptr, ask{kind: askBase}, depth+1)
 	var out []leafValue
-	stores := func(ia *ssa.IndexAddr) {
-		if ia.Referrers() == nil {
-			return
+	for _, b := range bases {
+		alloc, ok := b.v.(*ssa.Alloc)
+		if !ok || alloc.Referrers() == nil {
+			continue
 		}
-		for _, r2 := range *ia.Referrers() {
-			if stIns, ok := r2.(*ssa.Store); ok && stIns.Addr == ia {
-				sub, _ := t.follow(fn, stIns.Val, ask{kind: askValue}, depth+1)
-				out = append(out, sub...)
+		walk := func(stIns *ssa.Store, a ask) {
+			pFn := stIns.Parent()
+			if pFn == nil {
+				pFn = b.fn
+			}
+			sub, _ := t.follow(pFn, stIns.Val, a, depth+1)
+			out = append(out, sub...)
+		}
+		element := func(ia *ssa.IndexAddr) {
+			for _, stIns := range usesOfAddress(ia).stores {
+				walk(stIns, ask{kind: askValue})
 			}
 		}
-	}
-	for _, r := range *baseAlloc.Referrers() {
-		if ia, ok := r.(*ssa.IndexAddr); ok {
-			stores(ia)
+		uses := usesOfCell(alloc)
+		for _, ia := range uses.elems {
+			element(ia)
 		}
-		if sl, ok := r.(*ssa.Slice); ok {
-			for _, sr := range *sl.Referrers() {
-				if ia, ok := sr.(*ssa.IndexAddr); ok {
-					stores(ia)
+		for _, sl := range uses.slices {
+			if sl.Referrers() == nil {
+				continue
+			}
+			for _, ref := range *sl.Referrers() {
+				if ia, ok := ref.(*ssa.IndexAddr); ok {
+					element(ia)
 				}
 			}
+		}
+		for _, stIns := range uses.stores {
+			walk(stIns, ask{kind: askElem})
 		}
 	}
 	return out, true

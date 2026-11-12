@@ -140,7 +140,7 @@ var droppedWalkAnswers = map[string]struct {
 	why string
 }{
 	"fieldBehind":              {1, "the branch reads the stores to a field anywhere in the package and answers incomplete whatever each store's walk says"},
-	"elements":                 {1, "it reads the stores to an array's elements and answers incomplete whatever each store's walk says (one place now; it was written out twice, for the array and for a slice of it)"},
+	"elemsBehind":              {2, "it reads the stores to an array's elements, through every name of the array, and answers incomplete whatever the walk of the pointer or of a store says: which element is read is not followed"},
 	"fieldByType":              {1, "it reads the stores to a field anywhere in the package and answers incomplete whatever each store's walk says"},
 	"looked":                   {1, "a map lookup always answers incomplete: what the map holds is not all in sight"},
 	"fieldOfBase":              {1, "the branch reads the stores to a field anywhere in the package for a struct whose address has gone out of sight, and has already answered incomplete for that reason"},
