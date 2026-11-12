@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"maps"
 	"slices"
 	"strings"
 
@@ -569,6 +570,10 @@ func selectCaseBlock(sel *ssa.Select, stateIdx int) *ssa.BasicBlock {
 type callTarget struct {
 	fn *ssa.Function
 	mc *ssa.MakeClosure
+	// entered: for a target read out of a variable, the calls by which the variable's address
+	// reached each function it was passed to (cellUses.entered). A target stored there was made
+	// there, and runs on that function's values (lockset.go, valuesHere).
+	entered map[*ssa.Function][]*ssa.Call
 }
 
 // cellUses is how a piece of local memory is used: a local variable that lives in memory, a
@@ -596,6 +601,9 @@ type cellUses struct {
 	// that made it, to a function that has no body in sight or is not known, or it has more
 	// names than cellViewLimit. Something that is not in stores may then write the memory.
 	open bool
+	// entered are the calls by which an address of the memory reached each function it was
+	// passed to. A store such a function makes is made in a call that one of them made.
+	entered map[*ssa.Function][]*ssa.Call
 }
 
 // cellViewLimit is how many names of one piece of memory usesOfAddress reads. Past it the memory
@@ -627,6 +635,7 @@ func usesOfAddress(addr ssa.Value) cellUses {
 		w.holding[alloc] = true
 	}
 	w.readName(addr, addr.Referrers())
+	w.u.entered = w.entered
 	return w.u
 }
 
@@ -878,6 +887,9 @@ func callTargets(v ssa.Value) (targets []callTarget, rest []ssa.Value) {
 			rest = append(rest, v)
 		}
 	}
+	// entered is what the variables on the way to the value being walked say of the calls
+	// their addresses went in by.
+	var entered map[*ssa.Function][]*ssa.Call
 	var walk func(v ssa.Value)
 	walk = func(v ssa.Value) {
 		if v == nil || seen[v] {
@@ -886,14 +898,14 @@ func callTargets(v ssa.Value) (targets []callTarget, rest []ssa.Value) {
 		seen[v] = true
 		switch val := v.(type) {
 		case *ssa.Function:
-			targets = append(targets, callTarget{fn: val})
+			targets = append(targets, callTarget{fn: val, entered: entered})
 		case *ssa.MakeClosure:
 			fn, ok := val.Fn.(*ssa.Function)
 			if !ok {
 				unresolved(v)
 				return
 			}
-			targets = append(targets, callTarget{fn: fn, mc: val})
+			targets = append(targets, callTarget{fn: fn, mc: val, entered: entered})
 		case *ssa.ChangeType:
 			walk(val.X)
 		case *ssa.Phi:
@@ -913,9 +925,17 @@ func callTargets(v ssa.Value) (targets []callTarget, rest []ssa.Value) {
 			if uses.open || len(uses.stores) == 0 {
 				unresolved(v)
 			}
+			outer := entered
+			if len(uses.entered) > 0 {
+				entered = maps.Clone(uses.entered)
+				for fn, calls := range outer {
+					entered[fn] = append(slices.Clone(calls), entered[fn]...)
+				}
+			}
 			for _, st := range uses.stores {
 				walk(st.Val)
 			}
+			entered = outer
 		default:
 			unresolved(v)
 		}

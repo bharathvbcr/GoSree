@@ -359,6 +359,8 @@ type lockTarget struct {
 	fn   *ssa.Function
 	mc   *ssa.MakeClosure // the closure, for what it captures; nil for a function or a method value
 	args []ssa.Value
+	// entered: callTarget.entered, for a target that was read out of a variable.
+	entered map[*ssa.Function][]*ssa.Call
 }
 
 // lockTargetOp returns the mutex operation a target is and the mutex it is on.
@@ -1207,9 +1209,9 @@ func lockCallTargetsAll(cc *ssa.CallCommon) ([]lockTarget, bool) {
 	}
 	targets := make([]lockTarget, 0, len(found))
 	for _, f := range found {
-		t := lockTarget{fn: f.fn, mc: f.mc, args: cc.Args}
+		t := lockTarget{fn: f.fn, mc: f.mc, args: cc.Args, entered: f.entered}
 		if method, recv := methodValue(f); method != nil {
-			t = lockTarget{fn: method, args: append([]ssa.Value{recv}, cc.Args...)}
+			t = lockTarget{fn: method, args: append([]ssa.Value{recv}, cc.Args...), entered: f.entered}
 		}
 		if o := t.fn.Origin(); o != nil {
 			t.fn = o
@@ -1281,6 +1283,26 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 			}
 		}
 	}
+	// What a target unlocks is named by the values it runs on: its arguments, its receiver, what
+	// it captured. A target read out of a variable may have been made in another function, and
+	// then those are that function's values. valuesHere brings them here. lost is set when one
+	// could not be brought: the target then unlocks something that cannot be named, and nothing
+	// is known to be held after the call.
+	here := ins.Parent()
+	lost := false
+	releaseAt := func(t lockTarget, base ssa.Value, steps string, prefix bool) {
+		paths, gone := valuesHere(here, base, steps, t.entered)
+		lost = lost || gone
+		for _, p := range paths {
+			dropRelease(p, prefix)
+		}
+	}
+	// handedOver is killFor for a value a target runs on.
+	handedOver := func(t lockTarget, v ssa.Value) {
+		for _, u := range argValues(v) {
+			releaseAt(t, u, "", true)
+		}
+	}
 	// held is what every target returns holding, translated through what the target runs on, or
 	// for a closure through its bindings (as translate does for entry locks).
 	var held lockset
@@ -1290,25 +1312,25 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 		switch {
 		case k != 0:
 			// A mutex method bound to its mutex.
-			if p, ok := pathOf(recv); ok {
+			if k == opUnlock {
+				releaseAt(t, recv, "", false)
+			} else if p, ok := pathOf(recv); ok {
 				switch k {
 				case opLock:
 					got[p] = lockWrite
 				case opRLock:
 					got[p] = lockRead
-				case opUnlock:
-					delete(s, p)
 				}
 			}
 		case t.fn.Pkg != st.ssa.Pkg:
 			// A function of another package: anything it receives or captures may be unlocked,
 			// and it takes what its summary says.
 			for _, a := range t.args {
-				killFor(s, a)
+				handedOver(t, a)
 			}
 			if t.mc != nil {
 				for _, b := range t.mc.Bindings {
-					killFor(s, b)
+					handedOver(t, b)
 				}
 			}
 			for _, a := range st.summary(t.fn).acquires {
@@ -1336,9 +1358,7 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 				default:
 					continue
 				}
-				if p, ok := pathOf(base); ok {
-					dropRelease(guardPath{p.root, p.steps + r.steps}, r.prefix)
-				}
+				releaseAt(t, base, r.steps, r.prefix)
 			}
 			for _, a := range gs.acquires[t.fn] {
 				var base ssa.Value
@@ -1368,6 +1388,10 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 			}
 		}
 	}
+	if lost {
+		clear(s)
+		return
+	}
 	if !all {
 		// Something this did not find may run as well: it may unlock what it is handed, as a
 		// call that is not known may, and nothing the others take can be counted on.
@@ -1382,6 +1406,104 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 	for k, m := range held {
 		s[k] = max(s[k], m)
 	}
+}
+
+// valuesHere gives the guard paths, in the function here, of what is steps on from a value v that
+// a call's target runs on, and whether v is lost: a value of another function that could not be
+// brought here.
+//
+// A target made in here runs on here's values and v's own path is the answer. A target read out
+// of a variable may have been stored by another function, and v is then a value of that
+// function. It is brought here by its root:
+//
+//   - a parameter of a function the variable's address was passed to is the argument at each
+//     call the address went in by (entered), which is a value of the function that makes the
+//     call, brought here in turn;
+//   - a variable of that function that holds one of its parameters and nothing else (the cell a
+//     closure made there captured) is that parameter;
+//   - a captured variable of a closure is what the closure was made with, in the function that
+//     made it.
+//
+// Anything else is lost. A value of here with no path is not: that is as it was, and such a
+// value is left out by whoever asks.
+//
+// Each path is brought once (seen). A helper that calls itself with the variable's address is
+// entered by its own call too, where its parameter is its own parameter again: that adds nothing
+// and is where the walk ends.
+func valuesHere(here *ssa.Function, v ssa.Value, steps string, entered map[*ssa.Function][]*ssa.Call) (paths []guardPath, lost bool) {
+	p, ok := pathOf(v)
+	if !ok {
+		from := functionOf(v)
+		return nil, from != nil && from != here
+	}
+	return rootHere(here, guardPath{p.root, p.steps + steps}, entered, map[guardPath]bool{})
+}
+
+func rootHere(here *ssa.Function, p guardPath, entered map[*ssa.Function][]*ssa.Call, seen map[guardPath]bool) (paths []guardPath, lost bool) {
+	from := functionOf(p.root)
+	if from == nil || from == here {
+		return []guardPath{p}, false
+	}
+	if seen[p] {
+		return nil, false
+	}
+	seen[p] = true
+	bring := func(v ssa.Value, steps string) {
+		vp, ok := pathOf(v)
+		if !ok {
+			lost = true
+			return
+		}
+		sub, gone := rootHere(here, guardPath{vp.root, vp.steps + steps}, entered, seen)
+		paths = append(paths, sub...)
+		lost = lost || gone
+	}
+	switch root := p.root.(type) {
+	case *ssa.Parameter:
+		i := slices.Index(from.Params, root)
+		calls := entered[canonicalBodyFn(from)]
+		if i < 0 || len(calls) == 0 {
+			return nil, true
+		}
+		for _, call := range calls {
+			if i >= len(call.Call.Args) {
+				return nil, true
+			}
+			bring(call.Call.Args[i], p.steps)
+		}
+		return paths, lost
+	case *ssa.Alloc:
+		if i := singleStoredParam(from, root); i >= 0 && strings.HasPrefix(p.steps, "*") {
+			return rootHere(here, guardPath{from.Params[i], p.steps[1:]}, entered, seen)
+		}
+	case *ssa.FreeVar:
+		j := slices.Index(from.FreeVars, root)
+		made := false
+		if parent := from.Parent(); parent != nil && j >= 0 {
+			forEachInstr(parent, func(ins ssa.Instruction) {
+				if mc, ok := ins.(*ssa.MakeClosure); ok && mc.Fn == ssa.Value(from) && j < len(mc.Bindings) {
+					made = true
+					bring(mc.Bindings[j], p.steps)
+				}
+			})
+		}
+		return paths, lost || !made
+	}
+	return nil, true
+}
+
+// functionOf is the function a value belongs to, or nil for one that belongs to none (a package
+// variable, a function, a constant).
+func functionOf(v ssa.Value) *ssa.Function {
+	switch x := v.(type) {
+	case *ssa.Parameter:
+		return x.Parent()
+	case *ssa.FreeVar:
+		return x.Parent()
+	case ssa.Instruction:
+		return x.Parent()
+	}
+	return nil
 }
 
 // killFor drops every held guard inside the object v points to (or v itself, for &mu). It looks
