@@ -158,6 +158,13 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 // freeze the exemption exists for. A variable whose memory escapes this way can be written by
 // code gosree does not see, so it is not init-only and fails closed.
 func (st *state) markEscapedGlobals(fns []*ssa.Function, mutated map[*ssa.Global]bool) {
+	// The init-only exemption is consulted only where a call publishes through a container that
+	// freezes to imm (graph.call makes those transfers and check.go reads the exemption for them
+	// alone), so a package with no such call never reads what this finds, and building every
+	// function's alias graph here would be wasted.
+	if !st.hasFreezeSite(fns) {
+		return
+	}
 	scan := fns
 	if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil {
 		scan = append(append([]*ssa.Function(nil), fns...), pkgInit)
@@ -316,6 +323,25 @@ func typeCallsFormatMethod(t types.Type, seen map[types.Type]bool) bool {
 		for f := range u.Fields() {
 			if typeCallsFormatMethod(f.Type(), seen) {
 				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasFreezeSite reports whether any function calls, statically, a function whose cap contract
+// publishes into a container that freezes to imm.
+func (st *state) hasFreezeSite(fns []*ssa.Function) bool {
+	for _, fn := range fns {
+		for _, b := range fn.Blocks {
+			for _, ins := range b.Instrs {
+				call, ok := ins.(ssa.CallInstruction)
+				if !ok {
+					continue
+				}
+				if c, ok := capContractFor(call.Common().StaticCallee()); ok && c.freezesToImm && len(c.publishArgs) > 0 {
+					return true
+				}
 			}
 		}
 	}
