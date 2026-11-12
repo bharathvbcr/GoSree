@@ -10,9 +10,9 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `c6cf9a9` on `integrate/2026-11-11`, and the commit after it that carries this text and changes no checker file |
-| Checker fingerprint | `4caa5e67c575d63d`: `bash tests/stress/fingerprint.sh` |
-| Run | 2026-11-11 evening, load average 50-80: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; under that load `passes/ownership` takes 7 to 8 minutes and once ran past the default 10-minute timeout), and the ledger below. The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
+| Git HEAD | `b5e77e1` on `integrate/2026-11-11`, and the commit after it that carries this text and changes no checker file |
+| Checker fingerprint | `ea4d532b03a3c903`: `bash tests/stress/fingerprint.sh` |
+| Run | 2026-11-11 night, load average 10-20: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; `passes/ownership` takes about four and a half minutes at that load), and the ledger below. The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
 is expected and is the suite working: each failure names the marker to promote or the lock that
@@ -709,6 +709,56 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
   - The 43 "take one part out and see a test fail" checks of the earlier fixes were run again at
     `9823ff0` (the branches and the first two fixes merged; before the boxed-value change and
     what followed): each of the 43 still makes a test fail.
+  - After the merge, on the same day, four more changes went in on top of it (`d754bb7` to
+    `b5e77e1`). Where one of them changes a finding in a corpus it says which.
+    1. Whether a trace was cut at a limit is no longer a flag on the pass that a check clears,
+       sets and reads. A check asks for a question, the traces are methods of the question, and
+       a third test that reads the source (`TestEveryQuestionIsRead`) fails for a check that
+       asks and does not read the answer, unless it is listed with a reason. No finding differs,
+       also with the limits turned down to 6 values and 4 steps, where the `-incomplete`
+       findings go from 1, 169 and 96 to 121, 659 and 848.
+    2. A function that returns what one of several callables or receivers handed to it returns
+       was taken to return a fresh value as soon as one of them did, so `pick(c, &pool, shared)`
+       was sent on as owned. Fresh now needs every returned value to be fresh
+       (`fresh_forward_test.go`: 11 cases that were not reported). No corpus finding differs.
+    3. A publishing contract at a call stood for everything the callee does with the argument,
+       so a helper that publishes its argument and also stores it, or hands it to a second
+       callable, was a publish and nothing more; the same statements written out were reported.
+       The publish is still taken from the contract and what the callee does besides is an
+       escape as well (`publish_and_more_test.go`: 15 cases that were not reported). Standard
+       library with tests: 14 findings more and none fewer, all SAFE004 at calls of helpers
+       that publish an argument and do something else with it: `(*http.Server).Serve` and the
+       four functions that call it (5), `gzipPoolPut` in `net/http` and `http2` (4),
+       `httptrace.WithClientTrace` (2), `(*reflect.rtype).ptrTo` (3). At each of those call
+       sites the publish was already reported. They were read, not judged as defects.
+    4. A call of a variable that holds one of several functions was resolved to one of them:
+       the first closure found, with a function that captures nothing skipped. The lock check
+       took "locks, or does nothing" for locking, in either order, and the shared-load check
+       and the handler write check followed "reads, or writes" into the reading closure. All
+       three now ask for every function the value may be, and for what else it may be
+       (`callTargets`; `resolveClosureVal` is gone). The lock check takes each function's part
+       on its own: what any one releases is released, and a lock is held afterwards only if
+       every one takes it and nothing is left unresolved. A method used as a value
+       (`f := s.unlockIt`) is looked into as the method it is, which it was not before
+       (`lock_targets_test.go`, `one_of_several_test.go`, `handler_targets_test.go`: 19 cases
+       that were not reported and 2 that were reported wrongly). Reference service: one finding
+       more in production code and with tests, 2,037 and 7,722: SAFE008 at
+       `internal/api/internal_ops.go:134`, a call of "a function read from the handler, or a
+       method of the handler". It is the shape already reported at
+       `internal/api/paper.go:1207`, where the second possibility is a plain function; here it
+       is a method value, and the old code followed that one alone. Nothing else differs: the annotated run (694), the standard library
+       with tests (13,087) and the fixtures (677), and the same one row with the limits turned
+       down to 6 and 4. The test that reads the source for dropped walk answers now covers
+       `callTargets` too, and a second one lists the ten functions that may ask for the
+       functions without what else the value may be
+       (`TestCallersThatAskForAnyTargetAreListed`); a dropped answer planted in two places and
+       a new caller of each helper passed before and fail now.
+       `TestSharedLoadCalleeThroughManyConversions` had its expectation changed: a writer
+       converted between two function types 16 times is now found and its write reported,
+       where the test used to expect "could not be followed"; a case where the function comes
+       in as a parameter still expects that.
+    Each change has tests that fail without it, and each of its parts was taken out in turn to
+    see a test fail.
   - The two tests that read the source (`walk_answers_test.go`) were themselves tried against
     seven planted defects: a sub-walk's answer dropped, an answer passed straight to another
     call, a counted loop, a size limit written as a number, a `for range` with a count, a new
@@ -762,6 +812,43 @@ the suite: `lk_holdsvalue` (a `//gosree:holds` method called through a method va
 programs are in this state: the runtime convicts them and the checker reports them.
 
 ## Not covered
+
+- Found on 2026-11-11 after the merge and not fixed:
+  - A read of an argument after it is published, inside a helper. Written out, any use after
+    the publish is SAFE003. A helper's summary says what it keeps, not in which order it does
+    things, so `pubAndCall(p.Store, readOnly, x)` is a publish and nothing more
+    (`TestReadAfterPublishInsideAHelperIsAKnownMiss`).
+  - A write through memory loaded from a shared container, made in a closure that captures the
+    loaded value, is not reported, also when the closure is called on the next line
+    (`TestWriteOfLoadedMemoryThroughACaptureIsAKnownMiss`).
+  - A publish through a method value of a method of this package (`f := k.Store; f(x)`) is not
+    seen as a publish, where the direct call `k.Store(x)` is. Section 2.C covers the family;
+    this shape was seen with one probe and has no test.
+  - The handler write check has the same gap as the shared-load check above: a handler's
+    closure that captures the shared value and writes it is not followed
+    (`TestHandlerWriteThroughACaptureIsAKnownMiss`).
+  - The goroutine check transfers one of the closures a started variable may hold. Both
+    closures' captures are reported all the same, because the values a variable may hold share
+    one class (`TestGoOfVariableThatMayBeTwoClosures`); that is the only thing it leans on.
+  - `callTargets` takes the stores to a variable's cell together, whatever their order, so a
+    variable that held a locking closure and was reassigned before the call counts as "one of
+    two". That errs toward reporting.
+  - A `//gosree:holds` helper that unlocks its mutex inside a closure is not reported: the
+    closure sees the receiver through the cell it captures and the helper's mutexes are kept
+    as paths from its parameter (`TestLockHoldsHelperUnlockingInAClosureIsAKnownMiss`).
+  - Whether a package takes any lock that other packages could be told about (`hasLockOps`)
+    now counts a lock taken by any function a call may run. It decides only whether those
+    facts are worked out, and has no test of its own.
+  - The handler write check words a function read from the handler and called as "is passed to
+    a dynamic function call". The finding is meant; the wording is that of an argument.
+  - The eleven walks that follow a value backwards are still separate functions that hand a
+    visited set to one another. They answer to one question type and to the tests that read
+    the source; they have not been folded into one walk.
+  - What is done besides a publish is judged by what a callee keeps. A receiver's method that
+    has no publishing answer counts as keeping the argument without being looked into, and a
+    method value used as the forwarded callable counts too; either can report a helper that is
+    harmless. No such report was seen in the corpora.
+  - The 14 new standard-library findings above were not triaged beyond reading the helpers.
 
 - cgo (`import "C"`) has no fixture: one would need a C toolchain to load.
 - amd64 and Linux: every run was on darwin/arm64. The torn-header witnesses depend on codegen.

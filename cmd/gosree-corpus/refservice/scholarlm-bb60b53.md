@@ -735,8 +735,16 @@ The main checkout's work and every branch of 2026-11-11 are on one line (see
 | with tests | 7,721 | 7,721, from a build with the function limit raised (below) |
 | annotated | 694; 578 transfers, 427 flagged, 344 hatched, 59.5% | the same five numbers |
 
-- No finding changed in any of the three runs: same package, position, rule and message. That
-  includes the one checker change that came with the merge (a value boxed in an interface is
+- Later the same day (`b5e77e1`) the counts became 2,037 in production code and 7,722 with tests,
+  the annotated run unchanged at 694. The one finding more is SAFE008 at
+  `internal/api/internal_ops.go:134`: the handler calls `deleteAuth`, which is `h.authDeleter`
+  or, when that is nil, the method `h.deleteUserFromFirebase`. A function read from the handler
+  may be a closure over it; the checker used to follow the method alone because it was the one
+  closure it found. `internal/api/paper.go:1207` is the same shape with a plain function as the
+  second possibility and was already reported. Every other row is the same in all three runs.
+- At the merge itself no finding changed in any of the three runs: same package, position, rule
+  and message. That includes the one checker change that came with the merge (a value boxed
+  in an interface is
   tracked when the value is), which adds 38 findings on the standard library's tests and none
   here.
 - The verdict of roadmap item 4 is unchanged: 59.5% hatched against the 20% criterion.
