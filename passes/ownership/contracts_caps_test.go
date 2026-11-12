@@ -89,7 +89,7 @@ func TestContractIndexSettlesOnRotatedParameters(t *testing.T) {
 // TestPoolGetterThroughManyConversions: two functions return what a sync.Pool hands out, through
 // 14 conversions, and one of them is called through a variable. What a pool hands out belongs to
 // the caller, so sending it on is fine. Seeing that the functions return it
-// (returnedExprIsContractFresh) used to stop 13 conversions in, and the send was reported.
+// (returnedValueFreshness) used to stop 13 conversions in, and the send was reported.
 func TestPoolGetterThroughManyConversions(t *testing.T) {
 	getter := func(name string, n int) string {
 		return "func " + name + "(p *sync.Pool) a1 {\n\treturn " + conv("p.Get()", n) + "\n}\n\n"

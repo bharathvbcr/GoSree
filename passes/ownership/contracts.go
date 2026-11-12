@@ -420,9 +420,12 @@ type contractIndex struct {
 	directPublish     map[*ssa.Function][]pubArgSpec
 	directSharedRet   map[*ssa.Function]string
 	directFreshRet    map[*ssa.Function]bool
-	directImports     map[string]*types.Package
-	localNamedTypes   []*types.Named
-	boxedTypes        []types.Type
+	// retFreshButForwards holds the functions whose every returned value is fresh or the result
+	// of one of their retForwards (retFreshness). A function in directFreshRet needs no entry.
+	retFreshButForwards map[*ssa.Function]bool
+	directImports       map[string]*types.Package
+	localNamedTypes     []*types.Named
+	boxedTypes          []types.Type
 
 	// structConv links the struct types this package converts between, values or pointers, by
 	// type key and in both directions (fieldStores).
@@ -469,8 +472,10 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 		directPublish:     map[*ssa.Function][]pubArgSpec{},
 		directSharedRet:   map[*ssa.Function]string{},
 		directFreshRet:    map[*ssa.Function]bool{},
-		directImports:     map[string]*types.Package{},
-		methodsNamed:      map[string][]*ssa.Function{},
+
+		retFreshButForwards: map[*ssa.Function]bool{},
+		directImports:       map[string]*types.Package{},
+		methodsNamed:        map[string][]*ssa.Function{},
 	}
 	st.contracts = ci
 	if st.pass != nil && st.pass.Pkg != nil {
@@ -636,6 +641,11 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 			}
 			cc := cIns.Common()
 			_, isRetCall := retCalls[cIns]
+			if isRetCall {
+				if rule, ok := retForwardOf(cc, bodyFn); ok {
+					addRetForward(bodyFn, rule)
+				}
+			}
 			if cc.IsInvoke() {
 				pRecv := paramFlowIndex(cc.Value, bodyFn)
 				if pRecv >= 0 {
@@ -649,9 +659,6 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 								argParam:    pArg,
 							})
 						}
-					}
-					if isRetCall {
-						addRetForward(bodyFn, retForwardRule{targetParam: pRecv, methodName: mName})
 					}
 				}
 				return
@@ -671,9 +678,6 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 									})
 								}
 							}
-							if isRetCall {
-								addRetForward(bodyFn, retForwardRule{targetParam: pRecv, methodName: mName})
-							}
 						}
 						return
 					}
@@ -689,9 +693,6 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 							argParam:    pArg,
 						})
 					}
-				}
-				if isRetCall {
-					addRetForward(bodyFn, retForwardRule{targetParam: pFn, methodName: ""})
 				}
 			}
 			if isRetCall {
@@ -797,9 +798,20 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 					}
 				}
 			})
-			if !ci.directFreshRet[bodyFn] && fnReturnsContractFresh(st, bodyFn) {
-				ci.directFreshRet[bodyFn] = true
-				changed = true
+			if !ci.directFreshRet[bodyFn] {
+				// Both sets only grow. A function is put in retFreshButForwards after its own
+				// forwards are recorded (above, in this round), and a caller leans on that entry
+				// only once it is there, so no caller is judged against a list still growing.
+				switch fnReturnFreshness(st, bodyFn) {
+				case retFresh:
+					ci.directFreshRet[bodyFn] = true
+					changed = true
+				case retFreshButForwards:
+					if !ci.retFreshButForwards[bodyFn] {
+						ci.retFreshButForwards[bodyFn] = true
+						changed = true
+					}
+				}
 			}
 		}
 	}
@@ -807,70 +819,149 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 	return ci
 }
 
-func fnReturnsContractFresh(st *state, bodyFn *ssa.Function) bool {
-	if bodyFn == nil || len(bodyFn.Blocks) == 0 {
+// retFreshness is how far a function is known to return a fresh value.
+type retFreshness uint8
+
+const (
+	retNotFresh retFreshness = iota
+	// retFreshButForwards: every value the function may return is fresh, provided the calls of, or
+	// on, its parameters that produce some of them return fresh values. Those calls are the
+	// function's retForwards, and whether they do is known only at a call of the function.
+	retFreshButForwards
+	retFresh
+)
+
+// retForwardOf is the rule for a call whose target is one of bodyFn's parameters: a method called
+// on it, a method value bound to it, or the parameter called as a function.
+func retForwardOf(cc *ssa.CallCommon, bodyFn *ssa.Function) (retForwardRule, bool) {
+	if cc.IsInvoke() {
+		if pRecv := paramFlowIndex(cc.Value, bodyFn); pRecv >= 0 {
+			return retForwardRule{targetParam: pRecv, methodName: cc.Method.Name()}, true
+		}
+		return retForwardRule{}, false
+	}
+	if mc, ok := cc.Value.(*ssa.MakeClosure); ok {
+		if mcFn, ok := mc.Fn.(*ssa.Function); ok && isBoundMethodWrapper(mcFn) && len(mc.Bindings) == 1 {
+			if mObj, ok := mcFn.Object().(*types.Func); ok && mObj.Signature().Recv() != nil && types.IsInterface(mObj.Signature().Recv().Type()) {
+				if pRecv := paramFlowIndex(mc.Bindings[0], bodyFn); pRecv >= 0 {
+					return retForwardRule{targetParam: pRecv, methodName: mObj.Name()}, true
+				}
+				return retForwardRule{}, false
+			}
+		}
+	}
+	if pFn := paramFlowIndex(cc.Value, bodyFn); pFn >= 0 {
+		return retForwardRule{targetParam: pFn, methodName: ""}, true
+	}
+	return retForwardRule{}, false
+}
+
+// forwardsLandOnParams reports whether cc, in bodyFn, calls a function whose result is fresh but
+// for its forwards, with each forwarded target one of bodyFn's own parameters. The question of
+// whether the result is fresh then moves to the callers of bodyFn, whose retForwards hold the
+// same rules against its parameters (the index adds them where it sees this call returned).
+func (ci *contractIndex) forwardsLandOnParams(cc *ssa.CallCommon, bodyFn *ssa.Function) bool {
+	if cc.IsInvoke() {
 		return false
 	}
+	callee, _ := directCallee(cc.Value)
+	if callee == nil {
+		return false
+	}
+	calleeBody := canonicalBodyFn(callee)
+	rules := ci.retForwards[calleeBody]
+	if !ci.retFreshButForwards[calleeBody] || len(rules) == 0 {
+		return false
+	}
+	for _, rf := range rules {
+		if rf.targetParam >= len(cc.Args) {
+			return false
+		}
+		outer := paramFlowIndex(cc.Args[rf.targetParam], bodyFn)
+		if outer < 0 || !slices.Contains(ci.retForwards[bodyFn], retForwardRule{targetParam: outer, methodName: rf.methodName}) {
+			return false
+		}
+	}
+	return true
+}
+
+// fnReturnFreshness is the least fresh of the values bodyFn returns.
+func fnReturnFreshness(st *state, bodyFn *ssa.Function) retFreshness {
+	if bodyFn == nil || len(bodyFn.Blocks) == 0 {
+		return retNotFresh
+	}
 	sawRet := false
-	allFresh := true
+	least := retFresh
 	forEachInstr(bodyFn, func(ins ssa.Instruction) {
 		ret, ok := ins.(*ssa.Return)
 		if !ok {
 			return
 		}
 		sawRet = true
-		if len(ret.Results) == 0 || !returnedExprIsContractFresh(st, bodyFn, ret.Results[0], 0, map[ssa.Value]bool{}) {
-			allFresh = false
+		if len(ret.Results) == 0 {
+			least = retNotFresh
+			return
 		}
+		least = min(least, returnedValueFreshness(st, bodyFn, ret.Results[0], map[ssa.Value]bool{}))
 	})
-	return sawRet && allFresh
+	if !sawRet {
+		return retNotFresh
+	}
+	return least
 }
 
-// returnedExprIsContractFresh visits each value once (seen), which is what ends it; it used to give
-// up 13 steps in as well, and a fresh value returned through more conversions was not fresh.
-func returnedExprIsContractFresh(st *state, bodyFn *ssa.Function, v ssa.Value, depth int, seen map[ssa.Value]bool) bool {
+// returnedValueFreshness visits each value once (seen), which is what ends it; it used to give up
+// 13 steps in as well, and a fresh value returned through more conversions was not fresh.
+func returnedValueFreshness(st *state, bodyFn *ssa.Function, v ssa.Value, seen map[ssa.Value]bool) retFreshness {
 	if v == nil || seen[v] {
-		return false
+		return retNotFresh
 	}
 	seen[v] = true
 	switch x := v.(type) {
 	case *ssa.Call:
 		cc := x.Common()
-		if paramFlowIndex(cc.Value, bodyFn) >= 0 {
-			return false
+		if rule, ok := retForwardOf(cc, bodyFn); ok {
+			if slices.Contains(st.contracts.retForwards[bodyFn], rule) {
+				return retFreshButForwards
+			}
+			return retNotFresh
 		}
 		if mc, ok := cc.Value.(*ssa.MakeClosure); ok {
 			if mcFn, ok := mc.Fn.(*ssa.Function); ok && isBoundMethodWrapper(mcFn) && len(mc.Bindings) == 1 && paramFlowIndex(mc.Bindings[0], bodyFn) >= 0 {
-				return false
+				return retNotFresh
 			}
 		}
-		rc, ok := st.ask().resolveCallContract(bodyFn, cc)
-		return ok && rc.freshResult
+		if rc, ok := st.ask().resolveCallContract(bodyFn, cc); ok && rc.freshResult {
+			return retFresh
+		}
+		if st.contracts.forwardsLandOnParams(cc, bodyFn) {
+			return retFreshButForwards
+		}
+		return retNotFresh
 	case *ssa.Extract:
 		if x.Index == 0 {
-			return returnedExprIsContractFresh(st, bodyFn, x.Tuple, depth+1, seen)
+			return returnedValueFreshness(st, bodyFn, x.Tuple, seen)
 		}
-		return false
+		return retNotFresh
 	case *ssa.MakeInterface:
-		return returnedExprIsContractFresh(st, bodyFn, x.X, depth+1, seen)
+		return returnedValueFreshness(st, bodyFn, x.X, seen)
 	case *ssa.ChangeInterface:
-		return returnedExprIsContractFresh(st, bodyFn, x.X, depth+1, seen)
+		return returnedValueFreshness(st, bodyFn, x.X, seen)
 	case *ssa.ChangeType:
-		return returnedExprIsContractFresh(st, bodyFn, x.X, depth+1, seen)
+		return returnedValueFreshness(st, bodyFn, x.X, seen)
 	case *ssa.TypeAssert:
-		return returnedExprIsContractFresh(st, bodyFn, x.X, depth+1, seen)
+		return returnedValueFreshness(st, bodyFn, x.X, seen)
 	case *ssa.Phi:
 		if len(x.Edges) == 0 {
-			return false
+			return retNotFresh
 		}
+		least := retFresh
 		for _, e := range x.Edges {
-			if !returnedExprIsContractFresh(st, bodyFn, e, depth+1, seen) {
-				return false
-			}
+			least = min(least, returnedValueFreshness(st, bodyFn, e, seen))
 		}
-		return true
+		return least
 	default:
-		return false
+		return retNotFresh
 	}
 }
 
@@ -2119,6 +2210,10 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 	}
 
 	var out candOutcome
+	// A result that comes from the function's forwards is fresh only if every value the function
+	// may return is fresh or a forward's result (retFreshButForwards), and every forward returns
+	// a fresh value at this call. A forward that has no answer here counts against it.
+	forwardsFresh := false
 	// Forwarded higher-order/interface parameter contracts evaluated against caller's actual arguments.
 	if len(callArgs) > 0 {
 		for _, cf := range st.contracts.callForwards[bodyFn] {
@@ -2154,12 +2249,14 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 				}
 			}
 		}
+		forwardsFresh = st.contracts.retFreshButForwards[bodyFn] && len(st.contracts.retForwards[bodyFn]) > 0
 		for _, rf := range st.contracts.retForwards[bodyFn] {
 			tIdx := rf.targetParam
 			if bound {
 				tIdx--
 			}
 			if tIdx < 0 || tIdx >= len(callArgs) {
+				forwardsFresh = false
 				continue
 			}
 			var inner resolvedCallContract
@@ -2172,6 +2269,7 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 				inner, hasInner = st.evalValueAsCallable(caller, callArgs[tIdx], nil, depth+1)
 			}
 			if !hasInner {
+				forwardsFresh = false
 				continue
 			}
 			if inner.sharedReadOnlyLoad {
@@ -2181,11 +2279,14 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 				}
 				out.matched = true
 			}
-			if inner.freshResult {
-				out.freshResult = true
-				out.matched = true
+			if !inner.freshResult {
+				forwardsFresh = false
 			}
 		}
+	}
+	if forwardsFresh {
+		out.freshResult = true
+		out.matched = true
 	}
 	for _, dp := range st.contracts.directPublish[bodyFn] {
 		idx := dp.argIdx

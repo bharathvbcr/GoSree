@@ -328,8 +328,8 @@ var unreadQuestions = map[string]struct {
 	n   int
 	why string
 }{
-	"buildContractIndex":          {1, "the index records what each call in a body was found to publish or load. The graph resolves that same call of that same function again (applyCallContract, checkSharedLoadWrites) and reports a cut there. That the two resolutions are cut together is by reading, not by a test: the index resolves while it is still being built"},
-	"returnedExprIsContractFresh": {1, "the cut is not read here, and it is not shown that it need not be: whether a function always returns a fresh value is decided from an answer that may have been cut"},
+	"buildContractIndex":     {1, "the index records what each call in a body was found to publish or load. The graph resolves that same call of that same function again (applyCallContract, checkSharedLoadWrites) and reports a cut there. That the two resolutions are cut together is by reading, not by a test: the index resolves while it is still being built"},
+	"returnedValueFreshness": {1, "a fresh result needs every callee to return one, so a cut answer is not a fresh one: a trace that stops at a limit is incomplete and mergeCandidateOutcomes withholds fresh, and a forwarded target with no answer, cut or not, counts against it in evalFunctionOutcome (TestForwardedResultIsFreshOnlyWhenEveryReturnIs, the cases with a target that is not known)"},
 }
 
 func TestEveryQuestionIsRead(t *testing.T) {
