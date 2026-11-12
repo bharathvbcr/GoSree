@@ -257,8 +257,9 @@ func (t *trace) bindings(bodyFn *ssa.Function, fv *ssa.FreeVar, a ask, depth int
 // arguments walks what each call of bodyFn in sight passes for its parameter p. With no call in
 // sight it answers nothing, and that this may not be all.
 //
-// At a call through a method value the argument is taken one place to the left for askValue and
-// askBase and as it stands for askField. That is how the separate walks had it.
+// The arguments of a call line up with bodyFn's parameters as they stand, whatever is called. A
+// method value is a closure over a wrapper whose parameters are the method's without the receiver,
+// and its calls are listed under the wrapper, so there is no place to step over.
 func (t *trace) arguments(bodyFn *ssa.Function, p *ssa.Parameter, a ask, depth int) ([]leafValue, bool) {
 	if t.q.contracts == nil || bodyFn == nil {
 		return nil, true
@@ -275,21 +276,11 @@ func (t *trace) arguments(bodyFn *ssa.Function, p *ssa.Parameter, a ask, depth i
 	var out []leafValue
 	for _, site := range sites {
 		cc := site.ins.Common()
-		argIdx := pIdx
-		if a.kind != askField {
-			if _, isMC := cc.Value.(*ssa.MakeClosure); isMC && isBoundMethodWrapper(cc.StaticCallee()) {
-				if pIdx == 0 {
-					incomplete = true
-					continue
-				}
-				argIdx = pIdx - 1
-			}
-		}
-		if argIdx < 0 || argIdx >= len(cc.Args) {
+		if pIdx >= len(cc.Args) {
 			incomplete = true
 			continue
 		}
-		sub, inc := t.follow(site.caller, cc.Args[argIdx], a, depth+1)
+		sub, inc := t.follow(site.caller, cc.Args[pIdx], a, depth+1)
 		out = append(out, sub...)
 		if inc {
 			incomplete = true
