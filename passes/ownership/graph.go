@@ -672,7 +672,7 @@ func usesOfCell(alloc *ssa.Alloc) cellUses {
 // a method called by name, a closure called where it is made, a method value. Any other call
 // leaves the memory open.
 func usesOfAddress(addr ssa.Value) cellUses {
-	budget := cellWalkBudget
+	used := 0
 	w := &addressWalk{
 		seen:     map[ssa.Value]bool{addr: true},
 		entered:  map[*ssa.Function][]*ssa.Call{},
@@ -681,7 +681,7 @@ func usesOfAddress(addr ssa.Value) cellUses {
 		returns:  map[*ssa.Function][]int{},
 		kept:     map[*ssa.Alloc]bool{},
 		holding:  map[*ssa.Alloc]bool{},
-		budget:   &budget,
+		used:     &used,
 	}
 	if alloc, ok := addr.(*ssa.Alloc); ok {
 		w.holding[alloc] = true
@@ -708,8 +708,8 @@ type addressWalk struct {
 	// variable reached again while it is being read is a cycle, and the memory is open.
 	kept    map[*ssa.Alloc]bool
 	holding map[*ssa.Alloc]bool
-	// budget is the names left to read, shared with the walks this one asks for (cellWalkBudget).
-	budget *int
+	// used counts the names read, shared with the walks this one asks for (cellWalkBudget).
+	used *int
 }
 
 // anotherName reads one more name of the same memory, once.
@@ -725,12 +725,12 @@ func (w *addressWalk) anotherName(v ssa.Value, refs *[]ssa.Instruction) {
 	w.readName(v, refs)
 }
 
-// spend takes one name from the budget, or says that it is used up.
+// spend counts one more name read, or says that cellWalkBudget is reached.
 func (w *addressWalk) spend() bool {
-	if *w.budget <= 0 {
+	if *w.used >= cellWalkBudget {
 		return false
 	}
-	*w.budget--
+	*w.used++
 	return true
 }
 
@@ -901,7 +901,7 @@ func (w *addressWalk) keptIn(holder ssa.Value) {
 		returns:  map[*ssa.Function][]int{},
 		kept:     map[*ssa.Alloc]bool{},
 		holding:  w.holding,
-		budget:   w.budget,
+		used:     w.used,
 	}
 	w.holding[cell] = true
 	hw.readName(cell, cell.Referrers())

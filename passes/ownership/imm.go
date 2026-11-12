@@ -361,10 +361,12 @@ func (st *state) readOpen(i int) {
 	}
 }
 
-// openDep is the frame in progress that a scratch entry of this round depends on, following
-// entries whose own dependency has finished, or -1 if none is in progress. A dependency that
-// finished in this round ended on the partial result the entry read: a frame that went on to
-// another round would have started a new round, which makes the entry stale.
+// openDep is the frame in progress that a scratch entry of this round depends on, or -1 if none
+// is in progress. A dependency that has finished is followed through its own scratch entry when
+// it was provisional (it stopped without settling because it read a frame further out), so the
+// read lands on that frame. A dependency that finished final in this round ended on the partial
+// result the entry read: a frame that went on to another round would have started a new round,
+// which makes the entry stale.
 func (st *state) openDep(e immScratchEntry) int {
 	for fn := e.dep; fn != nil; {
 		if i, busy := st.immBusy[fn]; busy {
