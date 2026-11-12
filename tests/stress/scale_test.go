@@ -350,6 +350,44 @@ func scaleShapes() []scaleShape {
 			b.WriteString("\tf = func() { j.ID++ }\n\t_ = p\n\tgo f()\n\treturn j.ID\n}\n")
 			return scaleOne(b.String())
 		}},
+		// The next three stretch what stands in for memory whose address is out of sight: the struct
+		// values the package stores whole, which may be copies of other such structs, and the
+		// functions it stores through a pointer.
+		{name: "N structs kept in a package variable, N copied over through it", sizes: []int{100, 200, 400}, maxRatio: 6, gen: func(n int) map[string]string {
+			var b strings.Builder
+			b.WriteString("type S struct{ fn func(*Job) }\n\nvar keep *S\n\nfunc noop(*Job) {}\n\n")
+			for i := range n {
+				fmt.Fprintf(&b, "func w%d() {\n\tu := S{fn: noop}\n\t*keep = u\n}\n\n", i)
+			}
+			b.WriteString("func F() int {\n\tj := &Job{}\n")
+			for i := range n {
+				fmt.Fprintf(&b, "\ts%[1]d := &S{fn: noop}\n\tkeep = s%[1]d\n\ts%[1]d.fn(j)\n", i)
+			}
+			b.WriteString("\tgo func() { j.ID++ }()\n\treturn j.ID\n}\n")
+			return scaleOne(b.String())
+		}},
+		{name: "two structs out of sight copied over each other by N functions", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
+			var b strings.Builder
+			b.WriteString("type S struct{ fn func(*Job) }\n\nvar keepA, keepB *S\n\nfunc noop(*Job) {}\n\n")
+			for i := range n {
+				fmt.Fprintf(&b, "func c%d() {\n\t*keepA = *keepB\n\t*keepB = *keepA\n}\n\n", i)
+			}
+			b.WriteString("func F() int {\n\tj := &Job{}\n\ta := &S{fn: noop}\n\tkeepA = a\n\tb := &S{fn: noop}\n\tkeepB = b\n\ta.fn(j)\n\tb.fn(j)\n\tgo func() { j.ID++ }()\n\treturn j.ID\n}\n")
+			return scaleOne(b.String())
+		}},
+		{name: "N function variables with their address out of sight, N stores through a pointer", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
+			var b strings.Builder
+			b.WriteString("type setter interface{ set(*func(*Job)) }\n\nfunc noop(*Job) {}\n\n")
+			for i := range n {
+				fmt.Fprintf(&b, "func p%d(pf *func(*Job)) { *pf = noop }\n\n", i)
+			}
+			b.WriteString("func F(o setter) int {\n\tj := &Job{}\n")
+			for i := range n {
+				fmt.Fprintf(&b, "\tf%[1]d := noop\n\to.set(&f%[1]d)\n\tf%[1]d(j)\n", i)
+			}
+			b.WriteString("\tgo func() { j.ID++ }()\n\treturn j.ID\n}\n")
+			return scaleOne(b.String())
+		}},
 		{name: "package variable written through N pointers", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
 			return scaleOne("func F() {\n\tsink" + strings.Repeat(".Next", n) + ".ID = 1\n}\n")
 		}},

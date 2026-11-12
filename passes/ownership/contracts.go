@@ -409,9 +409,59 @@ type structFieldKey struct {
 	field int
 }
 
+// indexedValue is a value stored somewhere, with the function that stores it, and what is known
+// of the address the store was made through (for a store to a field, the pointer to the struct):
+// the allocations it is, when the address itself says so (addressedAllocs).
 type indexedValue struct {
-	fn *ssa.Function
-	v  ssa.Value
+	fn      *ssa.Function
+	v       ssa.Value
+	at      []*ssa.Alloc
+	atKnown bool
+}
+
+// storedAt is the value v, stored in fn through the address addr.
+func storedAt(fn *ssa.Function, v, addr ssa.Value) indexedValue {
+	allocs, ok := addressedAllocs(addr, map[ssa.Value]bool{})
+	return indexedValue{fn: fn, v: v, at: allocs, atKnown: ok}
+}
+
+// addressedAllocs gives the allocations an address is, where the value itself says so: an
+// allocation, a captured variable, a package variable (which is none), and a choice between or a
+// conversion of such. ok is false for an address that came from anywhere else, which may be any
+// memory of its type.
+func addressedAllocs(v ssa.Value, seen map[ssa.Value]bool) (allocs []*ssa.Alloc, ok bool) {
+	switch x := v.(type) {
+	case *ssa.Alloc:
+		return []*ssa.Alloc{x}, true
+	case *ssa.Global:
+		return nil, true
+	case *ssa.FreeVar:
+		if cell := cellOfFreeVar(x); cell != nil {
+			return []*ssa.Alloc{cell}, true
+		}
+	case *ssa.ChangeType:
+		return addressedAllocs(x.X, seen)
+	case *ssa.Phi:
+		if seen[x] {
+			return nil, true
+		}
+		seen[x] = true
+		for _, e := range x.Edges {
+			sub, ok := addressedAllocs(e, seen)
+			if !ok {
+				return nil, false
+			}
+			allocs = append(allocs, sub...)
+		}
+		return allocs, true
+	}
+	return nil, false
+}
+
+// otherMemory reports whether the store is known to be made to memory other than the allocation
+// base. Two allocations are never the same memory, whatever their type.
+func (iv indexedValue) otherMemory(base *ssa.Alloc) bool {
+	return iv.atKnown && !slices.Contains(iv.at, base)
 }
 
 func derefStructTypeKey(ptrType types.Type) (string, bool) {
@@ -447,6 +497,13 @@ type contractIndex struct {
 	globalStores      map[*ssa.Global][]ssa.Value
 	globalFieldStores map[*ssa.Global]map[int][]ssa.Value
 	structFieldStores map[structFieldKey][]indexedValue
+	// structWholeStores holds, by struct type, every struct value stored whole (*p = v): a store
+	// to all of its fields at once.
+	structWholeStores map[string][]indexedValue
+	// funcPointerStores holds every function stored through a pointer that is not itself the
+	// variable, field or element it writes (*p = f): the stores that may be to a function
+	// variable whose address has gone where it is not read (writtenThroughPointer).
+	funcPointerStores []indexedValue
 	callForwards      map[*ssa.Function][]callForwardRule
 	retForwards       map[*ssa.Function][]retForwardRule
 	directPublish     map[*ssa.Function][]pubArgSpec
@@ -482,13 +539,35 @@ func (ci *contractIndex) fieldStores(typ string, field int) []indexedValue {
 		return ci.structFieldStores[structFieldKey{typ: typ, field: field}]
 	}
 	var out []indexedValue
+	for _, key := range ci.convertedWith(typ) {
+		out = append(out, ci.structFieldStores[structFieldKey{typ: key, field: field}]...)
+	}
+	return out
+}
+
+// wholeStores returns every struct value stored whole as the struct type with key typ or as a
+// type this package converts to or from it.
+func (ci *contractIndex) wholeStores(typ string) []indexedValue {
+	if len(ci.structConv[typ]) == 0 {
+		return ci.structWholeStores[typ]
+	}
+	var out []indexedValue
+	for _, key := range ci.convertedWith(typ) {
+		out = append(out, ci.structWholeStores[key]...)
+	}
+	return out
+}
+
+// convertedWith returns the struct type with key typ and every struct type this package converts
+// to or from it, directly or through others.
+func (ci *contractIndex) convertedWith(typ string) []string {
+	out := []string{typ}
 	seen := map[string]bool{typ: true}
-	for work := []string{typ}; len(work) > 0; work = work[1:] {
-		out = append(out, ci.structFieldStores[structFieldKey{typ: work[0], field: field}]...)
-		for _, other := range ci.structConv[work[0]] {
+	for i := 0; i < len(out); i++ {
+		for _, other := range ci.structConv[out[i]] {
 			if !seen[other] {
 				seen[other] = true
-				work = append(work, other)
+				out = append(out, other)
 			}
 		}
 	}
@@ -502,6 +581,7 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 		openCallers:       map[*ssa.Function]bool{},
 		globalStores:      map[*ssa.Global][]ssa.Value{},
 		globalFieldStores: map[*ssa.Global]map[int][]ssa.Value{},
+		structWholeStores: map[string][]indexedValue{},
 		structFieldStores: map[structFieldKey][]indexedValue{},
 		structConv:        map[string][]string{},
 		callForwards:      map[*ssa.Function][]callForwardRule{},
@@ -596,7 +676,18 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 					}
 					if keyStr, ok := derefStructTypeKey(fa.X.Type()); ok {
 						fk := structFieldKey{typ: keyStr, field: fa.Field}
-						ci.structFieldStores[fk] = append(ci.structFieldStores[fk], indexedValue{fn: bodyFn, v: x.Val})
+						ci.structFieldStores[fk] = append(ci.structFieldStores[fk], storedAt(bodyFn, x.Val, fa.X))
+					}
+				}
+				if keyStr, ok := structValueTypeKey(x.Val.Type()); ok {
+					ci.structWholeStores[keyStr] = append(ci.structWholeStores[keyStr], storedAt(bodyFn, x.Val, x.Addr))
+				}
+				if _, isFunc := x.Val.Type().Underlying().(*types.Signature); isFunc {
+					switch x.Addr.(type) {
+					case *ssa.Alloc, *ssa.Global, *ssa.FieldAddr, *ssa.IndexAddr:
+						// the variable, field or element itself
+					default:
+						ci.funcPointerStores = append(ci.funcPointerStores, storedAt(bodyFn, x.Val, x.Addr))
 					}
 				}
 			case ssa.CallInstruction:
