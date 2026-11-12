@@ -732,7 +732,7 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 						}
 					}
 				}
-				if rc, hasContract := st.resolveCallContract(bodyFn, cc); hasContract {
+				if rc, hasContract := st.ask().resolveCallContract(bodyFn, cc); hasContract {
 					for _, spec := range rc.publishArgs {
 						if spec.delegatedToCallers || spec.argIdx < 0 || spec.argIdx >= len(cc.Args) {
 							continue
@@ -844,7 +844,7 @@ func returnedExprIsContractFresh(st *state, bodyFn *ssa.Function, v ssa.Value, d
 				return false
 			}
 		}
-		rc, ok := st.resolveCallContract(bodyFn, cc)
+		rc, ok := st.ask().resolveCallContract(bodyFn, cc)
 		return ok && rc.freshResult
 	case *ssa.Extract:
 		if x.Index == 0 {
@@ -989,15 +989,32 @@ type valVisitKey struct {
 	v  ssa.Value
 }
 
+// question is one thing a check asks about where a value comes from or what a call does. Answering
+// it may take many traces, nested and each with its own visited set; every one of them marks the
+// question when it stops at a limit (originBudget, originDepth) and not at the end of what there
+// is. The check that asked reads cut once, afterwards.
+//
+// The traces and the contract resolvers that start them are methods of question, so none can run
+// without one. cut used to be a field of state that a check cleared before tracing and read
+// after: a check that forgot to clear it read another check's cut, and one that did not read it
+// had nothing to show that it had decided not to.
+type question struct {
+	*state
+	cut bool
+}
+
+// ask starts a question.
+func (st *state) ask() *question { return &question{state: st} }
+
 // originBudget is the number of values one trace of where a value comes from (traceSSAOrigins,
-// tracePtrBaseOrigins) may visit. A trace that spends it answers "incomplete" and sets
-// state.originCut, so that a caller that cannot act on "incomplete" can still say it was cut.
+// tracePtrBaseOrigins) may visit. A trace that spends it answers "incomplete" and marks its
+// question as cut, so that a check that cannot act on "incomplete" can still say it was cut.
 const originBudget = 96
 
 // originDepth is how many steps deep those traces and traceStructFieldValueOrigins go. It is what
 // ends one cycle that the visited set does not (a field of a struct value, read through a pointer
 // whose trace starts a new visited set, read from a stored struct value again), so it stays. A
-// trace that reaches it answers "incomplete" and sets state.originCut, like one out of budget.
+// trace that reaches it answers "incomplete" and marks its question as cut, like one out of budget.
 const originDepth = 14
 
 type leafValue struct {
@@ -1005,12 +1022,12 @@ type leafValue struct {
 	v  ssa.Value
 }
 
-func (st *state) traceSSAOrigins(fn *ssa.Function, v ssa.Value, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
+func (st *question) traceSSAOrigins(fn *ssa.Function, v ssa.Value, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
 	if v == nil {
 		return nil, true
 	}
 	if depth > originDepth {
-		st.originCut = true
+		st.cut = true
 		return nil, true
 	}
 	bodyFn := canonicalBodyFn(fn)
@@ -1021,7 +1038,7 @@ func (st *state) traceSSAOrigins(fn *ssa.Function, v ssa.Value, depth int, seen 
 	if len(seen) >= originBudget {
 		// Out of budget: what v may be is not known. This used to answer "nothing more, and that
 		// is all", which made a callee chosen among more values than the budget look fully known.
-		st.originCut = true
+		st.cut = true
 		return nil, true
 	}
 	seen[key] = true
@@ -1151,12 +1168,12 @@ func (st *state) traceSSAOrigins(fn *ssa.Function, v ssa.Value, depth int, seen 
 	}
 }
 
-func (st *state) tracePtrBaseOrigins(fn *ssa.Function, v ssa.Value, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
+func (st *question) tracePtrBaseOrigins(fn *ssa.Function, v ssa.Value, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
 	if v == nil {
 		return nil, true
 	}
 	if depth > originDepth {
-		st.originCut = true
+		st.cut = true
 		return nil, true
 	}
 	bodyFn := canonicalBodyFn(fn)
@@ -1165,7 +1182,7 @@ func (st *state) tracePtrBaseOrigins(fn *ssa.Function, v ssa.Value, depth int, s
 		return nil, false
 	}
 	if len(seen) >= originBudget {
-		st.originCut = true // as in traceSSAOrigins: out of budget is not "that is all"
+		st.cut = true // as in traceSSAOrigins: out of budget is not "that is all"
 		return nil, true
 	}
 	seen[key] = true
@@ -1317,7 +1334,7 @@ func (st *state) tracePtrBaseOrigins(fn *ssa.Function, v ssa.Value, depth int, s
 	}
 }
 
-func (st *state) tracePtrCallResultOrigins(caller *ssa.Function, callIns *ssa.Call, resIdx int, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
+func (st *question) tracePtrCallResultOrigins(caller *ssa.Function, callIns *ssa.Call, resIdx int, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
 	if callIns.Call.IsInvoke() {
 		return nil, true
 	}
@@ -1359,7 +1376,7 @@ func (st *state) tracePtrCallResultOrigins(caller *ssa.Function, callIns *ssa.Ca
 	return out, incomplete
 }
 
-func (st *state) readFieldFromBasePtrLeaf(lf leafValue, field int, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
+func (st *question) readFieldFromBasePtrLeaf(lf leafValue, field int, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
 	switch base := lf.v.(type) {
 	case *ssa.Alloc:
 		if base.Referrers() == nil {
@@ -1437,7 +1454,7 @@ func (st *state) readFieldFromBasePtrLeaf(lf leafValue, field int, depth int, se
 	return nil, true
 }
 
-func (st *state) traceStructPtrFieldOrigins(fn *ssa.Function, ptr ssa.Value, field int, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
+func (st *question) traceStructPtrFieldOrigins(fn *ssa.Function, ptr ssa.Value, field int, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
 	bases, incomplete := st.tracePtrBaseOrigins(fn, ptr, depth+1, map[valVisitKey]bool{})
 	var out []leafValue
 	for _, b := range bases {
@@ -1462,7 +1479,7 @@ func (st *state) traceStructPtrFieldOrigins(fn *ssa.Function, ptr ssa.Value, fie
 	return out, incomplete
 }
 
-func (st *state) traceDerefOrigins(fn *ssa.Function, addr ssa.Value, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
+func (st *question) traceDerefOrigins(fn *ssa.Function, addr ssa.Value, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
 	switch a := addr.(type) {
 	case *ssa.Alloc:
 		if a.Referrers() == nil {
@@ -1578,12 +1595,12 @@ func (st *state) traceDerefOrigins(fn *ssa.Function, addr ssa.Value, depth int, 
 	return nil, true
 }
 
-func (st *state) traceStructFieldValueOrigins(fn *ssa.Function, structVal ssa.Value, field int, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
+func (st *question) traceStructFieldValueOrigins(fn *ssa.Function, structVal ssa.Value, field int, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
 	if structVal == nil {
 		return nil, true
 	}
 	if depth > originDepth {
-		st.originCut = true
+		st.cut = true
 		return nil, true
 	}
 	bodyFn := canonicalBodyFn(fn)
@@ -1651,7 +1668,7 @@ func (st *state) traceStructFieldValueOrigins(fn *ssa.Function, structVal ssa.Va
 	return nil, true
 }
 
-func (st *state) traceMapLookupOrigins(fn *ssa.Function, m ssa.Value, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
+func (st *question) traceMapLookupOrigins(fn *ssa.Function, m ssa.Value, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
 	mm, ok := m.(*ssa.MakeMap)
 	if !ok || mm.Referrers() == nil {
 		return nil, true
@@ -1666,7 +1683,7 @@ func (st *state) traceMapLookupOrigins(fn *ssa.Function, m ssa.Value, depth int,
 	return out, true
 }
 
-func (st *state) traceChanRecvOrigins(fn *ssa.Function, ch ssa.Value, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
+func (st *question) traceChanRecvOrigins(fn *ssa.Function, ch ssa.Value, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
 	mc, ok := ch.(*ssa.MakeChan)
 	if !ok || mc.Referrers() == nil {
 		return nil, true
@@ -1688,7 +1705,7 @@ func (st *state) traceChanRecvOrigins(fn *ssa.Function, ch ssa.Value, depth int,
 	return out, incomplete
 }
 
-func (st *state) traceCallResultOrigins(caller *ssa.Function, callIns *ssa.Call, resIdx int, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
+func (st *question) traceCallResultOrigins(caller *ssa.Function, callIns *ssa.Call, resIdx int, depth int, seen map[valVisitKey]bool) ([]leafValue, bool) {
 	if callIns.Call.IsInvoke() {
 		return nil, true
 	}
@@ -1730,7 +1747,7 @@ func (st *state) traceCallResultOrigins(caller *ssa.Function, callIns *ssa.Call,
 	return out, incomplete
 }
 
-func (st *state) resolveInterfaceTypes(fn *ssa.Function, v ssa.Value, depth int, seen map[valVisitKey]bool) ([]types.Type, bool) {
+func (st *question) resolveInterfaceTypes(fn *ssa.Function, v ssa.Value, depth int, seen map[valVisitKey]bool) ([]types.Type, bool) {
 	leaves, incomplete := st.traceSSAOrigins(fn, v, depth, seen)
 	var out []types.Type
 	addType := func(t types.Type) {
@@ -1958,7 +1975,7 @@ func outcomeFromCapContract(c capContract, pkgPath string) candOutcome {
 // or, for a method of this package, by what a direct call of it would get (evalFunctionOutcome).
 // callArgs are the call's arguments, in caller, or nil where they are not at hand; with shift 1
 // they leave the receiver out, with shift 0 it is the first of them.
-func (st *state) evalInterfaceMethodContract(caller *ssa.Function, recvVal ssa.Value, methodName string, callArgs []ssa.Value, shift int) (candOutcome, bool) {
+func (st *question) evalInterfaceMethodContract(caller *ssa.Function, recvVal ssa.Value, methodName string, callArgs []ssa.Value, shift int) (candOutcome, bool) {
 	if st.ssa == nil || st.ssa.Pkg == nil || st.ssa.Pkg.Prog == nil {
 		return candOutcome{}, false
 	}
@@ -2022,14 +2039,14 @@ func (st *state) evalInterfaceMethodContract(caller *ssa.Function, recvVal ssa.V
 	}, true
 }
 
-func (st *state) evalValueAsCallable(caller *ssa.Function, fnVal ssa.Value, callArgs []ssa.Value, depth int) (resolvedCallContract, bool) {
+func (st *question) evalValueAsCallable(caller *ssa.Function, fnVal ssa.Value, callArgs []ssa.Value, depth int) (resolvedCallContract, bool) {
 	if fnVal == nil {
 		return resolvedCallContract{}, false
 	}
 	if depth > 6 {
 		// A callable handed on through this many callables is not worked out. That is a cut like
 		// a trace out of budget, and is said the same way; it used to read as "has no contract".
-		st.originCut = true
+		st.cut = true
 		return resolvedCallContract{}, false
 	}
 	leaves, incomplete := st.traceSSAOrigins(caller, fnVal, 0, map[valVisitKey]bool{})
@@ -2070,7 +2087,7 @@ func (st *state) evalValueAsCallable(caller *ssa.Function, fnVal ssa.Value, call
 	return mergeCandidateOutcomes(cands, incomplete)
 }
 
-func (st *state) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, callArgs []ssa.Value, bound bool, depth int) candOutcome {
+func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, callArgs []ssa.Value, bound bool, depth int) candOutcome {
 	if fn == nil {
 		return candOutcome{}
 	}
@@ -2215,12 +2232,12 @@ func originCutNote() string {
 // argument, return loaded memory) is missing for the ones not reached, and whoever acts on the
 // contract has to say so at the call.
 func (st *state) resolveCallContractCut(caller *ssa.Function, cc *ssa.CallCommon) (rc resolvedCallContract, ok, cut bool) {
-	st.originCut = false
-	rc, ok = st.resolveCallContract(caller, cc)
-	return rc, ok, st.originCut
+	q := st.ask()
+	rc, ok = q.resolveCallContract(caller, cc)
+	return rc, ok, q.cut
 }
 
-func (st *state) resolveCallContract(caller *ssa.Function, cc *ssa.CallCommon) (resolvedCallContract, bool) {
+func (st *question) resolveCallContract(caller *ssa.Function, cc *ssa.CallCommon) (resolvedCallContract, bool) {
 	if cc == nil {
 		return resolvedCallContract{}, false
 	}
@@ -2472,9 +2489,9 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 				st.propagateSharedToCallee(ins, cc, callee, bindings, origins, rootOf, add, emit)
 				return
 			}
-			st.originCut = false
-			leaves, _ := st.traceSSAOrigins(fn, cc.Value, 0, map[valVisitKey]bool{})
-			if st.originCut && slices.ContainsFunc(cc.Args, func(a ssa.Value) bool { _, shared := rootOf(a); return shared }) {
+			q := st.ask()
+			leaves, _ := q.traceSSAOrigins(fn, cc.Value, 0, map[valVisitKey]bool{})
+			if q.cut && slices.ContainsFunc(cc.Args, func(a ssa.Value) bool { _, shared := rootOf(a); return shared }) {
 				// The callees found are checked below; the ones the trace did not get to are not.
 				st.report(posOf(ins, ins), ImmCut, fmt.Sprintf(
 					"which functions the value called here may be could not be followed to the end (it comes through more than %d steps or from more than %d values), so what the ones not reached write through the shared value passed to them is not checked",

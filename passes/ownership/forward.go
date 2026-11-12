@@ -163,9 +163,9 @@ func (st *state) propagateSharedToMethods(
 	if !slices.ContainsFunc(args, func(a ssa.Value) bool { _, shared := rootOf(a); return shared }) {
 		return
 	}
-	st.originCut = false
-	concretes, _ := st.resolveInterfaceTypes(fn, cc.Value, 0, map[valVisitKey]bool{})
-	if st.originCut {
+	q := st.ask()
+	concretes, _ := q.resolveInterfaceTypes(fn, cc.Value, 0, map[valVisitKey]bool{})
+	if q.cut {
 		// The methods found are checked below; those of the types the trace did not get to are not.
 		st.report(posOf(ins, ins), ImmCut, fmt.Sprintf(
 			"which types the receiver of this call may be could not be followed to the end (it comes through more than %d steps or from more than %d values), so what the methods not reached write through the shared value passed to them is not checked",

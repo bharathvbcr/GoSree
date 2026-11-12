@@ -176,11 +176,6 @@ type state struct {
 	// the calls inside synthesised wrappers that it checked at the calls entering them (forward.go).
 	loadWalk       *rootWalk
 	forwardedCalls map[ssa.Instruction]bool
-	// originCut is set when a trace of where a value comes from ran out of its budget or its depth
-	// (originBudget, originDepth, contracts.go). The shared-load check and resolveCallContractCut
-	// clear it before a trace and read it after, to report a call whose callees could not all be
-	// found.
-	originCut bool
 
 	// litBindings and litBorrows memoise the closure lookups of findBorrowsInLitInSyntax, so the
 	// enclosing function is walked once, not once per identifier.

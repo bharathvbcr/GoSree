@@ -12,19 +12,21 @@ import (
 	"testing"
 )
 
-// Two standing checks on this package's own source.
+// Three standing checks on this package's own source.
 //
 // Every miss found in the walks that follow a value backwards had one shape: a walk stopped (out of
 // budget, too deep, or at code it could not see) and the code that asked took "stopped" for
-// "nothing there". Tests of behaviour catch that one case at a time. These two read the source, so
-// that the next walk or the next limit cannot be added without being looked at:
+// "nothing there". Tests of behaviour catch that one case at a time. These read the source, so that
+// the next walk, the next limit or the next check that asks cannot be added without being looked at:
 //
 //   - TestWalkAnswersAreNotDropped: a walk answers with what it found and whether that is all. The
 //     second part may be thrown away only at the places listed here, each with its reason.
 //   - TestEveryBoundOnAWalkIsListed: every fixed number that can end a walk or a fixpoint early is
 //     listed here with what the code does when it is reached.
+//   - TestEveryQuestionIsRead: a check that asks the walks something (state.ask) reads whether the
+//     answer was cut at a limit, or is listed here with the reason it need not.
 //
-// Both fail when the source and the list disagree in either direction, so a list entry cannot
+// Each fails when the source and its list disagree in either direction, so a list entry cannot
 // outlive the code it describes.
 
 // ownSource parses the package's files that are not tests.
@@ -100,8 +102,8 @@ var droppedWalkAnswers = map[string]struct {
 	"traceDerefOrigins":            {2, "the branch reads the stores to an array's elements and answers incomplete whatever each store's walk says"},
 	"traceStructFieldValueOrigins": {1, "the branch reads the stores to a field anywhere in the package and answers incomplete whatever each store's walk says"},
 	"traceMapLookupOrigins":        {1, "a map lookup always answers incomplete: what the map holds is not all in sight"},
-	"checkSharedLoadWrites":        {1, "the callees of a dynamic call: a callee that is not in sight is not reported, by the rule in docs/RULES.md (SAFE005-incomplete); a walk that was cut is, through state.originCut, which this call site clears before and reads after"},
-	"propagateSharedToMethods":     {1, "the receivers of an interface call: as for checkSharedLoadWrites, a cut walk is reported through state.originCut and a receiver that is not in sight is not"},
+	"checkSharedLoadWrites":        {1, "the callees of a dynamic call: a callee that is not in sight is not reported, by the rule in docs/RULES.md (SAFE005-incomplete); a walk that was cut is, through the question's cut, which this call site reads"},
+	"propagateSharedToMethods":     {1, "the receivers of an interface call: as for checkSharedLoadWrites, a cut walk is reported through the question's cut and a receiver that is not in sight is not"},
 }
 
 func TestWalkAnswersAreNotDropped(t *testing.T) {
@@ -182,12 +184,12 @@ func TestWalkAnswersAreNotDropped(t *testing.T) {
 // walkBounds lists every fixed number in this package that can end a walk or a fixpoint before it
 // is done, as "function: bound", with what the code does when the number is reached.
 var walkBounds = map[string]string{
-	"traceSSAOrigins: originDepth":              "answers incomplete and sets state.originCut; the checks that read it report SAFE002-incomplete or SAFE005-incomplete",
+	"traceSSAOrigins: originDepth":              "answers incomplete and marks its question as cut; the checks that asked report SAFE002-incomplete or SAFE005-incomplete",
 	"traceSSAOrigins: originBudget":             "as originDepth",
 	"tracePtrBaseOrigins: originDepth":          "as in traceSSAOrigins",
 	"tracePtrBaseOrigins: originBudget":         "as in traceSSAOrigins",
 	"traceStructFieldValueOrigins: originDepth": "as in traceSSAOrigins",
-	"evalValueAsCallable: depth > 6":            "sets state.originCut and answers that no contract was found, so the call is reported as one whose callees could not all be found (not reached today: the nested call passes no arguments, so nesting stops at one)",
+	"evalValueAsCallable: depth > 6":            "marks its question as cut and answers that no contract was found, so the call is reported as one whose callees could not all be found (not reached today: the nested call passes no arguments, so nesting stops at one)",
 	"releaseSummaries: maxReleaseSteps":         "the summary is cut to that many steps and the release is taken as one that may happen: errs toward reporting (docs/RULES.md)",
 	"releaseSummaries: maxReleasesPerFn":        "past that many releases the function is taken to release: errs toward reporting (docs/RULES.md)",
 	"acquireSummaries: maxAcquireRounds":        "the acquisition is not credited: errs toward reporting (docs/RULES.md)",
@@ -317,5 +319,87 @@ func TestEveryBoundOnAWalkIsListed(t *testing.T) {
 	}
 	for _, k := range stale {
 		t.Errorf("walkBounds lists %q, which is no longer in the source: remove or rename the entry", k)
+	}
+}
+
+// unreadQuestions lists, by the function it is in, every question that is asked and whose cut is
+// not read there, with how many and why that is sound.
+var unreadQuestions = map[string]struct {
+	n   int
+	why string
+}{
+	"buildContractIndex":          {1, "the index records what each call in a body was found to publish or load. The graph resolves that same call of that same function again (applyCallContract, checkSharedLoadWrites) and reports a cut there. That the two resolutions are cut together is by reading, not by a test: the index resolves while it is still being built"},
+	"returnedExprIsContractFresh": {1, "the cut is not read here, and it is not shown that it need not be: whether a function always returns a fresh value is decided from an answer that may have been cut"},
+}
+
+func TestEveryQuestionIsRead(t *testing.T) {
+	_, files := ownSource(t)
+	asked, unread := 0, map[string]int{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || fd.Name.Name == "ask" {
+				continue
+			}
+			// The variables questions are bound to in this function, and whether each one's cut is read.
+			bound := map[string]bool{}
+			var stack []ast.Node
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if n == nil {
+					stack = stack[:len(stack)-1]
+					return true
+				}
+				stack = append(stack, n)
+				if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "cut" {
+					if id, ok := sel.X.(*ast.Ident); ok {
+						if _, isQuestion := bound[id.Name]; isQuestion {
+							bound[id.Name] = true
+						}
+					}
+				}
+				call, ok := n.(*ast.CallExpr)
+				if !ok || calledName(call) != "ask" || len(call.Args) != 0 {
+					return true
+				}
+				asked++
+				var parent ast.Node
+				if len(stack) >= 2 {
+					parent = stack[len(stack)-2]
+				}
+				if as, ok := parent.(*ast.AssignStmt); ok && len(as.Lhs) == 1 && len(as.Rhs) == 1 {
+					if id, ok := as.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
+						if _, again := bound[id.Name]; !again {
+							bound[id.Name] = false
+						}
+						return true
+					}
+				}
+				// Asked and used on the spot: its cut cannot be read.
+				unread[fd.Name.Name]++
+				return true
+			})
+			for _, read := range bound {
+				if !read {
+					unread[fd.Name.Name]++
+				}
+			}
+		}
+	}
+	if asked < 5 {
+		t.Fatalf("%d questions found in the source, fewer than when this was written (5); the test no longer sees what it is about", asked)
+	}
+	for fn, n := range unread {
+		want, listed := unreadQuestions[fn]
+		switch {
+		case !listed:
+			t.Errorf("%s asks a question %d time(s) without reading whether the answer was cut, and is not in unreadQuestions: read it, or list it with the reason it need not", fn, n)
+		case n != want.n:
+			t.Errorf("%s asks %d question(s) without reading cut, unreadQuestions says %d: look at the new one", fn, n, want.n)
+		}
+	}
+	for fn := range unreadQuestions {
+		if unread[fn] == 0 {
+			t.Errorf("unreadQuestions lists %s, which no longer asks without reading: remove the entry", fn)
+		}
 	}
 }
