@@ -1261,6 +1261,15 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 	// one of them releases is released. A lock is held afterwards only if every one of them
 	// returns holding it and the list is known to be all of them.
 	targets, all := lockCallTargetsAll(cc)
+	if !all && !cc.IsInvoke() && cc.StaticCallee() == nil {
+		// A variable whose walk was cut short (restCut) may hold a closure made here over any
+		// of this function's values, and that closure may unlock any of them: nothing is known
+		// to be held after the call.
+		if _, rest := callTargets(cc.Value); restCut(rest) {
+			clear(s)
+			return
+		}
+	}
 	if len(targets) == 0 {
 		// An interface method, or a called value nothing is known about: anything it receives
 		// may be unlocked.

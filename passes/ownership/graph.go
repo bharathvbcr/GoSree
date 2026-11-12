@@ -645,6 +645,10 @@ type cellUses struct {
 	// that made it, to a function that has no body in sight or is not known, or it has more
 	// names than cellViewLimit. Something that is not in stores may then write the memory.
 	open bool
+	// cut says the walk stopped before it read every name (cellViewLimit, cellWalkBudget). It
+	// is open as well, and more: what writes the memory may be anything in sight, a closure over
+	// any of this function's values among them, not only something the address was handed to.
+	cut bool
 	// entered are the calls by which an address of the memory reached each function it was
 	// passed to. A store such a function makes is made in a call that one of them made.
 	entered map[*ssa.Function][]*ssa.Call
@@ -718,7 +722,7 @@ func (w *addressWalk) anotherName(v ssa.Value, refs *[]ssa.Instruction) {
 		return
 	}
 	if len(w.seen) >= cellViewLimit || !w.spend() {
-		w.u.open = true
+		w.u.open, w.u.cut = true, true
 		return
 	}
 	w.seen[v] = true
@@ -890,7 +894,7 @@ func (w *addressWalk) keptIn(holder ssa.Value) {
 		return
 	}
 	if !w.spend() {
-		w.u.open = true
+		w.u.open, w.u.cut = true, true
 		return
 	}
 	hw := &addressWalk{
@@ -906,6 +910,7 @@ func (w *addressWalk) keptIn(holder ssa.Value) {
 	w.holding[cell] = true
 	hw.readName(cell, cell.Referrers())
 	delete(w.holding, cell)
+	w.u.cut = w.u.cut || hw.u.cut
 	if hw.u.open || len(hw.u.fields)+len(hw.u.elems)+len(hw.u.slices) > 0 {
 		w.u.open = true // the variable is read by something that is not in sight
 		return
@@ -961,7 +966,8 @@ func cellOfFreeVar(fv *ssa.FreeVar) *ssa.Alloc {
 // What a caller takes from the list depends on what it asks. A fact that holds if any target does
 // it (releases a lock, publishes, writes) can be taken from each target. A fact that must hold
 // whichever target runs (a lock is held afterwards) needs every target to have it and rest to be
-// empty. What the call hands over is handed to whatever is in rest as well.
+// empty. What the call hands over is handed to whatever is in rest as well, and restCut says
+// whether that is all a value in rest may run on.
 func callTargets(v ssa.Value) (targets []callTarget, rest []ssa.Value) {
 	seen := map[ssa.Value]bool{}
 	inRest := map[ssa.Value]bool{}
@@ -1026,6 +1032,24 @@ func callTargets(v ssa.Value) (targets []callTarget, rest []ssa.Value) {
 	}
 	walk(v)
 	return targets, rest
+}
+
+// restCut says whether a value callTargets could not resolve is the load of a local variable whose
+// walk stopped before it read every name (cellUses.cut). What was stored there may then be any
+// closure made in sight, over any value of the function, and not only something that runs on
+// what the call hands it. A value of rest that is not such a load was not resolved for a reason
+// that is about the value itself (a parameter, a field, a call's result, an address handed out).
+func restCut(rest []ssa.Value) bool {
+	for _, v := range rest {
+		load, ok := v.(*ssa.UnOp)
+		if !ok || load.Op != token.MUL {
+			continue
+		}
+		if alloc, ok := load.X.(*ssa.Alloc); ok && alloc.Referrers() != nil && usesOfCell(alloc).cut {
+			return true
+		}
+	}
+	return false
 }
 
 // closureCandidates lists every closure v may be: the closures among callTargets. It is for a
