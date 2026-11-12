@@ -734,6 +734,9 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 					if methodBehind(f) != nil && len(f.Blocks) > 0 && !slices.Contains(wrappers, f) {
 						wrappers = append(wrappers, f)
 					}
+					// The wrapper of an interface's method value, and of a method promoted from an
+					// embedded interface, makes the interface call in its own body.
+					invoked = invokedThrough(f, invoked)
 				}
 			}
 		})
@@ -741,8 +744,9 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 	// A method this package calls through an interface has callers that are not in the list of
 	// its calls: the interface call names no function. An exported method is open already; an
 	// unexported one can be called through an interface only from this package, by a call of its
-	// name. Without this a method with one direct call was read as if that call were its only one,
-	// and what a parameter of it may be was answered as complete.
+	// name, written out or made by a wrapper the package names (invokedThrough). Without this a
+	// method with one direct call was read as if that call were its only one, and what a parameter
+	// of it may be was answered as complete.
 	for _, name := range invoked {
 		for _, m := range ci.methodsNamed[name] {
 			ci.openCallers[m] = true
@@ -2311,4 +2315,20 @@ func takesAddress(ins ssa.Instruction, addr ssa.Value) bool {
 		return false
 	}
 	return true
+}
+
+// invokedThrough adds to names the methods that f, a function the compiler synthesised (the wrapper
+// of a method value, the thunk of a method expression, the wrapper of a promoted method), calls
+// through an interface. A function written in the source is read where it is scanned and adds
+// nothing here.
+func invokedThrough(f *ssa.Function, names []string) []string {
+	if f.Synthetic == "" {
+		return names
+	}
+	forEachInstr(f, func(ins ssa.Instruction) {
+		if c, ok := ins.(ssa.CallInstruction); ok && c.Common().IsInvoke() && !slices.Contains(names, c.Common().Method.Name()) {
+			names = append(names, c.Common().Method.Name())
+		}
+	})
+	return names
 }

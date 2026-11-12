@@ -37,9 +37,12 @@ func direct(x *T) { impl{}.do(reads, x) }
 		rest    string
 		mayMiss bool
 	}{
-		"called by name only":                   {"", false},
-		"also called through an interface":      {"\ntype doer interface{ do(f func(*T), x *T) }\n\nfunc via(d doer, x *T) { d.do(keeps, x) }\n", true},
-		"another method of that name is called": {"\ntype other struct{}\n\nfunc (other) do(f func(*T), x *T) {}\n\ntype doer interface{ do(f func(*T), x *T) }\n\nfunc via(d doer, x *T) { d.do(keeps, x) }\n", true},
+		"called by name only":                         {"", false},
+		"also called through an interface":            {"\ntype doer interface{ do(f func(*T), x *T) }\n\nfunc via(d doer, x *T) { d.do(keeps, x) }\n", true},
+		"another method of that name is called":       {"\ntype other struct{}\n\nfunc (other) do(f func(*T), x *T) {}\n\ntype doer interface{ do(f func(*T), x *T) }\n\nfunc via(d doer, x *T) { d.do(keeps, x) }\n", true},
+		"a method value of the interface is called":   {"\ntype doer interface{ do(f func(*T), x *T) }\n\nfunc via(d doer, x *T) {\n\tg := d.do\n\tg(keeps, x)\n}\n", true},
+		"called through an interface a struct embeds": {"\ntype doer interface{ do(f func(*T), x *T) }\n\ntype box struct{ doer }\n\nfunc via(b box, x *T) { b.do(keeps, x) }\n", true},
+		"a method value through the embedding struct": {"\ntype doer interface{ do(f func(*T), x *T) }\n\ntype box struct{ doer }\n\nfunc via(b box, x *T) {\n\tg := b.do\n\tg(keeps, x)\n}\n", true},
 	} {
 		pkg := buildWalk(t, head+c.rest)
 		var fns []*ssa.Function
