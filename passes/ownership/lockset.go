@@ -343,42 +343,55 @@ var lockOps = map[string]lockOpKind{
 	"(*sync.RWMutex).TryRLock": opTryRLock,
 }
 
-// lockOp returns the mutex operation a call performs and the mutex it is called on.
+// lockOp returns the mutex operation a call is and the mutex it is on: a call of a mutex method,
+// or of a value that can be nothing but one bound to its mutex (f := mu.Unlock; f()). A call that
+// may be one among other things is not one here: lockTargetOp answers for each thing it may be.
 func lockOp(cc *ssa.CallCommon) (lockOpKind, ssa.Value) {
-	if cc.IsInvoke() {
+	if targets, all := lockCallTargetsAll(cc); all && len(targets) == 1 {
+		return lockTargetOp(targets[0])
+	}
+	return 0, nil
+}
+
+// lockTarget is one function a call may run, with what it runs on: the call's arguments, and for
+// a method value (s.m used as a value) the method as declared, with its receiver ahead of them.
+type lockTarget struct {
+	fn   *ssa.Function
+	mc   *ssa.MakeClosure // the closure, for what it captures; nil for a function or a method value
+	args []ssa.Value
+}
+
+// lockTargetOp returns the mutex operation a target is and the mutex it is on.
+func lockTargetOp(t lockTarget) (lockOpKind, ssa.Value) {
+	if len(t.args) == 0 {
 		return 0, nil
 	}
-	if len(cc.Args) == 0 {
-		if mc := resolveClosureVal(cc.Value, 0); mc != nil && len(mc.Bindings) == 1 {
-			if fn, ok := mc.Fn.(*ssa.Function); ok && strings.HasPrefix(fn.Synthetic, "bound method wrapper") {
-				for _, b := range fn.Blocks {
-					for _, ins := range b.Instrs {
-						c, ok := ins.(*ssa.Call)
-						if !ok {
-							continue
-						}
-						if callee := c.Call.StaticCallee(); callee != nil {
-							if obj, ok := callee.Object().(*types.Func); ok {
-								if op := lockOps[obj.FullName()]; op != 0 {
-									return op, mc.Bindings[0]
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-		return 0, nil
-	}
-	callee := cc.StaticCallee()
-	if callee == nil {
-		return 0, nil
-	}
-	obj, ok := callee.Object().(*types.Func)
+	obj, ok := t.fn.Object().(*types.Func)
 	if !ok {
 		return 0, nil
 	}
-	return lockOps[obj.FullName()], cc.Args[0]
+	return lockOps[obj.FullName()], t.args[0]
+}
+
+// methodValue returns the method and the receiver a target is when it is a method value: the
+// method as declared, which is what the summaries are kept for. An interface's method has none.
+func methodValue(t callTarget) (*ssa.Function, ssa.Value) {
+	if t.mc == nil || len(t.mc.Bindings) != 1 || !isBoundMethodWrapper(t.fn) {
+		return nil, nil
+	}
+	obj, ok := t.fn.Object().(*types.Func)
+	if !ok {
+		return nil, nil
+	}
+	recv := obj.Signature().Recv()
+	if recv == nil || types.IsInterface(recv.Type()) || !types.Identical(recv.Type(), t.mc.Bindings[0].Type()) {
+		return nil, nil
+	}
+	method := t.fn.Prog.FuncValue(obj.Origin())
+	if method == nil {
+		return nil, nil
+	}
+	return method, t.mc.Bindings[0]
 }
 
 // release is a mutex a function unlocks, as a path from a parameter, free variable, or global.
@@ -433,13 +446,15 @@ func (st *state) hasLockOps(fns []*ssa.Function) bool {
 				return
 			}
 			cc := c.Common()
-			if k, _ := lockOp(cc); k == opLock || k == opRLock || k == opTryLock || k == opTryRLock {
-				found = true
-				return
-			}
-			if !cc.IsInvoke() {
-				if callee := cc.StaticCallee(); callee != nil && callee.Pkg != st.ssa.Pkg && len(st.summary(callee).acquires) > 0 {
+			// Any function the call may run that takes a lock.
+			for _, t := range lockCallTargets(cc) {
+				if k, _ := lockTargetOp(t); k == opLock || k == opRLock || k == opTryLock || k == opTryRLock {
 					found = true
+					return
+				}
+				if t.fn.Pkg != st.ssa.Pkg && len(st.summary(t.fn).acquires) > 0 {
+					found = true
+					return
 				}
 			}
 		})
@@ -625,35 +640,25 @@ func (st *state) releaseSummaries(fns []*ssa.Function) map[*ssa.Function][]relea
 				return
 			}
 			cc := c.Common()
-			if k, recv := lockOp(cc); k == opUnlock {
-				if p, ok := pathOf(recv); ok {
-					if rel, ok := toRelease(fn, p, false); ok {
-						add(fn, rel)
+			// Every function the call may run: a release by any one of them is a release.
+			for _, t := range lockCallTargets(cc) {
+				if k, recv := lockTargetOp(t); k != 0 {
+					if p, ok := pathOf(recv); ok && k == opUnlock {
+						if rel, ok := toRelease(fn, p, false); ok {
+							add(fn, rel)
+						}
 					}
+					continue
 				}
-				return
-			}
-			if cc.IsInvoke() {
-				return
-			}
-			callee := cc.StaticCallee()
-			var mc *ssa.MakeClosure
-			if callee == nil || len(callee.FreeVars) > 0 {
-				mc = resolveClosureVal(cc.Value, 0)
-				if callee == nil && mc != nil {
-					callee, _ = mc.Fn.(*ssa.Function)
+				callee := t.fn
+				if !inPkg[callee] {
+					continue
 				}
-			}
-			if callee != nil && callee.Origin() != nil {
-				callee = callee.Origin()
-			}
-			if callee == nil || !inPkg[callee] {
-				return
-			}
-			edgesOf[fn] = append(edgesOf[fn], callEdge{callee: callee, args: cc.Args, mc: mc})
-			if !callerSeen[callee] {
-				callerSeen[callee] = true
-				callers[callee] = append(callers[callee], fn)
+				edgesOf[fn] = append(edgesOf[fn], callEdge{callee: callee, args: t.args, mc: t.mc})
+				if !callerSeen[callee] {
+					callerSeen[callee] = true
+					callers[callee] = append(callers[callee], fn)
+				}
 			}
 		})
 	}
@@ -960,33 +965,25 @@ func (st *state) acquireSummaries(gs *guardState, fns []*ssa.Function) map[*ssa.
 				return
 			}
 			cc := c.Common()
-			if k, _ := lockOp(cc); k == opLock || k == opRLock || k == opTryLock || k == opTryRLock {
-				directSeed[fn] = true
-				return
-			}
-			if cc.IsInvoke() {
-				return
-			}
-			callee := cc.StaticCallee()
-			if callee == nil {
-				if mc := resolveClosureVal(cc.Value, 0); mc != nil {
-					callee, _ = mc.Fn.(*ssa.Function)
+			// Every function the call may run. Whether what one of them takes is held after the
+			// call is callStep's to say; here it only makes fn worth evaluating.
+			for _, t := range lockCallTargets(cc) {
+				if k, _ := lockTargetOp(t); k != 0 {
+					if k != opUnlock {
+						directSeed[fn] = true
+					}
+					continue
 				}
-			}
-			if callee != nil && callee.Origin() != nil {
-				callee = callee.Origin()
-			}
-			if callee == nil {
-				return
-			}
-			if inPkg[callee] {
-				if !callerSeen[callee] {
-					callerSeen[callee] = true
-					calleesOf[fn] = append(calleesOf[fn], callee)
-					callers[callee] = append(callers[callee], fn)
+				callee := t.fn
+				if inPkg[callee] {
+					if !callerSeen[callee] {
+						callerSeen[callee] = true
+						calleesOf[fn] = append(calleesOf[fn], callee)
+						callers[callee] = append(callers[callee], fn)
+					}
+				} else if len(st.summary(callee).acquires) > 0 {
+					directSeed[fn] = true
 				}
-			} else if len(st.summary(callee).acquires) > 0 {
-				directSeed[fn] = true
 			}
 		})
 	}
@@ -1195,6 +1192,42 @@ func (st *state) lockStep(gs *guardState, s lockset, ins ssa.Instruction) {
 	st.callStep(gs, s, ins, c.Common(), true)
 }
 
+// lockCallTargetsAll lists the functions a call may run, each as declared (not an instance), and
+// whether that is all of them. A call of an interface method has none here.
+func lockCallTargetsAll(cc *ssa.CallCommon) ([]lockTarget, bool) {
+	if cc.IsInvoke() {
+		return nil, false
+	}
+	var found []callTarget
+	all := true
+	if callee := cc.StaticCallee(); callee != nil {
+		mc, _ := cc.Value.(*ssa.MakeClosure)
+		found = []callTarget{{fn: callee, mc: mc}}
+	} else {
+		var rest []ssa.Value
+		found, rest = callTargets(cc.Value)
+		all = len(rest) == 0
+	}
+	targets := make([]lockTarget, 0, len(found))
+	for _, f := range found {
+		t := lockTarget{fn: f.fn, mc: f.mc, args: cc.Args}
+		if method, recv := methodValue(f); method != nil {
+			t = lockTarget{fn: method, args: append([]ssa.Value{recv}, cc.Args...)}
+		}
+		if o := t.fn.Origin(); o != nil {
+			t.fn = o
+		}
+		targets = append(targets, t)
+	}
+	return targets, all
+}
+
+// lockCallTargets is lockCallTargetsAll for a caller that asks what any one target may do.
+func lockCallTargets(cc *ssa.CallCommon) []lockTarget {
+	targets, _ := lockCallTargetsAll(cc)
+	return targets
+}
+
 // callStep applies a call to the held set. With take unset it only releases: a deferred call run at
 // return is applied that way, since it may not have been registered on every path.
 func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ssa.CallCommon, take bool) {
@@ -1218,97 +1251,139 @@ func (st *state) callStep(gs *guardState, s lockset, ins ssa.Instruction, cc *ss
 		for _, a := range cc.Args {
 			killFor(s, a)
 		}
-		if mc := resolveClosureVal(cc.Value, 0); mc != nil {
+		for _, mc := range closureCandidates(cc.Value) {
 			for _, b := range mc.Bindings {
 				killFor(s, b)
 			}
 		}
 		return
 	}
-	callee := cc.StaticCallee()
-	var mc *ssa.MakeClosure
-	if callee == nil || len(callee.FreeVars) > 0 {
-		mc = resolveClosureVal(cc.Value, 0)
-		if callee == nil && mc != nil {
-			callee, _ = mc.Fn.(*ssa.Function)
+	// What the call may run. Each target gives its own releases, whatever the others are: a lock
+	// one of them releases is released. A lock is held afterwards only if every one of them
+	// returns holding it and the list is known to be all of them.
+	targets, all := lockCallTargetsAll(cc)
+	if len(targets) == 0 {
+		// An interface method, or a called value nothing is known about: anything it receives
+		// may be unlocked.
+		if cc.IsInvoke() {
+			killFor(s, cc.Value)
 		}
-	}
-	if callee != nil && callee.Origin() != nil {
-		callee = callee.Origin()
-	}
-	if callee != nil && !cc.IsInvoke() && callee.Pkg == st.ssa.Pkg {
-		if st.holdsOf(callee) != nil {
-			return
-		}
-		dropRelease := func(target guardPath, prefix bool) {
-			if !prefix {
-				delete(s, target)
-				return
-			}
-			for k := range s {
-				if k.root == target.root && hasStepPrefix(k.steps, target.steps) {
-					delete(s, k)
-				}
-			}
-		}
-		for _, r := range gs.releases[callee] {
-			if r.global != nil {
-				dropRelease(guardPath{r.global, r.steps}, r.prefix)
-				continue
-			}
-			var base ssa.Value
-			switch {
-			case r.param >= 0 && r.param < len(cc.Args):
-				base = cc.Args[r.param]
-			case r.free >= 0 && mc != nil && r.free < len(mc.Bindings):
-				base = mc.Bindings[r.free]
-			default:
-				continue
-			}
-			if p, ok := pathOf(base); ok {
-				dropRelease(guardPath{p.root, p.steps + r.steps}, r.prefix)
-			}
-		}
-		if !take {
-			return
-		}
-		// What the callee returns holding, translated through the arguments, or for a closure
-		// through its bindings (as translate does for entry locks).
-		for _, a := range gs.acquires[callee] {
-			var base ssa.Value
-			switch {
-			case a.Param >= 0 && a.Param < len(cc.Args):
-				base = cc.Args[a.Param]
-			case a.Free >= 0 && mc != nil && a.Free < len(mc.Bindings):
-				base = mc.Bindings[a.Free]
-			default:
-				continue
-			}
-			if p, ok := pathOf(base); ok {
-				k := guardPath{p.root, p.steps + a.Steps}
-				s[k] = max(s[k], a.Mode)
-			}
+		for _, a := range cc.Args {
+			killFor(s, a)
 		}
 		return
 	}
-	// Another package, an interface method or a dynamic call: anything it receives may be unlocked.
-	if cc.IsInvoke() {
-		killFor(s, cc.Value)
+	dropRelease := func(target guardPath, prefix bool) {
+		if !prefix {
+			delete(s, target)
+			return
+		}
+		for k := range s {
+			if k.root == target.root && hasStepPrefix(k.steps, target.steps) {
+				delete(s, k)
+			}
+		}
 	}
-	for _, a := range cc.Args {
-		killFor(s, a)
-	}
-	if take && !cc.IsInvoke() {
-		if callee := cc.StaticCallee(); callee != nil {
-			for _, a := range st.summary(callee).acquires {
-				if a.Param >= 0 && a.Param < len(cc.Args) {
-					if p, ok := pathOf(cc.Args[a.Param]); ok {
+	// held is what every target returns holding, translated through what the target runs on, or
+	// for a closure through its bindings (as translate does for entry locks).
+	var held lockset
+	for _, t := range targets {
+		got := lockset{}
+		k, recv := lockTargetOp(t)
+		switch {
+		case k != 0:
+			// A mutex method bound to its mutex.
+			if p, ok := pathOf(recv); ok {
+				switch k {
+				case opLock:
+					got[p] = lockWrite
+				case opRLock:
+					got[p] = lockRead
+				case opUnlock:
+					delete(s, p)
+				}
+			}
+		case t.fn.Pkg != st.ssa.Pkg:
+			// A function of another package: anything it receives or captures may be unlocked,
+			// and it takes what its summary says.
+			for _, a := range t.args {
+				killFor(s, a)
+			}
+			if t.mc != nil {
+				for _, b := range t.mc.Bindings {
+					killFor(s, b)
+				}
+			}
+			for _, a := range st.summary(t.fn).acquires {
+				if a.Param >= 0 && a.Param < len(t.args) {
+					if p, ok := pathOf(t.args[a.Param]); ok {
 						k := guardPath{p.root, p.steps + a.Steps}
-						s[k] = max(s[k], a.Mode)
+						got[k] = max(got[k], a.Mode)
 					}
 				}
 			}
+		case st.holdsOf(t.fn) == nil:
+			// A function of this package, by its summaries. A //gosree:holds function neither
+			// releases nor takes: it leaves got empty.
+			for _, r := range gs.releases[t.fn] {
+				if r.global != nil {
+					dropRelease(guardPath{r.global, r.steps}, r.prefix)
+					continue
+				}
+				var base ssa.Value
+				switch {
+				case r.param >= 0 && r.param < len(t.args):
+					base = t.args[r.param]
+				case r.free >= 0 && t.mc != nil && r.free < len(t.mc.Bindings):
+					base = t.mc.Bindings[r.free]
+				default:
+					continue
+				}
+				if p, ok := pathOf(base); ok {
+					dropRelease(guardPath{p.root, p.steps + r.steps}, r.prefix)
+				}
+			}
+			for _, a := range gs.acquires[t.fn] {
+				var base ssa.Value
+				switch {
+				case a.Param >= 0 && a.Param < len(t.args):
+					base = t.args[a.Param]
+				case a.Free >= 0 && t.mc != nil && a.Free < len(t.mc.Bindings):
+					base = t.mc.Bindings[a.Free]
+				default:
+					continue
+				}
+				if p, ok := pathOf(base); ok {
+					k := guardPath{p.root, p.steps + a.Steps}
+					got[k] = max(got[k], a.Mode)
+				}
+			}
 		}
+		if held == nil {
+			held = got
+			continue
+		}
+		for k, m := range held {
+			if g, ok := got[k]; ok {
+				held[k] = min(m, g)
+			} else {
+				delete(held, k)
+			}
+		}
+	}
+	if !all {
+		// Something this did not find may run as well: it may unlock what it is handed, as a
+		// call that is not known may, and nothing the others take can be counted on.
+		for _, a := range cc.Args {
+			killFor(s, a)
+		}
+		return
+	}
+	if !take {
+		return
+	}
+	for k, m := range held {
+		s[k] = max(s[k], m)
 	}
 }
 
@@ -1404,20 +1479,22 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 		// Releasing a //gosree:holds mutex inside the helper breaks its contract.
 		if ci, ok := ins.(ssa.CallInstruction); ok {
 			cc := ci.Common()
-			if k, recv := lockOp(cc); k == opUnlock {
-				if p, ok := pathOf(recv); ok && slices.Contains(holdsOwn, p) {
-					st.report(ci.Pos(), annot.CategoryMalformed, fmt.Sprintf(
-						"%s is //gosree:holds %s but unlocks it here", fn.Name(), muName(st.holdsOf(fn), holdsOwn, p)))
+			// Any function the call may run that unlocks it. One report for the call.
+			unlocks := func(t lockTarget) (guardPath, bool) {
+				if k, recv := lockTargetOp(t); k != 0 {
+					if p, ok := pathOf(recv); ok && k == opUnlock && slices.Contains(holdsOwn, p) {
+						return p, true
+					}
+					return guardPath{}, false
 				}
-			} else if callee, bindings := directCallee(cc.Value); callee != nil && len(holdsOwn) > 0 {
-				for _, rel := range gs.releases[callee] {
+				for _, rel := range gs.releases[t.fn] {
 					var p guardPath
 					var ok bool
-					if rel.param >= 0 && rel.param < len(cc.Args) {
-						p, ok = pathOf(cc.Args[rel.param])
+					if rel.param >= 0 && rel.param < len(t.args) {
+						p, ok = pathOf(t.args[rel.param])
 						p.steps += rel.steps
-					} else if rel.free >= 0 && rel.free < len(bindings) {
-						p, ok = pathOf(bindings[rel.free])
+					} else if rel.free >= 0 && t.mc != nil && rel.free < len(t.mc.Bindings) {
+						p, ok = pathOf(t.mc.Bindings[rel.free])
 						p.steps += rel.steps
 					} else if rel.global != nil {
 						p, ok = guardPath{root: rel.global, steps: rel.steps}, true
@@ -1425,21 +1502,23 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 					if !ok {
 						continue
 					}
-					matched := guardPath{}
-					hit := false
 					if !rel.prefix {
 						if slices.Contains(holdsOwn, p) {
-							matched, hit = p, true
+							return p, true
 						}
-					} else {
-						for _, hp := range holdsOwn {
-							if hp.root == p.root && hasStepPrefix(hp.steps, p.steps) {
-								matched, hit = hp, true
-								break
-							}
+						continue
+					}
+					for _, hp := range holdsOwn {
+						if hp.root == p.root && hasStepPrefix(hp.steps, p.steps) {
+							return hp, true
 						}
 					}
-					if hit {
+				}
+				return guardPath{}, false
+			}
+			if len(holdsOwn) > 0 {
+				for _, t := range lockCallTargets(cc) {
+					if matched, hit := unlocks(t); hit {
 						st.report(ci.Pos(), annot.CategoryMalformed, fmt.Sprintf(
 							"%s is //gosree:holds %s but unlocks it here", fn.Name(), muName(st.holdsOf(fn), holdsOwn, matched)))
 						break

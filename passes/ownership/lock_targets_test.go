@@ -1,0 +1,191 @@
+package ownership_test
+
+import (
+	"strings"
+	"testing"
+)
+
+// A call of a variable that may hold one of several functions. What the lock check takes from the
+// call has to hold for whichever one runs: a lock is held afterwards only if every one of them
+// takes it, and is no longer held if any one of them releases it. The check used to look at one
+// closure the variable may hold and skip a plain function altogether, so "locks, or does nothing"
+// counted as locking and the unguarded write after it was not reported.
+const lockTargetsHead = `package p
+
+import (
+	"runtime"
+	"sync"
+)
+
+var _ = runtime.Gosched
+
+var hook func()
+
+type S struct {
+	mu sync.Mutex
+	//gosree:guarded_by mu
+	n int
+}
+
+func set(p *func()) { *p = func() {} }
+
+func pick() func() { return func() {} }
+
+func (s *S) unlockIt() { s.mu.Unlock() }
+
+func (s *S) lockIt() { s.mu.Lock() }
+
+func (s *S) lockBound() {
+	f := s.mu.Lock
+	f()
+}
+
+func (s *S) maybeUnlockBound(c bool) {
+	f := func() {}
+	if c {
+		f = s.mu.Unlock
+	}
+	f()
+}
+
+func (s *S) maybeUnlockMethod(c bool) {
+	f := func() {}
+	if c {
+		f = s.unlockIt
+	}
+	f()
+}
+
+func (s *S) maybeUnlock(c bool) {
+	f := func() {}
+	if c {
+		f = func() { s.mu.Unlock() }
+	}
+	f()
+}
+`
+
+func lockTargetsDiags(t *testing.T, body string) []string {
+	t.Helper()
+	return advDiagLines(t, lockTargetsHead+"\nfunc (s *S) m(c bool) {\n\t"+body+"\n}\n", "SAFE009")
+}
+
+func TestLockTakenByOneOfSeveralCalleesIsNotHeld(t *testing.T) {
+	for name, body := range map[string]string{
+		"locks, or does nothing":                 "f := func() { s.mu.Lock() }\n\tif c {\n\t\tf = func() {}\n\t}\n\tf()\n\ts.n++",
+		"does nothing, or locks":                 "f := func() {}\n\tif c {\n\t\tf = func() { s.mu.Lock() }\n\t}\n\tf()\n\ts.n++",
+		"locks, or reads the field":              "f := func() { s.mu.Lock() }\n\tif c {\n\t\tf = func() { _ = s }\n\t}\n\tf()\n\ts.n++",
+		"held, then unlocks or does nothing":     "f := func() {}\n\tif c {\n\t\tf = func() { s.mu.Unlock() }\n\t}\n\ts.mu.Lock()\n\tf()\n\ts.n++",
+		"held, then does nothing or unlocks":     "f := func() { s.mu.Unlock() }\n\tif c {\n\t\tf = func() {}\n\t}\n\ts.mu.Lock()\n\tf()\n\ts.n++",
+		"held, then one of two closures unlocks": "f := func() { _ = s }\n\tif c {\n\t\tf = func() { s.mu.Unlock() }\n\t}\n\ts.mu.Lock()\n\tf()\n\ts.n++",
+		// The variable is in a cell: another closure captures it.
+		"a cell: locks, or does nothing":                   "var f func()\n\tf = func() { s.mu.Lock() }\n\tif c {\n\t\tf = func() {}\n\t}\n\tg := func() { f() }\n\t_ = g\n\tf()\n\ts.n++",
+		"a cell: held, then does nothing or unlocks":       "var f func()\n\tf = func() {}\n\tif c {\n\t\tf = func() { s.mu.Unlock() }\n\t}\n\tg := func() { f() }\n\t_ = g\n\ts.mu.Lock()\n\tf()\n\ts.n++",
+		"a cell another closure overwrites: locks, or not": "f := func() { s.mu.Lock() }\n\treset := func() { f = func() {} }\n\tif c {\n\t\treset()\n\t}\n\tf()\n\ts.n++",
+		"a cell whose address is handed on: locks, or not": "f := func() { s.mu.Lock() }\n\tset(&f)\n\tf()\n\ts.n++",
+		"held, then a helper calls a closure that unlocks": "s.mu.Lock()\n\ts.maybeUnlock(c)\n\ts.n++",
+		"written out: locks on one path":                   "if c {\n\t\ts.mu.Lock()\n\t}\n\ts.n++",
+	} {
+		got := lockTargetsDiags(t, body)
+		if len(got) == 0 || !strings.Contains(strings.Join(got, "\n"), "without holding it") {
+			t.Errorf("%s: n is written without mu held on some path, and it was not reported; got %v", name, got)
+		}
+	}
+}
+
+// What the fix must not take away: when every function the variable may hold takes the lock, it
+// is held afterwards; a single closure is as before, also one that another closure only calls.
+func TestLockTakenByEveryCalleeIsHeld(t *testing.T) {
+	for name, body := range map[string]string{
+		"one closure that locks":                           "f := func() { s.mu.Lock() }\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"two closures that both lock":                      "f := func() { s.mu.Lock() }\n\tif c {\n\t\tf = func() { s.mu.Lock(); _ = c }\n\t}\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"held, and neither unlocks":                        "f := func() { _ = s }\n\tif c {\n\t\tf = func() {}\n\t}\n\ts.mu.Lock()\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"a cell: one closure that locks, called by others": "var f func()\n\tf = func() { s.mu.Lock() }\n\tg := func() { f(); s.mu.Unlock() }\n\t_ = g\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+	} {
+		if got := lockTargetsDiags(t, body); len(got) != 0 {
+			t.Errorf("%s: mu is held where n is written, and it was reported: %v", name, got)
+		}
+	}
+}
+
+// One of the things the variable may hold is a mutex method bound to its mutex (f = s.mu.Unlock),
+// a method of this package bound to its receiver (f = s.unlockIt), or a function of another
+// package. Each of them gives its own part: what any one releases is released, whatever the
+// others are, and a lock is held afterwards only if each of them takes it.
+func TestLockMethodValueAmongSeveralCallees(t *testing.T) {
+	for name, body := range map[string]string{
+		"held; nothing, or mu.Unlock":                 "s.mu.Lock()\n\tf := func() {}\n\tif c {\n\t\tf = s.mu.Unlock\n\t}\n\tf()\n\ts.n++",
+		"held; mu.Unlock, or nothing":                 "s.mu.Lock()\n\tf := s.mu.Unlock\n\tif c {\n\t\tf = func() {}\n\t}\n\tf()\n\ts.n++",
+		"held; a closure that unlocks, or Gosched":    "s.mu.Lock()\n\tf := func() { s.mu.Unlock() }\n\tif c {\n\t\tf = runtime.Gosched\n\t}\n\tf()\n\ts.n++",
+		"held; Gosched, or a closure that unlocks":    "s.mu.Lock()\n\tf := runtime.Gosched\n\tif c {\n\t\tf = func() { s.mu.Unlock() }\n\t}\n\tf()\n\ts.n++",
+		"held; nothing, or an interface's Unlock":     "var l sync.Locker = &s.mu\n\tf := func() {}\n\tif c {\n\t\tf = l.Unlock\n\t}\n\ts.mu.Lock()\n\tf()\n\ts.n++",
+		"locks, or what a call returns":               "f := func() { s.mu.Lock() }\n\tif c {\n\t\tf = pick()\n\t}\n\tf()\n\ts.n++",
+		"held; mu.Unlock alone":                       "s.mu.Lock()\n\tf := s.mu.Unlock\n\tf()\n\ts.n++",
+		"nothing, or mu.Lock":                         "f := func() {}\n\tif c {\n\t\tf = s.mu.Lock\n\t}\n\tf()\n\ts.n++",
+		"held; s.unlockIt alone":                      "s.mu.Lock()\n\tf := s.unlockIt\n\tf()\n\ts.n++",
+		"held; nothing, or s.unlockIt":                "s.mu.Lock()\n\tf := func() {}\n\tif c {\n\t\tf = s.unlockIt\n\t}\n\tf()\n\ts.n++",
+		"nothing, or s.lockIt":                        "f := func() {}\n\tif c {\n\t\tf = s.lockIt\n\t}\n\tf()\n\ts.n++",
+		"held; a helper that may call mu.Unlock":      "s.mu.Lock()\n\ts.maybeUnlockBound(c)\n\ts.n++",
+		"held; a helper that may call s.unlockIt":     "s.mu.Lock()\n\ts.maybeUnlockMethod(c)\n\ts.n++",
+		"held; a closure that unlocks, or a hook":     "s.mu.Lock()\n\tf := func() { s.mu.Unlock() }\n\tif c {\n\t\tf = hook\n\t}\n\tf()\n\ts.n++",
+		"held; a goroutine of nothing, or mu.Unlock":  "s.mu.Lock()\n\tf := func() {}\n\tif c {\n\t\tf = s.mu.Unlock\n\t}\n\tgo f()\n\ts.n++",
+		"held; a goroutine of nothing, or s.unlockIt": "s.mu.Lock()\n\tf := func() {}\n\tif c {\n\t\tf = s.unlockIt\n\t}\n\tgo f()\n\ts.n++",
+		"mu.Lock, or a hook":                          "f := s.mu.Lock\n\tif c {\n\t\tf = hook\n\t}\n\tf()\n\ts.n++",
+	} {
+		got := lockTargetsDiags(t, body)
+		if len(got) == 0 || !strings.Contains(strings.Join(got, "\n"), "without holding it") {
+			t.Errorf("%s: n is written without mu held on some path, and it was not reported; got %v", name, got)
+		}
+	}
+	for name, body := range map[string]string{
+		"mu.Lock, or a closure that locks":               "f := s.mu.Lock\n\tif c {\n\t\tf = func() { s.mu.Lock() }\n\t}\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"a helper that locks through mu.Lock as a value": "s.lockBound()\n\ts.n++\n\ts.mu.Unlock()",
+		"mu.Lock alone":                           "f := s.mu.Lock\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"s.lockIt alone":                          "f := s.lockIt\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"s.lockIt, or mu.Lock":                    "f := s.lockIt\n\tif c {\n\t\tf = s.mu.Lock\n\t}\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"held; Gosched, or a closure that reads":  "s.mu.Lock()\n\tf := runtime.Gosched\n\tif c {\n\t\tf = func() { _ = s }\n\t}\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+		"held; nothing, or a hook handed nothing": "s.mu.Lock()\n\tf := func() {}\n\tif c {\n\t\tf = hook\n\t}\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+	} {
+		if got := lockTargetsDiags(t, body); len(got) != 0 {
+			t.Errorf("%s: mu is held where n is written, and it was reported: %v", name, got)
+		}
+	}
+}
+
+// A //gosree:holds helper must not unlock its mutex, also not through one of several functions a
+// variable may hold.
+func TestLockHoldsHelperUnlockingThroughOneOfSeveral(t *testing.T) {
+	holds := func(body string) []string {
+		return advDiagLines(t, lockTargetsHead+"\n//gosree:holds mu\nfunc (s *S) h(c bool) {\n\t"+body+"\n}\n", "SAFE007")
+	}
+	for name, body := range map[string]string{
+		"nothing, or mu.Unlock":  "f := func() {}\n\tif c {\n\t\tf = s.mu.Unlock\n\t}\n\tf()",
+		"mu.Unlock, or nothing":  "f := s.mu.Unlock\n\tif c {\n\t\tf = func() {}\n\t}\n\tf()",
+		"mu.Unlock alone":        "f := s.mu.Unlock\n\tf()",
+		"nothing, or s.unlockIt": "f := func() {}\n\tif c {\n\t\tf = s.unlockIt\n\t}\n\tf()",
+		"s.unlockIt alone":       "f := s.unlockIt\n\tf()",
+		"s.unlockIt called":      "s.unlockIt()",
+	} {
+		if got := holds(body); len(got) == 0 {
+			t.Errorf("%s: the helper may unlock the mutex it is declared to hold, and it was not reported", name)
+		}
+	}
+	for name, body := range map[string]string{
+		"nothing, or a closure that reads": "f := func() {}\n\tif c {\n\t\tf = func() { _ = s }\n\t}\n\tf()",
+		"nothing, or Gosched":              "f := func() {}\n\tif c {\n\t\tf = runtime.Gosched\n\t}\n\tf()",
+	} {
+		if got := holds(body); len(got) != 0 {
+			t.Errorf("%s: the helper does not unlock its mutex, and it was reported: %v", name, got)
+		}
+	}
+}
+
+// Pinned, not wanted: a //gosree:holds helper that unlocks its mutex inside a closure is not
+// reported. The closure sees the receiver through the cell it captures, and the helper's own
+// mutexes are kept as paths from its parameter, so the two are not matched.
+func TestLockHoldsHelperUnlockingInAClosureIsAKnownMiss(t *testing.T) {
+	got := advDiagLines(t, lockTargetsHead+"\n//gosree:holds mu\nfunc (s *S) h(c bool) {\n\tf := func() { s.mu.Unlock() }\n\tf()\n}\n", "SAFE007")
+	if len(got) != 0 {
+		t.Fatalf("the known miss is reported now; make this a must-report case: %v", got)
+	}
+}

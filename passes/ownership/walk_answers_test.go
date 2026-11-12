@@ -20,7 +20,11 @@ import (
 // the next walk, the next limit or the next check that asks cannot be added without being looked at:
 //
 //   - TestWalkAnswersAreNotDropped: a walk answers with what it found and whether that is all. The
-//     second part may be thrown away only at the places listed here, each with its reason.
+//     second part may be thrown away only at the places listed here, each with its reason. The
+//     walk that says which functions a called value may be (callTargets) is one of them: its
+//     second answer is what else the value may be.
+//   - TestCallersThatAskForAnyTargetAreListed: the two helpers that hand on callTargets' list
+//     without its second answer may be called only from the places listed here.
 //   - TestEveryBoundOnAWalkIsListed: every fixed number that can end a walk or a fixpoint early is
 //     listed here with what the code does when it is reached.
 //   - TestEveryQuestionIsRead: a check that asks the walks something (state.ask) reads whether the
@@ -82,6 +86,43 @@ func answersWhetherThatIsAll(ft *ast.FuncType) bool {
 	return false
 }
 
+// answersWhatElse reports whether a function's results are the functions a called value may be and
+// what else it may be: ([]callTarget, []ssa.Value), or ([]lockTarget, bool) for whether the list is
+// all of them.
+func answersWhatElse(ft *ast.FuncType) bool {
+	if ft.Results == nil || len(ft.Results.List) != 2 {
+		return false
+	}
+	first, second := ft.Results.List[0], ft.Results.List[1]
+	if len(first.Names) > 1 || len(second.Names) > 1 {
+		return false
+	}
+	arr, ok := first.Type.(*ast.ArrayType)
+	if !ok || arr.Len != nil {
+		return false
+	}
+	if elt, ok := arr.Elt.(*ast.Ident); !ok || (elt.Name != "callTarget" && elt.Name != "lockTarget") {
+		return false
+	}
+	switch rest := second.Type.(type) {
+	case *ast.Ident:
+		return rest.Name == "bool"
+	case *ast.ArrayType:
+		sel, ok := rest.Elt.(*ast.SelectorExpr)
+		if !ok || rest.Len != nil {
+			return false
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		return ok && pkg.Name == "ssa" && sel.Sel.Name == "Value"
+	}
+	return false
+}
+
+// answersInTwoParts is either form: a list, and whether or what the list leaves out.
+func answersInTwoParts(ft *ast.FuncType) bool {
+	return answersWhetherThatIsAll(ft) || answersWhatElse(ft)
+}
+
 func calledName(call *ast.CallExpr) string {
 	switch f := call.Fun.(type) {
 	case *ast.Ident:
@@ -104,6 +145,8 @@ var droppedWalkAnswers = map[string]struct {
 	"traceMapLookupOrigins":        {1, "a map lookup always answers incomplete: what the map holds is not all in sight"},
 	"checkSharedLoadWrites":        {1, "the callees of a dynamic call: a callee that is not in sight is not reported, by the rule in docs/RULES.md (SAFE005-incomplete); a walk that was cut is, through the question's cut, which this call site reads"},
 	"propagateSharedToMethods":     {1, "the receivers of an interface call: as for checkSharedLoadWrites, a cut walk is reported through the question's cut and a receiver that is not in sight is not"},
+	"closureCandidates":            {1, "the helper for a caller that asks what any closure a value may be does; its callers are listed, each with its reason, in anyTargetCallers"},
+	"lockCallTargets":              {1, "the helper for a caller that asks what any function a call may run does to a lock; its callers are listed, each with its reason, in anyTargetCallers"},
 }
 
 func TestWalkAnswersAreNotDropped(t *testing.T) {
@@ -111,18 +154,18 @@ func TestWalkAnswersAreNotDropped(t *testing.T) {
 	walks := map[string]bool{}
 	for _, f := range files {
 		for _, d := range f.Decls {
-			if fd, ok := d.(*ast.FuncDecl); ok && answersWhetherThatIsAll(fd.Type) {
+			if fd, ok := d.(*ast.FuncDecl); ok && answersInTwoParts(fd.Type) {
 				walks[fd.Name.Name] = true
 			}
 		}
 	}
-	for _, name := range []string{"traceSSAOrigins", "tracePtrBaseOrigins", "resolveInterfaceTypes"} {
+	for _, name := range []string{"traceSSAOrigins", "tracePtrBaseOrigins", "resolveInterfaceTypes", "callTargets", "lockCallTargetsAll"} {
 		if !walks[name] {
 			t.Fatalf("%s is not recognised as a walk; the test no longer sees what it is about", name)
 		}
 	}
-	if len(walks) < 10 {
-		t.Fatalf("%d walks recognised, fewer than the package had when this was written (11)", len(walks))
+	if len(walks) < 13 {
+		t.Fatalf("%d walks recognised, fewer than the package had when this was written (13)", len(walks))
 	}
 
 	dropped := map[string]int{}
@@ -147,7 +190,7 @@ func TestWalkAnswersAreNotDropped(t *testing.T) {
 				switch parent := stack[len(stack)-2].(type) {
 				case *ast.ReturnStmt:
 					// Handed up whole: allowed where the function itself answers the same way.
-					if len(parent.Results) != 1 || !answersWhetherThatIsAll(fd.Type) {
+					if len(parent.Results) != 1 || !answersInTwoParts(fd.Type) {
 						t.Errorf("%s: %s returns the answer of %s in a function that does not answer whether that is all", at, fd.Name.Name, calledName(call))
 					}
 				case *ast.AssignStmt:
@@ -177,6 +220,72 @@ func TestWalkAnswersAreNotDropped(t *testing.T) {
 	for fn := range droppedWalkAnswers {
 		if dropped[fn] == 0 {
 			t.Errorf("droppedWalkAnswers lists %s, which no longer throws an answer away: remove the entry", fn)
+		}
+	}
+}
+
+// anyTargetCallers lists, by the function it is in, every call of closureCandidates and of
+// lockCallTargets: the two that hand on the functions a called value may be without what else it
+// may be. Each entry says how many calls there are and why what was left out does not change the
+// answer there.
+var anyTargetCallers = map[string]struct {
+	n   int
+	why string
+}{
+	"goStmt":                       {1, "one closure stands for all the value may be, resolved or not: a phi or a cell joins them into one class and the transfer is of the class (TestGoOfVariableThatMayBeTwoClosures)"},
+	"checkBorrowEscape":            {1, "asks only whether a closure is in sight before looking for the borrows it captures"},
+	"identifyCapturedBorrowsSpawn": {1, "what any closure in sight borrows crosses; when none is found it goes on to read the syntax at the spawn, so nothing rests on the list being all"},
+	"checkSharedLoadWrites":        {1, "the closures an argument may be are followed with what they capture; what else the argument may be is a callee that is not in sight, which is not reported (docs/RULES.md, SAFE005-incomplete)"},
+	"checkHandlerWrites":           {1, "the closures an argument may be are followed with what they capture; what else the argument may be travels as the argument's own value into the callee's parameter, and the callee's call of that parameter reads callTargets' second answer"},
+	"callStep":                     {1, "a go statement: what any closure it may start captures may be unlocked; what else it may start is a call that is not known, which may unlock what it is handed, and the arguments are dropped just before"},
+	"hasLockOps":                   {1, "decides only whether the package takes any lock that could be credited; what a function not in sight takes is never credited"},
+	"releaseSummaries":             {1, "a summary holds the releases in sight: a release by any function the call may run is one. What else the call may run is, in a summary, as a call nothing is known about"},
+	"acquireSummaries":             {1, "decides only whether the function is worth evaluating; the evaluation goes through callStep, which reads whether the list is all"},
+	"checkGuardedFunc":             {1, "reports a //gosree:holds helper for an unlock by any function in sight; one that is not in sight cannot be shown to unlock"},
+}
+
+func TestCallersThatAskForAnyTargetAreListed(t *testing.T) {
+	_, files := ownSource(t)
+	helpers := map[string]bool{"closureCandidates": true, "lockCallTargets": true}
+	declared := map[string]bool{}
+	calls := map[string]int{}
+	for _, f := range files {
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			if helpers[fd.Name.Name] {
+				declared[fd.Name.Name] = true
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && helpers[calledName(call)] {
+					calls[fd.Name.Name]++
+				}
+				return true
+			})
+		}
+	}
+	for name := range helpers {
+		if !declared[name] {
+			t.Fatalf("%s is not declared; the test no longer sees what it is about", name)
+		}
+		if _, listed := droppedWalkAnswers[name]; !listed {
+			t.Fatalf("%s is not in droppedWalkAnswers: it is here because it drops callTargets' second answer", name)
+		}
+	}
+	for fn, n := range calls {
+		want, listed := anyTargetCallers[fn]
+		switch {
+		case !listed:
+			t.Errorf("%s asks %d time(s) for the functions a value may be without what else it may be, and is not in anyTargetCallers: read the second answer (callTargets, lockCallTargetsAll), or list it with the reason it does not matter there", fn, n)
+		case n != want.n:
+			t.Errorf("%s asks %d time(s) for the functions a value may be without what else it may be, anyTargetCallers says %d: look at the new one", fn, n, want.n)
+		}
+	}
+	for fn := range anyTargetCallers {
+		if calls[fn] == 0 {
+			t.Errorf("anyTargetCallers lists %s, which no longer asks: remove the entry", fn)
 		}
 	}
 }

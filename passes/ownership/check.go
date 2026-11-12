@@ -324,7 +324,7 @@ func (st *state) checkBorrowEscape(g *graph, t transfer) bool {
 			}
 		}
 	} else if callIns, ok := t.instr.(*ssa.Call); ok {
-		if mc := resolveClosureVal(t.v, 0); mc != nil {
+		if len(closureCandidates(t.v)) > 0 {
 			borrows := st.identifyCapturedBorrowsSpawn(g, spawnSite{ins: callIns, fn: t.v, arg: t.index, via: t.what})
 			if len(borrows) > 0 {
 				for _, b := range borrows {

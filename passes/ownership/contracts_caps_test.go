@@ -247,8 +247,12 @@ func TestSharedLoadCalleeChosenAmongMany(t *testing.T) {
 // TestSharedLoadCalleeThroughManyConversions: memory loaded from an atomic.Pointer is passed to a
 // writer that was converted between two named function types 16 times. The trace of what the called
 // value may be goes 14 steps deep; past that it found no callee, and the write was passed without a
-// word. It now reports at the call that it could not follow the value. Through 2 conversions the
-// write itself is found.
+// word. It then reported at the call that it could not follow the value. Since the call asks
+// callTargets first, which follows conversions of a function to the end as it does for a closure,
+// the writer is found and its write is reported, however many conversions there are (far; what the
+// call may publish is still worked out by the trace, which is cut and says so). Where
+// the function comes in as a parameter the trace is still what follows it, and it still says when
+// it is cut (farParam). Through 2 conversions the write itself is found, as before.
 func TestSharedLoadCalleeThroughManyConversions(t *testing.T) {
 	fconv := func(expr string, n int) string {
 		for i := range n {
@@ -258,9 +262,12 @@ func TestSharedLoadCalleeThroughManyConversions(t *testing.T) {
 	}
 	analyseWalk(t, "package walk\n\nimport \"sync/atomic\"\n\ntype T struct{ n int }\n\nvar cur atomic.Pointer[T]\n\n"+
 		"type f0 func(*T)\n\ntype f1 func(*T)\n\n"+
-		"func writerFar(t *T) { t.n++ }\n\n"+
+		"func writerFar(t *T) { t.n++ } // want \"SAFE005: write through shared value loaded from\"\n\n"+
+		"func writerParam(t *T) { t.n++ }\n\n"+
 		"func writerNear(t *T) { t.n++ } // want \"SAFE005: write through shared value loaded from\"\n\n"+
-		"func far() {\n\tc := cur.Load()\n\tf := "+fconv("writerFar", 16)+"\n\tf(c) // want \"SAFE005: which functions the value called here may be could not be followed to the end .it comes through more than 14 steps or from more than 96 values.\" "+wantCutArg+"\n}\n\n"+
+		"func far() {\n\tc := cur.Load()\n\tf := "+fconv("writerFar", 16)+"\n\tf(c) // want "+wantCutArg+"\n}\n\n"+
+		"func farParam(g func(*T)) {\n\tc := cur.Load()\n\tf := "+fconv("g", 16)+"\n\tf(c) // want \"SAFE005: which functions the value called here may be could not be followed to the end .it comes through more than 14 steps or from more than 96 values.\" "+wantCutArg+"\n}\n\n"+
+		"func callFarParam() { farParam(writerParam) }\n\n"+
 		"func near() {\n\tc := cur.Load()\n\tf := "+fconv("writerNear", 2)+"\n\tf(c)\n}\n")
 }
 

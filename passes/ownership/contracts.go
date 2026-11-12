@@ -2652,7 +2652,8 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 			}
 			cc := c.Common()
 			for _, a := range cc.Args {
-				if mc := resolveClosureVal(a, 0); mc != nil {
+				// Every closure the argument may be: the callee may call any of them.
+				for _, mc := range closureCandidates(a) {
 					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
 						st.forwardShared(ins, argFn, nil, mc.Bindings, origins, rootOf, add, emit)
 						for j, b := range mc.Bindings {

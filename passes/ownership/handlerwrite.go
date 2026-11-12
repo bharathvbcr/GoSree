@@ -165,9 +165,15 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 				}
 				return
 			}
-			callee, bindings := directCallee(cc.Value)
-			if callee == nil {
-				for _, v := range append(cc.Args, cc.Value) {
+			// Every function the call may run is followed. Where the called value may also be
+			// something that could not be resolved to a function (rest), that something may
+			// write what the call hands it, and what it is itself: a function read from shared
+			// memory may be a closure over that memory. What a known target captures is its own
+			// and is followed with it.
+			targets, rest := callTargets(cc.Value)
+			if len(rest) > 0 {
+				handed := append(append([]ssa.Value(nil), cc.Args...), rest...)
+				for _, v := range handed {
 					if _, guarded := st.slotOf(v); guarded {
 						continue
 					}
@@ -178,10 +184,14 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 						return
 					}
 				}
+			}
+			if len(targets) == 0 {
 				return
 			}
+			// A closure handed on as an argument may be called by the callee: every closure the
+			// argument may be is followed with what it captures.
 			for _, a := range cc.Args {
-				if mc := resolveClosureVal(a, 0); mc != nil {
+				for _, mc := range closureCandidates(a) {
 					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
 						for j, b := range mc.Bindings {
 							if root, ok := walk.root(b, r); ok && j < len(argFn.FreeVars) {
@@ -191,21 +201,27 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 					}
 				}
 			}
-			if len(callee.Blocks) == 0 || !st.followable(callee) {
-				st.checkCalleeWrites(at(ins), cc, callee, r, walk, sp, regPos, once)
-				return
-			}
-			for i, a := range cc.Args {
-				if i >= len(callee.Params) {
-					break
+			for _, t := range targets {
+				callee := t.fn
+				if len(callee.Blocks) == 0 || !st.followable(callee) {
+					st.checkCalleeWrites(at(ins), cc, callee, r, walk, sp, regPos, once)
+					continue
 				}
-				if root, ok := walk.root(a, r); ok {
-					add(into(callee, ins), callee.Params[i], r[root])
+				for i, a := range cc.Args {
+					if i >= len(callee.Params) {
+						break
+					}
+					if root, ok := walk.root(a, r); ok {
+						add(into(callee, ins), callee.Params[i], r[root])
+					}
 				}
-			}
-			for j, b := range bindings {
-				if root, ok := walk.root(b, r); ok && j < len(callee.FreeVars) {
-					add(into(callee, ins), callee.FreeVars[j], r[root])
+				if t.mc == nil {
+					continue
+				}
+				for j, b := range t.mc.Bindings {
+					if root, ok := walk.root(b, r); ok && j < len(callee.FreeVars) {
+						add(into(callee, ins), callee.FreeVars[j], r[root])
+					}
 				}
 			}
 		})
@@ -353,8 +369,11 @@ func unwrapToClosure(mi *ssa.MakeInterface) (ssa.Value, bool) {
 	return nil, false
 }
 
-// directCallee returns the function a call runs when it is known statically, with the closure's
-// bindings when the callee is a closure built in place.
+// directCallee returns the function a call runs when it can be only one: the function itself, a
+// closure built in place, or a variable that holds one function and nothing else (callTargets).
+// The second result is the closure's bindings. A value that may be one of several functions has
+// no direct callee: it used to answer with the first closure it found, and whoever asked took
+// that one for all of them. The callers that can work with several ask for the targets.
 func directCallee(v ssa.Value) (*ssa.Function, []ssa.Value) {
 	switch x := v.(type) {
 	case *ssa.Function:
@@ -362,8 +381,11 @@ func directCallee(v ssa.Value) (*ssa.Function, []ssa.Value) {
 	case *ssa.MakeClosure:
 		return x.Fn.(*ssa.Function), x.Bindings
 	}
-	if mc := resolveClosureVal(v, 0); mc != nil {
-		return mc.Fn.(*ssa.Function), mc.Bindings
+	if targets, rest := callTargets(v); len(rest) == 0 && len(targets) == 1 {
+		if mc := targets[0].mc; mc != nil {
+			return targets[0].fn, mc.Bindings
+		}
+		return targets[0].fn, nil
 	}
 	return nil, nil
 }

@@ -140,7 +140,7 @@ func TestGlobalWriteThroughLongChain(t *testing.T) {
 }
 
 // TestGoThroughManyConversions: a goroutine is started on a closure converted between two function
-// types 14 times. Finding the closure behind the conversions (resolveClosureVal) used to stop after
+// types 14 times. Finding the closure behind the conversions (callTargets) used to stop after
 // 10, and what the closure captures was then not seen to move to the goroutine.
 func TestGoThroughManyConversions(t *testing.T) {
 	conv := "func() { x.n++ }"
@@ -272,7 +272,7 @@ func TestBorrowParamThroughDeepValue(t *testing.T) {
 
 // TestGoOnVariableAssignedManyTimes: a function variable is assigned 40 functions and then a
 // closure, and a goroutine is started on it. Finding the closure among what the variable was
-// assigned (resolveClosureVal) used to stop after 32 values, and the goroutine then read as one
+// assigned (callTargets) used to stop after 32 values, and the goroutine then read as one
 // started on an unknown function.
 func TestGoOnVariableAssignedManyTimes(t *testing.T) {
 	var funcs, stores strings.Builder

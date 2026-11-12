@@ -564,55 +564,34 @@ func selectCaseBlock(sel *ssa.Select, stateIdx int) *ssa.BasicBlock {
 	return nil
 }
 
-// resolveClosureVal finds the closure a function value is: through conversions, the stores to the
-// local variable it was loaded from, and phis. The walk stays in one function and visits a value
-// once, so it ends when the function's values run out. It used to stop 10 steps or 32 values in,
-// and a closure further back than that was taken for an unknown function. The second argument was
-// that step count; every caller passes 0 and it is no longer read.
-func resolveClosureVal(v ssa.Value, _ int) *ssa.MakeClosure {
-	return resolveClosureValSeen(v, map[ssa.Value]bool{})
+// callTarget is one function a called value may be. mc is the closure that carries its captures,
+// nil for a function that has none.
+type callTarget struct {
+	fn *ssa.Function
+	mc *ssa.MakeClosure
 }
 
-func resolveClosureValSeen(v ssa.Value, seen map[ssa.Value]bool) *ssa.MakeClosure {
-	if v == nil || seen[v] {
-		return nil
-	}
-	seen[v] = true
-	switch val := v.(type) {
-	case *ssa.MakeClosure:
-		return val
-	case *ssa.ChangeType:
-		return resolveClosureValSeen(val.X, seen)
-	case *ssa.UnOp:
-		if val.Op == token.MUL {
-			if alloc, ok := val.X.(*ssa.Alloc); ok {
-				var lastClosure *ssa.MakeClosure
-				for _, ref := range *alloc.Referrers() {
-					if store, ok := ref.(*ssa.Store); ok && store.Addr == alloc {
-						if mc := resolveClosureValSeen(store.Val, seen); mc != nil {
-							lastClosure = mc
-						}
-					}
-				}
-				return lastClosure
-			}
-		}
-	case *ssa.Phi:
-		for _, edge := range val.Edges {
-			if mc := resolveClosureValSeen(edge, seen); mc != nil {
-				return mc
-			}
-		}
-	}
-	return nil
-}
-
-// closureCandidates lists every closure v may be: resolveClosureVal names one of them (the first
-// edge of a phi that leads to a closure, the last store to a variable's cell), which is enough to
-// ask what kind of value v is and not enough where the answer must hold for whichever closure runs.
-func closureCandidates(v ssa.Value) []*ssa.MakeClosure {
-	var out []*ssa.MakeClosure
+// callTargets lists the functions v may be when it is called: v itself, and what reaches it
+// through conversions, phi edges and the stores to a local cell, in this function and in the
+// closures that capture the cell. rest is what it could not resolve to a function: a value of
+// another kind on some path (a parameter, a field, a call's result), or the load of a cell that
+// can be written by something other than the stores seen (a cell whose address goes anywhere but
+// into a load, a store to it or a closure's captures). The targets are all v may be when rest is
+// empty. The stores to a cell are taken together, whatever their order.
+//
+// What a caller takes from the list depends on what it asks. A fact that holds if any target does
+// it (releases a lock, publishes, writes) can be taken from each target. A fact that must hold
+// whichever target runs (a lock is held afterwards) needs every target to have it and rest to be
+// empty. What the call hands over is handed to whatever is in rest as well.
+func callTargets(v ssa.Value) (targets []callTarget, rest []ssa.Value) {
 	seen := map[ssa.Value]bool{}
+	inRest := map[ssa.Value]bool{}
+	unresolved := func(v ssa.Value) {
+		if !inRest[v] {
+			inRest[v] = true
+			rest = append(rest, v)
+		}
+	}
 	var walk func(v ssa.Value)
 	walk = func(v ssa.Value) {
 		if v == nil || seen[v] {
@@ -620,25 +599,88 @@ func closureCandidates(v ssa.Value) []*ssa.MakeClosure {
 		}
 		seen[v] = true
 		switch val := v.(type) {
+		case *ssa.Function:
+			targets = append(targets, callTarget{fn: val})
 		case *ssa.MakeClosure:
-			out = append(out, val)
+			fn, ok := val.Fn.(*ssa.Function)
+			if !ok {
+				unresolved(v)
+				return
+			}
+			targets = append(targets, callTarget{fn: fn, mc: val})
 		case *ssa.ChangeType:
 			walk(val.X)
-		case *ssa.UnOp:
-			if alloc, ok := val.X.(*ssa.Alloc); ok && val.Op == token.MUL && alloc.Referrers() != nil {
-				for _, ref := range *alloc.Referrers() {
-					if store, ok := ref.(*ssa.Store); ok && store.Addr == alloc {
-						walk(store.Val)
-					}
-				}
-			}
 		case *ssa.Phi:
+			if len(val.Edges) == 0 {
+				unresolved(v)
+			}
 			for _, edge := range val.Edges {
 				walk(edge)
 			}
+		case *ssa.UnOp:
+			alloc, ok := val.X.(*ssa.Alloc)
+			if !ok || val.Op != token.MUL || alloc.Referrers() == nil {
+				unresolved(v)
+				return
+			}
+			stores := 0
+			// cell follows one address of the cell: the Alloc, or the free variable a closure
+			// that captures it sees it as.
+			var cell func(addr ssa.Value, refs *[]ssa.Instruction)
+			cell = func(addr ssa.Value, refs *[]ssa.Instruction) {
+				if refs == nil {
+					unresolved(v)
+					return
+				}
+				for _, ref := range *refs {
+					switch r := ref.(type) {
+					case *ssa.Store:
+						if r.Addr != addr {
+							unresolved(v) // the cell's address is stored somewhere
+							continue
+						}
+						stores++
+						walk(r.Val)
+					case *ssa.UnOp, *ssa.DebugRef:
+					case *ssa.MakeClosure:
+						fn, ok := r.Fn.(*ssa.Function)
+						if !ok {
+							unresolved(v)
+							continue
+						}
+						for j, b := range r.Bindings {
+							if b == addr && j < len(fn.FreeVars) && !seen[fn.FreeVars[j]] {
+								seen[fn.FreeVars[j]] = true
+								cell(fn.FreeVars[j], fn.FreeVars[j].Referrers())
+							}
+						}
+					default:
+						unresolved(v) // handed on: something else may write the cell
+					}
+				}
+			}
+			cell(alloc, alloc.Referrers())
+			if stores == 0 {
+				unresolved(v)
+			}
+		default:
+			unresolved(v)
 		}
 	}
 	walk(v)
+	return targets, rest
+}
+
+// closureCandidates lists every closure v may be: the closures among callTargets. It is for a
+// caller that asks what any one of them may do; what else v may be is callTargets' second answer.
+func closureCandidates(v ssa.Value) []*ssa.MakeClosure {
+	var out []*ssa.MakeClosure
+	targets, _ := callTargets(v)
+	for _, t := range targets {
+		if t.mc != nil {
+			out = append(out, t.mc)
+		}
+	}
 	return out
 }
 
@@ -747,8 +789,10 @@ func (g *graph) goStmt(ins *ssa.Go) {
 	case *ssa.MakeClosure:
 		g.transferWithOp(ins, v, token.NoPos, -1, "captured by a goroutine")
 	default:
-		if mc := resolveClosureVal(v, 0); mc != nil {
-			g.transferWithOp(ins, mc, token.NoPos, -1, "captured by a goroutine")
+		// One closure stands for all the value may be: a phi or a cell joins what it may hold
+		// into one class, and the transfer is of the class (TestGoOfVariableThatMayBeTwoClosures).
+		if cands := closureCandidates(v); len(cands) > 0 {
+			g.transferWithOp(ins, cands[0], token.NoPos, -1, "captured by a goroutine")
 		} else {
 			what := "started as a goroutine"
 			if cc.IsInvoke() {
