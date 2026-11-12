@@ -343,7 +343,7 @@ func (st *state) summary(fn *ssa.Function) *summary {
 	if o := fn.Origin(); o != nil {
 		fn = o
 	}
-	if s, ok := st.sums[fn]; ok {
+	if s := st.summaryRead(fn); s != nil {
 		return s
 	}
 	obj, ok := fn.Object().(*types.Func)
@@ -427,6 +427,28 @@ func (st *state) summary(fn *ssa.Function) *summary {
 	}
 	if obj.Pkg().Path() == atomicPkg {
 		s.writeParam = make([]bool, len(f.Writes))
+	}
+	return s
+}
+
+// summaryRead returns the summary worked out for a function of this package, or nil, and records
+// who read it. While the summaries are worked out a function's summary depends on every summary
+// its graph read, and that is not only those of the functions its body names: a call of a
+// variable is answered by the functions the variable may hold, which may be named in another
+// function or in a package variable's initialiser. Whoever read a summary is worked out again
+// when it changes.
+func (st *state) summaryRead(fn *ssa.Function) *summary {
+	s, ok := st.sums[fn]
+	if !ok {
+		return nil
+	}
+	if st.sumFor != nil && st.sumFor != fn {
+		readers := st.sumReaders[fn]
+		if readers == nil {
+			readers = map[*ssa.Function]bool{}
+			st.sumReaders[fn] = readers
+		}
+		readers[st.sumFor] = true
 	}
 	return s
 }
@@ -669,7 +691,8 @@ func andInto(prev, next []bool) []bool {
 
 // computeSummaries iterates to the greatest fixpoint: every function starts optimistic and only
 // ever becomes more pessimistic, so the loop terminates. Functions are evaluated in bottom-up
-// post-order and re-queued along intra-package caller edges when a summary changes.
+// post-order and re-queued when a summary changes: along intra-package caller edges, and to every
+// function that read the summary while its own was worked out (summaryRead).
 func (st *state) computeSummaries(fns []*ssa.Function) {
 	inPkg := make(map[*ssa.Function]bool, len(fns))
 	for _, fn := range fns {
@@ -748,15 +771,27 @@ func (st *state) computeSummaries(fns []*ssa.Function) {
 		fn := queue[0]
 		queue = queue[1:]
 		delete(inQueue, fn)
+		st.sumFor = fn
 		next := summarise(fn, st.buildGraph(fn), st)
+		st.sumFor = nil
 		if !sameSummary(st.sums[fn], next) {
 			merged := mergePessimistic(st.sums[fn], next)
 			if !sameSummary(st.sums[fn], merged) {
 				st.sums[fn] = merged
+				again := func(reader *ssa.Function) {
+					if !inQueue[reader] && len(reader.Blocks) > 0 {
+						inQueue[reader] = true
+						queue = append(queue, reader)
+					}
+				}
 				for _, caller := range callers[fn] {
-					if !inQueue[caller] {
-						inQueue[caller] = true
-						queue = append(queue, caller)
+					again(caller)
+				}
+				// In the order they come in fns: the order of a map differs from run to run, and
+				// so would the order the summaries are worked out in.
+				for _, reader := range fns {
+					if st.sumReaders[fn][reader] {
+						again(reader)
 					}
 				}
 			} else {

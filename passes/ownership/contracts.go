@@ -1624,7 +1624,7 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 	}
 	// What the body does with a published argument besides, for a callee reached as a value: a
 	// direct call reads the same from the summary. There are no summaries while the index is built.
-	if s := st.sums[bodyFn]; s != nil {
+	if s := st.summaryRead(bodyFn); s != nil {
 		for _, p := range out.publishArgs {
 			param := p.argIdx
 			if bound {
@@ -1646,8 +1646,12 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 		out.freshResult = true
 		out.matched = true
 	} else if bodyFn.Signature != nil && bodyFn.Signature.Results() != nil && bodyFn.Signature.Results().Len() > 0 {
-		if s := st.sums[bodyFn]; s != nil && !s.pessimistic && s.fresh && len(s.links) == 0 {
+		// Fresh by what the body does, which its summary says. That is an answer about the call
+		// like any other: a call whose targets were all fresh in this way used to merge to "no
+		// contract", and its result was not owned.
+		if s := st.summaryRead(bodyFn); s != nil && !s.pessimistic && s.fresh && len(s.links) == 0 {
 			out.freshResult = true
+			out.matched = true
 		}
 	}
 	return out
