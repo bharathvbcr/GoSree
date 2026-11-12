@@ -10,9 +10,9 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `5f13bac` on `rework/source` (six commits on top of `b2f480c` that change a checker file, and `c353e05`, the first writing of this record), and the commit after it that carries this text |
-| Checker fingerprint | `0a7c0d8fd423bea4`: `bash tests/stress/fingerprint.sh` |
-| Run | 2026-11-12 afternoon, at `5f13bac`, with nothing else of this run alongside: `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo, 17 packages with tests, all `ok`. The markers were not edited and `TestStress` holds, so the ledger below stands as counted at `dcbc28b`. Not run at this commit: the tests with cgo and the Rust suite; no Rust or cgo file changed. Before that, 2026-11-12 morning, at `dcbc28b`, load average 50-65: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; `passes/ownership` takes about twelve minutes at that load). The ledger below was counted at that commit by `go test ./tests/stress -run '^(TestStress|TestWitnesses)$' -v` without cgo (58 of 58 witnesses convicted). The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
+| Git HEAD | `3f0c738` on `rework/source`: seven commits that change a checker file, on top of `b2f480c` and a merge of `main` at `3322a22` (`a2801ef`), and the commit after it that carries this text |
+| Checker fingerprint | `0e10f1465156690c`: `bash tests/stress/fingerprint.sh` |
+| Run | 2026-11-12 afternoon, at `3f0c738`, with nothing else of this run alongside: `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo, 17 packages with tests, all `ok`. The markers were not edited and `TestStress` holds, so the ledger below stands as counted at `dcbc28b`. Not run at this commit: the tests with cgo and the Rust suite; no Rust or cgo file changed. Before that, 2026-11-12 morning, at `dcbc28b`, load average 50-65: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; `passes/ownership` takes about twelve minutes at that load). The ledger below was counted at that commit by `go test ./tests/stress -run '^(TestStress|TestWitnesses)$' -v` without cgo (58 of 58 witnesses convicted). The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
 is expected and is the suite working: each failure names the marker to promote or the lock that
@@ -993,6 +993,10 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
     commits that change the checker came of it on the branch `rework/source` (`eb228af` to
     `5f13bac`, on top of `b2f480c`). Every number below is for `5f13bac` against `b2f480c` unless
     it says otherwise; the corpus rows are the same at `ba9c7f4`, `b5f6c76` and `5f13bac`.
+    While this was worked on, `main` moved from `b2f480c` to `3322a22` (twelve commits of other
+    work). It was merged into the branch (`a2801ef`) and a seventh commit followed (`3f0c738`); no
+    corpus row differs between `5f13bac` and `3f0c738`. What the merge showed is the last item
+    below.
     - **Where the calls are.** Reference service, production code: 87,917 call sites, 53,344 of
       which hand over memory (an argument that is not of a shareable type). Of those, 64.9% are
       calls by name (19,511 in the package, 15,079 into another package, each of them with a
@@ -1063,6 +1067,16 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
          map every request shares was "passed to a dynamic function call, which may write it".
          The builtins that write are writes already; a call of any other now ends there
          (`ba9c7f4`). Found by reading the rows that were left, not by a fixture.
+      6. `main` had gained `fde27e1` meanwhile: another review of the same code names four
+         shapes where the trace says "these are all the functions" and cannot know, and stops
+         taking a call of a variable as fresh by its targets until that is honest. Three of
+         its four shapes had their rule here by then (item 3). The fourth had not: a channel
+         made here and handed to another function, which may send on it. Merged with this
+         branch, the report its test holds was lost again. The walk now says "may not be all"
+         of a channel with a use that is not a send, a receive, `len`, `cap` or `close`
+         (`3f0c738`). With the four shapes answered, the four calls of fresh functions that
+         `fde27e1` reports on purpose are quiet again, as its test asks, and its test of the
+         four hidden shapes still holds.
     - **Written down before each run**, with what came. First round (the call of known
       targets): rows worded "passed to a dynamic function call, which may write it" 108,
       predicted 62 to 100 with at least 8 gone outright, came 82. The prediction
@@ -1144,7 +1158,16 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
         gone for a builtin (`net/http/server_test.go:139`).
     - **Race corpus**: 229 of 234 race tests flagged and 37 of 129 race-free tests clean, 43
       clean in the annotated copy: as before.
-    - **The walk's complete answers against the oracle.** Reference service: at every call
+    - **Against `main` as it moved.** `3322a22` against `b2f480c`: the reference service's
+      production code and annotated copy are the same row for row; the standard library with
+      tests has 14 more SAFE002 rows (13,080), the calls `fde27e1` reports on purpose (12 in
+      `os/exec/dot_test.go`, `net/cgo_unix.go:68`, `unique/canonmap_test.go:83`); the service
+      with tests has 6 more (7,719). `3f0c738` against `3322a22`: production 83 gone, 4 new, 6
+      reworded (the same rows as above); with tests 87 gone, 13 new, 9 reworded; annotated 4
+      gone; standard library with tests 19 gone, 10 new, 2 reworded, the 19 being those 14 and
+      the 5 above. Race corpus the same at both.
+    - **The walk's complete answers against the oracle** (made at `ba9c7f4`; the rules added
+      after it only turn "complete" into "may not be all"). Reference service: at every call
       through a value, with memory handed over or not, where the walk says it has every target
       and the graph has any, the two
       sets are equal (492, and 4 more where the count is equal and the list the counter prints
@@ -1165,7 +1188,8 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
       named in a commit as proving it was run at the commit before and fails there. The cases
       added after the take-out pass (below) hold a part in place and were not run against the
       commit before. `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo at
-      `5f13bac`, with nothing else of this run alongside: 17 packages, all `ok`.
+      `3f0c738`, with nothing else of this run alongside: 17 packages, all `ok`; the same at
+      `5f13bac` before the merge.
       At `b5f6c76`, with the corpus runs alongside and a load average near 50,
       `TestWitnesses/lk_wit_maplookup` failed once: "the runtime did not convict this program
       of a race". Alone it failed 2 more times in about 200 runs there and 0 times in 120 at
@@ -1176,8 +1200,8 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
       Not run at this commit: the tests with cgo, and `cargo test`; no Rust file and no cgo file
       changed since `dcbc28b`. Not measured: time. The corpus runs took 17 to 100 s of wall
       time each at loads that differed between runs.
-    - **Each part taken out in turn** (39 parts over the six commits, by a script that edits one
-      line and runs the tests above with `TestStress` and `TestWitnesses`): a test fails for 33,
+    - **Each part taken out in turn** (45 parts over the seven commits, by a script that edits one
+      line and runs the tests above with `TestStress` and `TestWitnesses`): a test fails for 39,
       and without the guard that keeps the reading of wrappers to the ones the compiler writes
       the tests did not finish in ten minutes. A wrapper that calls another wrapper was
       followed at first; no test needed it and it was removed.
@@ -1273,7 +1297,7 @@ reports them.
     store to the field by type stands in. Two tests had to give a struct a function of its
     own to see past it. Errs toward reporting.
 - Left open by the changes of 2026-11-12 to a call through a function value (section 5, `eb228af`
-  to `5f13bac`):
+  to `3f0c738`):
   - An interface call whose receiver types are all known is still treated as keeping and writing
     everything. The walk has every type at 5 of the 805 interface calls that hand over memory on
     the reference service; the whole-program graph resolves 711, and at 46 of those every
@@ -1297,6 +1321,11 @@ reports them.
     "passed to a dynamic function call" and does not name the target.
   - Parts with no test that tells them from their removal: listed at the end of the entry in
     section 5.
+  - `fde27e1`'s guard stays: a contract worked out for a call of a variable is not "fresh" by
+    the targets' summaries alone (`evalFunctionOutcome`). The result of a call whose targets
+    are all known is read from their summaries in `callOfKnown` instead.
+  - A channel is "may not be all" as soon as it is handed to any call, also one whose body is
+    in sight and sends nothing.
   - `TestWitnesses/lk_wit_maplookup` is not convicted by the race detector on every run (3
     misses in about 200 runs under load).
 - Found on 2026-11-11 after the merge and not fixed:
