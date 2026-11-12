@@ -632,6 +632,8 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 	// wrappers are the method values' wrappers and method expressions' thunks the functions name.
 	// Each calls its method, and that call is read below as one of the method's calls.
 	var wrappers []*ssa.Function
+	// invoked are the names of the methods this package calls through an interface.
+	var invoked []string
 	var opBuf [8]*ssa.Value
 	for _, fn := range scanFns {
 		bodyFn := canonicalBodyFn(fn)
@@ -692,6 +694,9 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 				}
 			case ssa.CallInstruction:
 				cc := x.Common()
+				if cc.IsInvoke() && !slices.Contains(invoked, cc.Method.Name()) {
+					invoked = append(invoked, cc.Method.Name())
+				}
 				if !cc.IsInvoke() {
 					if callee, _ := directCallee(cc.Value); callee != nil {
 						target := canonicalBodyFn(callee)
@@ -723,6 +728,16 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 				}
 			}
 		})
+	}
+	// A method this package calls through an interface has callers that are not in the list of
+	// its calls: the interface call names no function. An exported method is open already; an
+	// unexported one can be called through an interface only from this package, by a call of its
+	// name. Without this a method with one direct call was read as if that call were its only one,
+	// and what a parameter of it may be was answered as complete.
+	for _, name := range invoked {
+		for _, m := range ci.methodsNamed[name] {
+			ci.openCallers[m] = true
+		}
 	}
 	// A method called through a method value or a method expression is called by the wrapper made
 	// for the value, which passes its own parameters on (and for a method value the receiver it

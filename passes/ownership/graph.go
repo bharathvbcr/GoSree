@@ -1434,6 +1434,12 @@ func (g *graph) callOfKnown(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.
 			if rc.alsoEscapes(i) {
 				g.add(an, ev(evEscape, ins, "passed to a dynamic function call"))
 			}
+		} else if e := g.forwardedEscape(ins, cc, i, a, "passed to a dynamic function call"); e.byContract != 0 {
+			// A forward: the called value and the argument are both parameters of this function,
+			// and the index holds the rule for it. What the call does with the argument is
+			// decided at each call of this function, by that rule, and not here: a helper that
+			// hands its parameter to whatever it is given does not itself move or keep it.
+			g.add(an, e)
 		} else if name, ok := which(func(s *summary) bool { return s.isIso(i) }); ok {
 			g.transferWithOp(ins, a, token.NoPos, i, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
 			g.writtenCaptures(ins, a, "captured by a closure passed to "+name+", which may write it")

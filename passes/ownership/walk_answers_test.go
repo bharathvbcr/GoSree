@@ -438,6 +438,7 @@ var unreadQuestions = map[string]struct {
 	why string
 }{
 	"buildContractIndex":     {1, "the index records what each call in a body was found to publish or load. The graph resolves that same call of that same function again (applyCallContract, checkSharedLoadWrites) and reports a cut there. That the two resolutions are cut together is by reading, not by a test: the index resolves while it is still being built"},
+	"calledFunctions":        {1, "a trace that stops at a limit answers that what it found may not be all, and calledFunctions then says the targets are not all known: the call is treated as it was before the targets were asked for, with every argument kept and written. The cut itself is said at the call by applyCallContract, which asks the same question of the same value."},
 	"returnedValueFreshness": {1, "a fresh result needs every callee to return one, so a cut answer is not a fresh one: a trace that stops at a limit is incomplete and mergeCandidateOutcomes withholds fresh, and a forwarded target with no answer, cut or not, counts against it in evalFunctionOutcome (TestForwardedResultIsFreshOnlyWhenEveryReturnIs, the cases with a target that is not known)"},
 }
 

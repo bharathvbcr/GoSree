@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
+	"slices"
 	"sort"
 
 	"golang.org/x/tools/go/analysis"
@@ -63,7 +64,14 @@ func (st *state) collectGlobalMutations(fns []*ssa.Function) {
 			}
 			callee := cc.StaticCallee()
 			if callee == nil {
-				for _, v := range cc.Args {
+				// The call of a function value is the call of its targets when they are all known
+				// (calledFunctions): an argument is written if one of them writes it. Otherwise
+				// whatever is called may write every argument.
+				targets, all := st.calledFunctions(fn, cc.Value)
+				for i, v := range cc.Args {
+					if all && !slices.ContainsFunc(targets, func(t calledFunc) bool { return st.summary(t.fn).writes(i) }) {
+						continue
+					}
 					if g, ok := st.globalMutArg(v); ok {
 						mutated[g] = true
 						writes[g] = append(writes[g], posOf(ins, ins))

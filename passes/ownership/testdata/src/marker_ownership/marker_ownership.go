@@ -159,11 +159,11 @@ func (m *memKV) Put(k string, v int) { m.n = v } // want Put:"ownership summary"
 
 func TestHandlerInterfaceAndDynamicWrite() { // want TestHandlerInterfaceAndDynamicWrite:"ownership summary"
 	var st KVStore = &memKV{}
-	var fn func([]int) = func(xs []int) { xs[0] = 1 }
+	var fn func([]int) = func(xs []int) { xs[0] = 1 } // want `SAFE008: captured variable s is written here by a handler`
 	s := []int{1, 2, 3}
 	http.HandleFunc("/if", func(w http.ResponseWriter, r *http.Request) {
 		st.Put("k", 1) // want `SAFE008: captured variable st is passed to interface method Put, which may write it`
-		fn(s)          // want `SAFE008: captured variable s is passed to a dynamic function call, which may write it`
+		fn(s)          // the one function fn may be is followed: the write is reported where it is made
 	})
 }
 

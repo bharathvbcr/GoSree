@@ -38,6 +38,26 @@ func take(j *T) { _ = j.n }
 
 func sink(*T) {}
 
+type W struct{ t *T }
+
+var sharedW = &W{}
+
+// wrap returns fresh memory that holds its parameter; wrap2 the same as the first of two results.
+func wrap(x *T) *W { return &W{t: x} }
+
+func wrap2(x *T) (*W, bool) { return &W{t: x}, true }
+
+func old(*T) *W { return sharedW }
+
+// attach joins its parameters and keeps neither.
+func attach(w *W, x *T) { w.t = x }
+
+type maker struct {
+	wrap   func(*T) *W
+	wrap2  func(*T) (*W, bool)
+	attach func(*W, *T)
+}
+
 // Open has callers this package does not show: what f may be is not known here.
 func Open(f func(*T)) {
 	x := &T{}
@@ -47,7 +67,16 @@ func Open(f func(*T)) {
 
 type srv struct{ n int }
 
-func register(mux *http.ServeMux, s *srv) {
+func register(mux *http.ServeMux, s, sArg, sFrame *srv) {
+	setN := func(p *srv) { p.n = 1 }
+	mux.HandleFunc("/arg", func(w http.ResponseWriter, r *http.Request) {
+		setN(sArg)
+	})
+	mux.HandleFunc("/frame", func(w http.ResponseWriter, r *http.Request) {
+		var h struct{ f func() }
+		h.f = func() { sFrame.n++ }
+		h.f()
+	})
 	check := func(r *http.Request) bool { return s != nil && r != nil }
 	bump := func() { s.n++ }
 	mux.HandleFunc("/reads", func(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +90,27 @@ func register(mux *http.ServeMux, s *srv) {
 }
 
 var seam = func(x *T) { _ = x.n }
+
+var cfgRead, cfgWritten = &T{}, &T{}
+
+func pokes() {
+	r := holder{f: reads}
+	r.f(cfgRead)
+	w := holder{f: writesIt}
+	w.f(cfgWritten)
+}
+
+func newTick() func() {
+	n := 0
+	return func() { n++ }
+}
+
+// tick holds a closure that writes what it captured each time it is called.
+var tick = newTick()
+
+func callF(f func()) { f() }
+
+func ticks() { callF(tick) }
 
 func callIt(f func(*T), x *T) { f(x) }
 
@@ -134,7 +184,7 @@ func TestHandlerCallingACapturedFunctionVariable(t *testing.T) {
 		switch {
 		case strings.Contains(d, "variable check"):
 			onCheck = append(onCheck, d)
-		case strings.Contains(d, "variable bump"), strings.Contains(d, "variable s"):
+		case strings.Contains(d, "variable bump"), strings.Contains(d, "variable s is"):
 			onBump = append(onBump, d)
 		}
 	}
@@ -143,6 +193,74 @@ func TestHandlerCallingACapturedFunctionVariable(t *testing.T) {
 	}
 	if len(onBump) != 1 {
 		t.Errorf("bump writes s, which every request shares; the call must be reported once, got %d of %d: %s", len(onBump), len(got), strings.Join(got, "; "))
+	}
+}
+
+// The function a handler calls through a variable is followed like one called by name: a write it
+// makes through its parameter to what the handler shares is reported where it is made, and so is
+// a write by a closure the handler itself made and keeps in a field.
+func TestHandlerCallingAFunctionVariableIsFollowed(t *testing.T) {
+	got := advDiagLines(t, callThroughValueHead, "is written here by a handler")
+	for _, v := range []string{"sArg", "sFrame"} {
+		n := 0
+		for _, d := range got {
+			if strings.Contains(d, "captured variable "+v+" is written here") {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s is written by a function its handler calls through a variable; the write must be reported once, got %d of: %s", v, n, strings.Join(got, "; "))
+		}
+	}
+}
+
+// The memory a target joins is joined, and a result is fresh when every target says so: memory
+// it allocates, or memory of the arguments it is joined to.
+func TestCallThroughAValueJoinsAndReturnsWhatItsTargetsDo(t *testing.T) {
+	for name, body := range map[string]string{
+		"joined by the function a field holds":         "x := &T{}\n\tw := &W{}\n\tm := maker{attach: attach}\n\tm.attach(w, x)\n\tgo func() { w.t.n++ }()\n\tx.n++",
+		"control: joined by a function called by name": "x := &T{}\n\tw := &W{}\n\tattach(w, x)\n\tgo func() { w.t.n++ }()\n\tx.n++",
+	} {
+		if got := callThroughValueDiags(t, body, "is used after it was"); len(got) != 1 {
+			t.Errorf("%s: x is part of what the goroutine was given, and its use after must be reported once, got %d: %s", name, len(got), strings.Join(got, "; "))
+		}
+	}
+	for name, body := range map[string]string{
+		"one result":              "x := &T{}\n\tm := maker{wrap: wrap}\n\tw := m.wrap(x)\n\tgo func() { w.t.n++ }()",
+		"the first of two":        "x := &T{}\n\tm := maker{wrap2: wrap2}\n\tw, _ := m.wrap2(x)\n\tgo func() { w.t.n++ }()",
+		"control: called by name": "x := &T{}\n\tw := wrap(x)\n\tgo func() { w.t.n++ }()",
+	} {
+		if got := callThroughValueDiags(t, body, "is not owned here"); len(got) != 0 {
+			t.Errorf("%s: the result is fresh memory that holds x, which is owned; it was reported as not owned: %s", name, strings.Join(got, "; "))
+		}
+	}
+	body := "x := &T{}\n\tmk := wrap\n\tif c {\n\t\tmk = old\n\t}\n\tw := mk(x)\n\tgo func() { w.t.n++ }()"
+	if got := callThroughValueDiags(t, body, "is not owned here"); len(got) != 1 {
+		t.Errorf("one of the two functions returns memory a package variable holds; the result is not owned, got %d: %s", len(got), strings.Join(got, "; "))
+	}
+}
+
+// An argument is written when a target writes it, and the called value when a target is a closure
+// that writes something it captured.
+func TestCallThroughAValueWritesWhatItsTargetWrites(t *testing.T) {
+	got := advDiagLines(t, callThroughValueHead, "is written outside init")
+	count := func(v string) int {
+		n := 0
+		for _, d := range got {
+			if strings.Contains(d, "package variable "+v+" ") {
+				n++
+			}
+		}
+		return n
+	}
+	if n := count("cfgRead"); n != 0 {
+		t.Errorf("cfgRead is handed to a function that only reads it; it was reported as written: %s", strings.Join(got, "; "))
+	}
+	if n := count("cfgWritten"); n != 1 {
+		t.Errorf("cfgWritten is handed to writesIt through a field; the write must be reported once, got %d of: %s", n, strings.Join(got, "; "))
+	}
+	if n := count("tick"); n != 1 {
+		t.Errorf("tick holds a closure that writes what it captured; handing it to a function that calls it must be reported once, got %d of: %s", n, strings.Join(got, "; "))
 	}
 }
 
