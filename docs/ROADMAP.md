@@ -223,8 +223,8 @@ Done:
    - **Reopened as one experiment (2026-11-12): a parameter shared for reading.** Pre-registered,
      with a gate before any build: under 69 of the 343 hatched transfers cleared, the claim is not
      built. A scratch probe on `9167e27` ran the write walk from every parameter and checked every
-     call site. The claim would clear 1 hatched transfer (17 with the caller side waived and
-     escapes ignored), so the ratio would stay at 59.2%. It was not built, and the checker is
+     call site. The claim would clear 1 or 2 hatched transfers (17 with the caller side waived and
+     escapes ignored), so the ratio would stay at 59%. It was not built, and the checker is
      unchanged. The write check binds, not provenance: of the 164 claims the hand-overs need, the
      walk finds a write, or cannot rule one out, through 118, at a callee's summary (55), a direct
      write (30), a dynamic call (17) or an interface method (16)

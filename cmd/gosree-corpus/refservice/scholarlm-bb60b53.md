@@ -776,7 +776,7 @@ is the one at the top of this file, with `-tests`, and its exit status was 0.
 
 One claim kind, pre-registered, with a gate before anything was built. The gate failed: **no claim
 was built, the checker is unchanged, and no corpus number moved.** Checker measured: `9167e27`
-(branch `rework/source`). Baseline: this ledger without its `unsafe` rows (its 66 `guarded_by`, 11
+(branch `rework/source`, not merged; `main` has since moved to `2ef069c`). Baseline: this ledger without its `unsafe` rows (its 66 `guarded_by`, 11
 `holds`, 6 `iso` and 1 `imm` rows kept): 578 transfers, 426 flagged, of which the ledger hatches 343
 (59.3%).
 
@@ -818,6 +818,16 @@ the call. A script joins these with the findings and with the hatched copy.
 The join is by position. 7 transfers that are not flagged share a position with one that is, so the
 unit below is 350 transfers at hatched positions, of which 343 are the ledger's.
 
+Two things changed after the gate was written, and both are part of the result:
+- The probe was run twice. The first run gave a ceiling of 24 and a strict count of 2. Its walk lost
+  a parameter as soon as a closure captured the variable (a closure is bound to the variable's
+  cell, and the walk answers for a load of the cell, not for the cell), so a registering function
+  looked clean whatever its handlers did. Fixed, the second run gave 17 and 1. The fix went against
+  the claim. The figures below are the second run's.
+- A hand-over to a spawn wrapper's owned parameter (`safego.SafeGoWG` and the others the ledger
+  marks `iso`) was not in the list of covered hand-overs. It was added, in the claim's favour: 67 of
+  the 178 below are of that kind.
+
 ### Result
 
 | Hatched transfers (350 at hatched positions) | Count |
@@ -839,6 +849,11 @@ none for 46, and the caller side then fails 44 of the 46 (35 on an argument that
 call, 7 on a parameter of the caller whose own claim fails, 1 on both a package variable and a
 result, 1 method with callers out of sight).
 
+7 of those 35 fail on the result of the very call being checked, which the transfer check does not
+hold against an argument and the probe did. With a call's own result left out, 4 of the 46 pass
+and the strict count is 2. With every result of a call left out it is the same 4 and 2. So the
+caller side fails 42 to 44 of the 46 whichever way it is counted.
+
 The one strict row is `requestFollowUpDecisionWithLLM` (`wisdev_contract_routes.go:1887`), and it
 is probably not real: the goroutine calls `StructuredOutput` on the result of
 `agentGateway.LLMClient.WithoutVertexDirect().WithTimeout(...)`, and the walk does not carry the
@@ -857,19 +872,40 @@ outside the module 13. By claim: 76 are blocked at calls only, 8 by direct write
 a lock or in a `sync.Once.Do`, 5 by direct writes with at least one in no lock, 13 by both kinds,
 and 16 have more than 8 writes and were not classed.
 
-The direct writes, read by a script from the source around each (97 positions; not a checked
-claim): 54 follow a `Lock()` in the same function, 4 are in a `sync.Once.Do` closure, 1 is in a
-registration function, 38 are none of these. Four were read by hand: `detachedTasks.spawn` writes
-its map under `d.mu`; `registerFullPaperRoutes` sets `s.docService` while routes are registered;
+The direct writes, sorted by a script that matches text around each (97 positions; a regular
+expression, not a reading and not a checked claim): 54 come after a `Lock()` somewhere earlier in
+the same function, 4 are within 8 lines of a `Once.Do(func()`, 1 is in a function named like a
+registration, 38 are none of these. Four were read by hand: `detachedTasks.spawn` writes its map
+under `d.mu`; `registerFullPaperRoutes` sets `s.docService` while routes are registered;
 `ManuscriptPipeline.factCheckScorer` and `RuntimeJournal.startMirrorWorker` write once inside
-`Do`. Many of the 38 are writes to the working data of one request (`candidate.Title = title`,
-`working[n].Title = ""`, `papers[i].PdfUrl = ...`): for those parameters "shared for reading" is
-simply false. The hatches are not all read-only dependency containers.
+`Do`. Some lines in both groups look like writes to the working data of one request
+(`papers[i].PdfUrl = verdicts[i].pdf` after a `Lock()`; `candidate.Title = title` and
+`working[n].Title = ""` with none). If they are, "shared for reading" is false for those
+parameters, and the hatches are not all read-only dependency containers. That is read from the
+lines' text, not from the functions.
 
-The summaries most often behind a block: `RuntimeStateStore.LoadAgentSession` (18),
-`RuntimeJournal.ReadSessionChecked` (15), `RuntimeJournal.Append` (14),
-`llm.Client.StructuredOutput` (10), and the interface method `Get` (21). Why each summary says it
-writes was not read.
+The claims with the most hatched transfers behind them, and the first write the walk finds:
+
+| Function, parameter | Hatched transfers | First write |
+|---|---|---|
+| `registerFullPaperRoutes`, `s` | 16 | `s.docService = newScholarDocService(...)`, while routes are registered |
+| `registerFullPaperRoutes`, `agentGateway` | 16 | summary of `wisdev.RetrieveCanonicalPapersWithOptions` |
+| `registerExtraRoutes`, `agentGateway` | 13 | summary of `RuntimeJournal.Append` |
+| `registerQuestioningRoutes`, `agentGateway` | 7 | summary of `RuntimeStateStore.LoadAgentSession` |
+| `registerQuestioningRoutes`, `registerSessionRoutes`, `s` | 7 each | `d.nextID++` in `detachedTasks.spawn`, under `d.mu` |
+| `registerSessionRoutes`, `agentGateway` | 7 | summary of `AgentGateway.CreateSession` |
+| `registerRAGRoutes`, `s` and `agentGateway` | 7 each | summaries of `rag.EvidenceGate.Run` and `wisdev.CritiqueRetrievedPapers` |
+
+Read: `RuntimeJournal.Append` takes its entry by value, assigns three of the entry's fields, and
+hands it to `appendToFile`, which takes `j.mu` (the journal's index fields carry `guarded_by` rows
+in this ledger), and to the mirror queue. Which of these the summary's write stands for was not
+determined. If it is the assignment to its own copy, it is the write bit's known over-count (item
+5 of the roadmap). `NewRouterWithShutdown`'s `cfg`, which 79 of the result-of-a-call transfers also
+need: the walk finds 94 writes; the eight it kept are all in the wiring before the first handler
+is registered (`router.go:100` to `195`, the first registration is at 262), setters such as
+`agentGateway.SetFullTextResolver`. The other 86 were not kept. The other summaries
+(`LoadAgentSession` 18 writes kept, `ReadSessionChecked` 15, `llm.Client.StructuredOutput` 10, the
+interface method `Get` 21) were not read.
 
 ### Predictions
 
@@ -892,9 +928,11 @@ times and never too cautious.
 
 Not the gate, and not something the claim says: if a result of a call were accepted as shared as
 well (a second claim kind, on results) and the caller side were waived, 287 hatched transfers would
-have a covered hand-over and origins of the right kinds. 25 of them have every parameter clean on
-the callee side, 20 without a SAFE008. So provenance is not what binds. The write check is: it sees
-a write, or cannot rule one out, through 118 of the 164 parameters.
+have a covered hand-over and origins that are parameters as well. 25 of them have every parameter
+clean on the callee side, 20 without a SAFE008; 7 more name no parameter at all and carry no
+SAFE008. That is 27, still under the line of 69. So provenance is not what binds. The write check
+is: it sees a write, or cannot rule one out, through 118 of the 164 parameters, and through `cfg`
+of the router, which 79 of the remaining transfers need.
 
 ### Limits
 
@@ -908,8 +946,12 @@ All of these lean towards clearing more than a built checker could:
   sight when any package calls a method of that name through an interface.
 - The walk gives up after 3,000 function bodies or 4,096 values and counts that as not clean.
 
-And one that leans the other way: aliasing is by region, so one unowned value captured beside
-`cfg` taints every handler of the function (`NewRouterWithShutdown`).
+And three that lean the other way:
+- Aliasing is by region, so one unowned value captured beside `cfg` taints every handler of the
+  function (`NewRouterWithShutdown`).
+- The callee side is not ordered: a write anywhere in the function counts, also one made while the
+  value is still being built and before anything is handed over.
+- The probe held a call's own result against its argument (corrected above: 2, not 1).
 
 Not run: the suite, the race corpus and the other strata, because nothing in the checker changed.
 The probe, its two runs, the scripts and their output are scratch files outside the repository.
@@ -918,5 +960,6 @@ The probe, its two runs, the scripts and their output are scratch files outside 
 
 By the rule written first: the claim is not built. Item 4's verdict at `bb60b53` stands. What a
 next claim would have to answer is the write check at calls: what a module function, an interface
-method or a function value does to memory it is handed, and the 54 direct writes made under a lock
-that carries no `guarded_by`.
+method or a function value does to memory it is handed. Beside it stand the direct writes that
+follow a `Lock()` with no `guarded_by` on what they write (54 by the script's match), and writes
+made while a value is still being wired up.
