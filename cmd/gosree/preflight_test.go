@@ -34,6 +34,10 @@ func TestParseCommandLine(t *testing.T) {
 		{name: "help false is dropped", args: []string{"-h=false", "-json", "./..."}, want: []string{"-json", "./..."}, json: true},
 		{name: "long help false is dropped", args: []string{"--help=0", "./..."}, want: []string{"./..."}},
 		{name: "flags false keeps checking", args: []string{"-flags=false", "-json", "-tags=a", "./..."}, want: []string{"-flags=false", "-json", "./..."}, goflags: " -tags=a", json: true},
+		// The driver reads -flags after parsing the whole command line, so its last value decides.
+		{name: "flags then flags false keeps checking", args: []string{"-flags", "-flags=false", "-json", "-tags=foo", "./..."}, want: []string{"-flags", "-flags=false", "-json", "./..."}, goflags: " -tags=foo", json: true},
+		{name: "flags then flags false still warns", args: []string{"-flags=1", "-flags=0", "-test=false", "./..."}, want: []string{"-flags=1", "-flags=0", "-test=false", "./..."}, warnWith: []string{"-test=false"}},
+		{name: "flags last true prints flags", args: []string{"-flags=false", "-json", "-flags"}, want: []string{"-flags=false", "-json", "-flags"}},
 	} {
 		p, err := parseCommandLine(c.args, testAnalyzers)
 		if err != nil {
@@ -60,6 +64,7 @@ func TestParseCommandLineRefusals(t *testing.T) {
 		{"-fix", "./..."}, {"--fix", "./..."}, {"-fix=true", "./..."}, {"-diff", "./..."}, {"-fix", "-diff", "./..."},
 		{"-tags", "a b", "./..."},
 		{"-flags=false", "-fix", "./..."}, {"--flags=0", "-diff", "./..."}, {"-help=false", "-fix", "./..."},
+		{"-flags", "-flags=false", "-fix", "./..."}, {"-flags=true", "-flags=0", "-diff", "./..."},
 	} {
 		if _, err := parseCommandLine(args, testAnalyzers); err == nil {
 			t.Errorf("%q was accepted", args)
