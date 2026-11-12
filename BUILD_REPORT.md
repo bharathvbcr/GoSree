@@ -163,6 +163,10 @@ The stress ledger changed only in ERR005: 5/0/0 became 7/1/1, all from the new r
 | ft-e203e72763917672ec6ce037874fdbb7 | ft-f138 | Census: hatch roots that are not structs, and module interfaces inside containers |
 | ft-e69ea44b06cb32ef3b1cafe6a698e46e | ft-d71c | Existing ownership and borrow misses and false positives from the b6a2 adversary; validation when the consumer reads a decoded FuncFact |
 | ft-1f846b0057d8860989a544ac56143014 | none | Make the escaped-variable scan cheaper without losing interface publishes (the +6.2% in section 5) |
+| ft-8f3c2efdcc0d768594749f824c792580 | ft-d323 | ERR005 after `os.Exit` or `log.Fatal*` is a false positive: mark it `FP(ERR005)`, then fix (Fable ruling) |
+| ft-f2e5a81c4da817e8cab8476b2b70aaa5 | ft-8e79 | `extractTar` skips symlink entries and counts them on stderr (Fable ruling) |
+| ft-697e794bb0d8b1e1996f7e2558b24618 | ft-b6a2 | SAFE007 at the lockset release cap says the cap widened the release (Fable ruling) |
+| ft-4cd870d767714ea813e28d251686289d | ft-b6a2 | Unify `sourceFuncs` and `allPackageFuncs` (Fable ruling) |
 
 Note added to ft-a0d4 (flaky tests): the `TestScale/send/use` wall-clock ratio, and `passes/ownership` exceeding the default 10-minute timeout under load.
 
@@ -198,25 +202,54 @@ Benchmark baseline: `wt/base` at `9161d81`, kept for this comparison.
 7. **Range-over-func after-loop write.** Check the Go spec first. Because the defer runs at the enclosing function's return, the miss is recorded as a MISS, not documented as intended.
 8. **After the merge.** Do not rewrite `main` or `run/integ-1111`. The corrected report goes on its own branch, `run/report-1111`, starting at `main`. The 5% check is re-measured on the merged work, and the commits that are not this run's are measured separately. A regression over 5% is written up with its cause and a follow-up task; it is not reverted here, because reverting would bring back the escaped-table soundness bug.
 9. **Before declaring done.** No card summary claims a suite result I did not see. The `TestScale` comparison runs the full test, not one subtest. The benchmark separates this run's commits from the main checkout's checkpoint (`2fd93f0`) that the merge also brought in.
+10. **Owner decisions delegated (2026-11-12).** You asked Fable to make the decisions listed in section 7. The rulings: hold the push behind stated conditions; accept the +6.2%; merge this report's branch; rule on d323, 8e79, 3b3c, f138 and b6a2 as in section 7; close ft-a2b3 and ft-9a58 with evidence; sort ft-7fe7's items by three rules. Cleanup: delete adversary branches with `git branch -d` only; keep lane branches and `run/integ-1111` until their cards leave review; one literal `rm -r` each for `bin/` and `scratch/`. Force-push, history rewrite and remote-branch deletion still need you.
 
-## 7. Owner decisions pending
+## 7. Owner decisions
 
 1. **b6a2 overlap with uncommitted work in the main checkout. Settled by the merge:** the other session committed that work as `2fd93f0` before merging this run's branches. The original note follows.
    - Another session (likely Claude Desktop pid 20696) has about 2,000 lines of uncommitted edits to the files b6a2 changes: `passes/ownership/{contracts,globals,graph,ownership,summary,check,handlerwrite,imm,lockset,spawn}.go`, `passes/borrow/{check,storage}.go`, and new `*_caps_*`, `*_nopos_*` and `locate_*` tests.
    - These look like fixes for the same card items. Which version lands is your decision, item by item, and `globals.go` will conflict.
    - Another session has also created `/Users/bharath/Code/devtools/gocap-worktree` (branch `harden/gosree-gates`) at this run's integration commit `6b401b9`, with b6a2-named test files staged. It was not touched.
-2. **b6a2:** the SAFE007 "unlocks it here" wording when a widened release at the lockset release cap is reported; the hatch span for a borrow conflict on the first borrow; unifying `sourceFuncs` and `allPackageFuncs` needs a new internal package.
-3. **d323:** H4, where ERR005 on a function ending in `os.Exit` looks like a false positive; M1 silencing semantics.
-4. **8e79:** exit 2 or exit 1 for erase `-w`/`-o` combined with `-l`/`-d`; `extractTar` still creates symlink entries, contained by `os.Root`.
-5. **3b3c:** a captured resource reassigned inside another closure (`replacedByCall`) is kept as a known false positive, `FP(ERR005)`. A sound fix would have to know which calls run that closure, and resetting on every call loses real findings.
-6. **f138:**
-   - `Box[T]{p *T}` counts as a frozen collection even for `Box[int]`. That predates this run.
-   - Intended changes to review: `chan B` and `*atomic.Pointer[B]` fields now reach B's class.
-   - `cmd/gosree-corpus/refservice/scholarlm-bb60b53.md` still cites the old census figures. It is dirty in the main checkout (ScholarLM lane), so it was not edited.
-7. **Merging. Corrected:** another session has since merged `run/integ-1111` into local `main`. It first checkpointed the main checkout's uncommitted work (`2fd93f0`), so item 1's overlap was settled there. Pushing `main` (80 commits ahead of `origin/main`) is still your decision.
-8. **Cards in the backlog awaiting rulings:** ft-a2b3, ft-9a58, ft-7fe7, ft-264e, ft-238f.
-9. **The +6.2% CPU regression** (section 5): accept it until ft-1f84 lands, or hold a push until a sound speed-up is in.
-10. **This report's branch** `run/report-1111`: merging it into `main` is your decision.
+On 2026-11-12 you asked Fable (the advisor) to rule on items 2–10. Each ruling is recorded here and in section 6, item 10. Rulings that need code became cards; no checker file was edited.
+
+2. **b6a2. Ruled.**
+   - **Lockset wording:** the message must say the cap widened the release, not name an unlock site. Carded.
+   - **Hatch span:** stands as merged and documented.
+   - **`sourceFuncs` and `allPackageFuncs`:** unify them, as their own card.
+   - Both cards wait until the live session in `passes/ownership` releases those files.
+3. **d323. Ruled.**
+   - **H4:** ERR005 on a function ending in `os.Exit` or `log.Fatal*` is a false positive, because deferred calls do not run after them. They do run after `panic` and `runtime.Goexit`. Carded: mark the shape `FP(ERR005)` first, then fix. The marker is not added in this report's branch, because it changes the ledger.
+   - **M1:** stands as merged.
+4. **8e79. Ruled.**
+   - **Exit code:** keep exit 2. It is a usage error, and the card and the docs say 2.
+   - **`extractTar`:** skip symlink entries and count them on stderr. Carded, with byte-identical `f138keep` census files as the acceptance test.
+5. **3b3c. Ruled:** `replacedByCall` stays a known false positive.
+6. **f138. Ruled.**
+   - **Accepted:** the `chan B` and `*atomic.Pointer[B]` reach.
+   - **`Box[int]` overcount:** folded into ft-e203.
+   - **Still open:** the `refservice` note, which belongs to the ScholarLM lane.
+7. **Merging. Corrected:** another session has since merged `run/integ-1111` into local `main`. It first checkpointed the main checkout's uncommitted work (`2fd93f0`), so item 1's overlap was settled there.
+   - **Pushing `main`: ruled hold.** Push only under ft-238f, as a plain fast-forward, once all of these are true:
+     - `main` is at a verified tip, and no session holds files in the main checkout.
+     - One run at that tip is green in both engines with `-timeout 60m`, including `tests/stress` under cgo and the acceptance script.
+     - ft-238f's own checks pass.
+   - On 2026-11-12 none of those conditions held. Session `45c62196` was holding `passes/ownership`, `tests/stress` was not green under cgo in a full run, and the acceptance script was not run at `78f0879`.
+8. **Backlog cards. Ruled.**
+   - **ft-a2b3:** ruled closed. `build/lanes/integ4` does not exist anywhere `rg -uu`, `git branch` or `git worktree` can see.
+   - **ft-9a58:** ruled closed. errcheck is the implementation, and `passes/errflow` does not exist.
+   - The board did not accept a direct move to done for either card; it held both in **review**. The ruling and its evidence are on each card.
+   - **ft-264e:** stays in the backlog, after ft-d71c.
+   - **ft-238f:** carries the push conditions above.
+   - **ft-7fe7:** each item was sorted by three rules: ratify behaviour that is merged and ledger-locked, prefer a false positive to a miss, and keep exit codes and JSON as they are. The item-by-item result is on the card. The items that fit none of the rules come back to you:
+     - The iso-escape form of SAFE002.
+     - Borrow pointer-receiver strictness.
+     - Disjoint-field borrow conflicts.
+     - `//gocap:imm` rejecting interface and func carrier fields.
+     - The scope of the ownerless repeated-callback treatment.
+     - The remaining escape-hatch items.
+     - Write-side-only race accounting.
+9. **The +6.2% CPU regression. Ruled accepted.** It pays for a soundness fix, and the only cheaper version lost findings. It does not gate a push. ft-1f84 goes into the next wave, starting with a profile at `e34e37c`.
+10. **This report's branch. Ruled merge,** after this commit. Before merging, the main checkout must have no staged or modified tracked file, and the collision check for BUILD_REPORT.md must be clear. The merge is fast-forward only, or an ordinary merge if `main` has moved, and it is aborted if any file other than BUILD_REPORT.md would change.
 
 ## 8. Storage
 
@@ -247,14 +280,20 @@ Removed by this run:
 
 After the merge into `main` (2026-11-11 23:10), free space was 55 GB (about 6%), still above 40 GB. These worktrees were removed; each was clean, and its branch is contained in `main`: `3b3c-adv2`, `base-b6a2`, `base-3b3c`, `8e79-cmd`, `b6a2-ownership`, `d323-frontend`, `d323-solver`, `3b3c-errcheck`, `f138-census` and `integ`. Stale test binaries were also deleted. The scratchpad went from 1.1 GB to 321 MB. `bin/` and `scratch/` (about 165 MB of benchmark binaries and profiles) are still there, because the storage hook asks before any `rm -r`.
 
+After Fable's rulings (2026-11-12, about 00:45):
+- **Directories removed:** `bin/` and `scratch/`, one literal `rm -r` each. The scratchpad is now 156 MB.
+- **Free space:** 214 GB on the data volume (`/System/Volumes/Data`, about 24%). Other sessions freed most of that; this run's deletions were under 1 GB.
+- **Correction:** an earlier message read the system volume `/` and called it "129 GB (10%)". The 10% was that volume's used column.
+- **Branches deleted** with `git branch -d`: `run/3b3c-adv2` (was `95fa488`) and `run/b6a2-adv2` (was `404bb00`), both ancestors of `main`.
+- **Branches kept:** `git branch -d` refused the six round-1 branches `run/{3b3c,8e79,b6a2,d323-frontend,d323-solver,f138}-adv` as not fully merged. Their commits are patch-equivalent (`git cherry`) to commits on their lane branches, but they are not ancestors of `main`. Deleting them needs `-D` and your word.
+
 Kept:
-- Every `run/*` branch. They are local and unpushed, and all are contained in `main`.
+- The lane branches and `run/integ-1111`, until their cards leave review (Fable ruling). They are local and unpushed, and all are contained in `main`.
 - `wt/base` (the benchmark baseline) and `wt/b6a2-adv2` (checked out at `run/report-1111`). The benchmark worktrees `bench-9823`, `bench-e34e` and `bench-2fd9`, along with their test binaries, were removed after the measurements.
-- `wt/base`, the benchmark baseline.
 - The two ScholarLM `census.json` files in `f138keep/` (3.8 MB).
 - The shared Go build cache. It is 7.4 GB now; it was 8.6 → 11 GB earlier. It is shared with other sessions, so this run's share cannot be told apart, and it was not cleaned.
 
-Every adversary branch (`run/{3b3c,8e79,b6a2,d323-frontend,d323-solver,f138}-adv`) is fully merged by content: `git cherry` shows each of its commits already on its lane branch. They can be deleted on your word.
+The round-1 adversary branches are merged by content only: `git cherry` shows each commit already on its lane branch.
 
 ## 9. Gaps and caveats
 
