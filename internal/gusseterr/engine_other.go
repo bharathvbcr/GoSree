@@ -26,10 +26,19 @@ func SolveFrame(ctx context.Context, frame []byte) ([]byte, error) {
 	return SolveFrameOracle(ctx, frame)
 }
 
-// Solve solves funcs via the bit-exact pure-Go reference oracle.
+// Solve encodes funcs, solves the frame with the pure-Go reference oracle, and decodes the
+// response: the same encode, validate and decode path as the native engine, so every limit in
+// wire.go holds on this build too rather than only with cgo.
 func Solve(ctx context.Context, funcs []FuncIR) (PackageResult, error) {
-	crossings.Add(1)
-	return SolveOracle(ctx, funcs)
+	req, err := EncodePackage(funcs)
+	if err != nil {
+		return PackageResult{}, err
+	}
+	resp, err := SolveFrame(ctx, req)
+	if err != nil {
+		return PackageResult{}, err
+	}
+	return DecodeResult(resp)
 }
 
 // Check verifies the pure-Go fallback solver.

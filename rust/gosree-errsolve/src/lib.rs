@@ -30,7 +30,17 @@ pub const MAX_PHI_ARITY: usize = 4_096;
 pub const MAX_OPS_PER_BLOCK: usize = 262_144;
 pub const MAX_COMPANIONS: usize = 256;
 pub const MAX_ITERATIONS_PER_FUNC: usize = 250_000;
-pub const MAX_CALLGRAPH_ITERS: usize = 4_096;
+
+/// Per-function solver-state budget: `num_blocks * num_slots` may not exceed this.
+///
+/// The solver keeps four full abstract states per block (entry, exit and up to two outgoing
+/// edges), each `num_slots` cells of `size_of::<SlotCell>()` = 28 bytes, so a function costs at
+/// most `4 * 28 = 112` bytes per (block, slot) cell. `2^23 = 8,388,608` cells is therefore at
+/// most 896 MiB of Rust solver state for one function (0.875 GiB); the Go oracle measured
+/// 1.3 to 1.6 GiB at the budget, so the 1 GiB target holds for this engine only. States are allocated per function and
+/// dropped before the next function is solved, so the peak is the largest function, not the
+/// sum over functions. `MaxStateCells` in `internal/gusseterr/wire.go` is the mirror.
+pub const MAX_STATE_CELLS_PER_FUNC: u64 = 8_388_608;
 
 // Function flags.
 pub const FUNC_RETURNS_ERROR: u8 = 1 << 0;
@@ -109,6 +119,10 @@ pub enum SolveError {
     InvalidEnum(&'static str, u8),
     IndexOutOfBounds(&'static str, u32, u32),
     IterationBudgetExceeded(u32),
+    /// The interprocedural summary fixpoint did not converge within the iteration cap.
+    CallgraphBudgetExceeded(usize),
+    /// A solver-state allocation failed (reported instead of aborting the process).
+    AllocationFailed(&'static str),
     Cancelled,
 }
 
@@ -125,6 +139,13 @@ impl fmt::Display for SolveError {
             }
             SolveError::IterationBudgetExceeded(fn_id) => {
                 write!(f, "CFG worklist iteration budget exceeded in func {fn_id}")
+            }
+            SolveError::CallgraphBudgetExceeded(iters) => write!(
+                f,
+                "call-graph summary fixpoint did not converge within {iters} iterations"
+            ),
+            SolveError::AllocationFailed(what) => {
+                write!(f, "solver allocation failed: {what}")
             }
             SolveError::Cancelled => write!(f, "solver cancelled"),
         }
@@ -335,6 +356,9 @@ pub fn decode_package(frame: &[u8]) -> Result<Vec<FuncIR>, SolveError> {
         let num_blocks = num_blocks_u32 as usize;
         if num_blocks > MAX_BLOCKS {
             return Err(SolveError::LimitExceeded("num_blocks"));
+        }
+        if (num_blocks as u64) * (num_slots as u64) > MAX_STATE_CELLS_PER_FUNC {
+            return Err(SolveError::LimitExceeded("state cells (blocks x slots)"));
         }
 
         let slot_flags = cur.read_exact(num_slots)?.to_vec();
@@ -750,16 +774,26 @@ struct State {
     cells: Vec<SlotCell>,
 }
 
+/// Allocates `n` elements without aborting the process when the allocator refuses.
+fn try_vec<T>(n: usize, what: &'static str) -> Result<Vec<T>, SolveError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n)
+        .map_err(|_| SolveError::AllocationFailed(what))?;
+    Ok(v)
+}
+
 impl State {
-    fn bottom(num_slots: usize) -> Self {
-        Self {
+    fn try_bottom(num_slots: usize) -> Result<Self, SolveError> {
+        let mut cells = try_vec(num_slots, "block state")?;
+        cells.resize(num_slots, SlotCell::BOT);
+        Ok(Self {
             reachable: false,
-            cells: vec![SlotCell::BOT; num_slots],
-        }
+            cells,
+        })
     }
 
-    fn entry(slot_flags: &[u8]) -> Self {
-        let mut cells = Vec::with_capacity(slot_flags.len());
+    fn try_entry(slot_flags: &[u8]) -> Result<Self, SolveError> {
+        let mut cells = try_vec(slot_flags.len(), "entry state")?;
         for &sf in slot_flags {
             cells.push(SlotCell {
                 origin: Origin::Safe,
@@ -773,10 +807,10 @@ impl State {
                 err_link: ErrLink::None,
             });
         }
-        Self {
+        Ok(Self {
             reachable: true,
             cells,
-        }
+        })
     }
 
     fn copy_from(&mut self, other: &State) {
@@ -824,11 +858,168 @@ pub fn solve_package<F>(funcs: &[FuncIR], check_cancel: &mut F) -> Result<Packag
 where
     F: FnMut() -> bool,
 {
+    // Summaries only flip false -> true, so at most `funcs.len()` sweeps change one and one more
+    // confirms: `funcs.len() + 1` is a proven bound and the cap below is an invariant check.
+    solve_package_capped(funcs, check_cancel, funcs.len() + 1)
+}
+
+/// Union-find root with path halving.
+fn uf_find(parent: &mut [u32], mut x: u32) -> u32 {
+    while parent[x as usize] != x {
+        let gp = parent[parent[x as usize] as usize];
+        parent[x as usize] = gp;
+        x = gp;
+    }
+    x
+}
+
+/// Largest set of tuples considered for merging at once. Each candidate bind block costs one
+/// reachability sweep (a `Vec<bool>` over the blocks), so the bound keeps that work and memory
+/// small; a larger class is left unmerged, which is the conservative (pre-merge) behavior.
+const MAX_CANON_CLASS: usize = 64;
+
+/// Maps every tuple to the canonical (smallest) id of its logical call result.
+///
+/// Lowering gives each call site its own tuple id and SSA gives each call's error its own slot.
+/// When two call sites on mutually exclusive paths feed the same merged error through a phi
+/// (`if c { v, err = f() } else { v, err = g() }`), the one check after the join establishes
+/// `err == nil` for whichever call ran, so the two tuples must share an identity or `ErrLink`
+/// and `Origin` degrade to "mixed" at the join and the check can no longer promote the
+/// companion. Tuples merge only when their error slots are connected through phis, their flags
+/// agree, and their bind blocks are pairwise unreachable from one another: two binds on one
+/// path (`a, err := f(); if retry { _, err = g() }`) stay separate, because there the check
+/// after the join does not prove `f`'s error nil. Binds inside a loop reach each other through
+/// the back edge and so are never merged. Returns `None` when no tuple changes identity.
+fn canonical_tuples<F: FnMut() -> bool>(
+    fn_ir: &FuncIR,
+    check_cancel: &mut F,
+) -> Result<Option<Vec<u32>>, SolveError> {
+    let n_tuples = fn_ir.tuples.len();
+    if n_tuples < 2 || fn_ir.blocks.iter().all(|b| b.phis.is_empty()) {
+        return Ok(None);
+    }
+    let mut parent: Vec<u32> = (0..fn_ir.slot_flags.len() as u32).collect();
+    for block in &fn_ir.blocks {
+        for phi in &block.phis {
+            for &(_, src) in &phi.incoming {
+                let a = uf_find(&mut parent, phi.dst_slot);
+                let b = uf_find(&mut parent, src);
+                if a != b {
+                    parent[a.max(b) as usize] = a.min(b);
+                }
+            }
+        }
+    }
+    let mut bind_blocks: Vec<Vec<u32>> = vec![Vec::new(); n_tuples];
+    for (bb, block) in fn_ir.blocks.iter().enumerate() {
+        for op in &block.ops {
+            if let OpIR::BindTuple { tuple_id, .. } = op {
+                let v = &mut bind_blocks[*tuple_id as usize];
+                if v.last() != Some(&(bb as u32)) {
+                    v.push(bb as u32);
+                }
+            }
+        }
+    }
+    let mut classes: std::collections::BTreeMap<(u32, u8), Vec<u32>> =
+        std::collections::BTreeMap::new();
+    for (t, meta) in fn_ir.tuples.iter().enumerate() {
+        if meta.err_slot != NONE_U32 && !bind_blocks[t].is_empty() {
+            let key = (uf_find(&mut parent, meta.err_slot), meta.flags);
+            classes.entry(key).or_default().push(t as u32);
+        }
+    }
+    let mut canon: Vec<u32> = (0..n_tuples as u32).collect();
+    let mut changed = false;
+    for members in classes.values() {
+        if members.len() < 2 || members.len() > MAX_CANON_CLASS {
+            continue;
+        }
+        if !check_cancel() {
+            return Err(SolveError::Cancelled);
+        }
+        let mut reach: std::collections::BTreeMap<u32, Vec<bool>> =
+            std::collections::BTreeMap::new();
+        for &t in members {
+            for &bb in &bind_blocks[t as usize] {
+                if !reach.contains_key(&bb) {
+                    if !check_cancel() {
+                        return Err(SolveError::Cancelled);
+                    }
+                    reach.insert(bb, reachable_blocks_from(fn_ir, bb));
+                }
+            }
+        }
+        let exclusive = |t: u32, u: u32| {
+            bind_blocks[t as usize].iter().all(|&bt| {
+                bind_blocks[u as usize]
+                    .iter()
+                    .all(|&bu| bt != bu && !reach[&bt][bu as usize] && !reach[&bu][bt as usize])
+            })
+        };
+        let mut groups: Vec<Vec<u32>> = Vec::new();
+        for &t in members {
+            match groups
+                .iter_mut()
+                .find(|g| g.iter().all(|&u| exclusive(t, u)))
+            {
+                Some(g) => {
+                    canon[t as usize] = g[0];
+                    changed = true;
+                    g.push(t);
+                }
+                None => groups.push(vec![t]),
+            }
+        }
+    }
+    Ok(changed.then_some(canon))
+}
+
+/// Returns `fn_ir` with every `BindTuple` rewritten to its canonical tuple id, or `None` when
+/// nothing changes.
+fn with_canonical_tuples<F: FnMut() -> bool>(
+    fn_ir: &FuncIR,
+    check_cancel: &mut F,
+) -> Result<Option<FuncIR>, SolveError> {
+    let Some(canon) = canonical_tuples(fn_ir, check_cancel)? else {
+        return Ok(None);
+    };
+    let mut out = fn_ir.clone();
+    for block in &mut out.blocks {
+        for op in &mut block.ops {
+            if let OpIR::BindTuple { tuple_id, .. } = op {
+                *tuple_id = canon[*tuple_id as usize];
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+/// `solve_package` with an explicit call-graph sweep cap (the public entry point passes
+/// `funcs.len() + 1`, the proven convergence bound; tests pass a small cap to reach the error).
+pub fn solve_package_capped<F>(
+    funcs: &[FuncIR],
+    check_cancel: &mut F,
+    max_callgraph_iters: usize,
+) -> Result<PackageResult, SolveError>
+where
+    F: FnMut() -> bool,
+{
+    let mut canon: Vec<Option<FuncIR>> = Vec::with_capacity(funcs.len());
+    for f in funcs {
+        canon.push(with_canonical_tuples(f, check_cancel)?);
+    }
+    let funcs_view: Vec<&FuncIR> = funcs
+        .iter()
+        .zip(canon.iter())
+        .map(|(orig, c)| c.as_ref().unwrap_or(orig))
+        .collect();
+    let funcs = funcs_view.as_slice();
     let n_funcs = funcs.len();
     let mut may_return_nil = vec![false; n_funcs];
 
     // Seed external / bodyless functions that may return nil concrete error pointers.
-    for (idx, fn_ir) in funcs.iter().enumerate() {
+    for (idx, fn_ir) in funcs.iter().copied().enumerate() {
         if (fn_ir.flags & FUNC_EXTERNAL_MAY_NIL != 0)
             || ((fn_ir.flags & FUNC_RETURNS_CONCRETE_ERR_PTR != 0) && fn_ir.blocks.is_empty())
         {
@@ -837,15 +1028,39 @@ where
     }
 
     // Phase 1: Interprocedural call-graph fixpoint for concrete error pointer returns.
-    for _iter in 0..MAX_CALLGRAPH_ITERS {
+    // The summaries only ever flip false -> true, so this converges in at most one changing
+    // sweep per function plus one confirming sweep. A function is re-solved only after one of
+    // its callees flipped (its result depends on nothing else), so a long chain costs one solve
+    // per function and per call edge, not one per sweep. Missing the cap would export
+    // optimistic (too-small) summaries that hide ERR004 findings, so it is an error.
+    let mut callers: Vec<Vec<u32>> = vec![Vec::new(); n_funcs];
+    for (idx, fn_ir) in funcs.iter().copied().enumerate() {
+        for block in &fn_ir.blocks {
+            for op in &block.ops {
+                if let OpIR::CallConcretePtr { callee_idx, .. } = op {
+                    let v = &mut callers[*callee_idx as usize];
+                    if v.last() != Some(&(idx as u32)) {
+                        v.push(idx as u32);
+                    }
+                }
+            }
+        }
+    }
+    let mut dirty = vec![true; n_funcs];
+    let mut converged = false;
+    for _iter in 0..max_callgraph_iters {
         if !check_cancel() {
             return Err(SolveError::Cancelled);
         }
         let mut any_changed = false;
-        for (idx, fn_ir) in funcs.iter().enumerate() {
-            if may_return_nil[idx] || (fn_ir.flags & FUNC_RETURNS_CONCRETE_ERR_PTR == 0) {
+        for (idx, fn_ir) in funcs.iter().copied().enumerate() {
+            if may_return_nil[idx]
+                || !dirty[idx]
+                || (fn_ir.flags & FUNC_RETURNS_CONCRETE_ERR_PTR == 0)
+            {
                 continue;
             }
+            dirty[idx] = false;
             if fn_ir.blocks.is_empty() {
                 may_return_nil[idx] = true;
                 any_changed = true;
@@ -855,16 +1070,23 @@ where
             if solved.func_may_return_nil {
                 may_return_nil[idx] = true;
                 any_changed = true;
+                for &c in &callers[idx] {
+                    dirty[c as usize] = true;
+                }
             }
         }
         if !any_changed {
+            converged = true;
             break;
         }
+    }
+    if !converged {
+        return Err(SolveError::CallgraphBudgetExceeded(max_callgraph_iters));
     }
 
     // Phase 2: Full diagnostic solve with converged interprocedural summaries.
     let mut findings = Vec::new();
-    for (idx, fn_ir) in funcs.iter().enumerate() {
+    for (idx, fn_ir) in funcs.iter().copied().enumerate() {
         if !check_cancel() {
             return Err(SolveError::Cancelled);
         }
@@ -1319,32 +1541,41 @@ where
     let n_blocks = fn_ir.blocks.len();
     let n_slots = fn_ir.slot_flags.len();
 
-    let mut in_states: Vec<State> = (0..n_blocks).map(|_| State::bottom(n_slots)).collect();
-    let mut end_states: Vec<State> = (0..n_blocks).map(|_| State::bottom(n_slots)).collect();
-    let mut out_edges: Vec<Vec<(u32, State)>> = fn_ir
-        .blocks
-        .iter()
-        .map(|b| match b.term {
-            Terminator::Jump { target } => vec![(target, State::bottom(n_slots))],
+    // Every state vector below is allocated fallibly: with the per-function budget in
+    // `decode_package` this is at most `MAX_STATE_CELLS_PER_FUNC * 112` bytes, and a refusal
+    // from the allocator fails the package instead of aborting the process.
+    let mut in_states: Vec<State> = try_vec(n_blocks, "block entry states")?;
+    let mut end_states: Vec<State> = try_vec(n_blocks, "block exit states")?;
+    let mut out_edges: Vec<Vec<(u32, State)>> = try_vec(n_blocks, "edge states")?;
+    for b in &fn_ir.blocks {
+        in_states.push(State::try_bottom(n_slots)?);
+        end_states.push(State::try_bottom(n_slots)?);
+        let mut edges: Vec<(u32, State)> = try_vec(2, "edge states")?;
+        match b.term {
+            Terminator::Jump { target } => edges.push((target, State::try_bottom(n_slots)?)),
             Terminator::Cond {
                 true_bb, false_bb, ..
-            } => vec![
-                (true_bb, State::bottom(n_slots)),
-                (false_bb, State::bottom(n_slots)),
-            ],
-            Terminator::Return { .. } | Terminator::Stop => Vec::new(),
-        })
-        .collect();
+            } => {
+                edges.push((true_bb, State::try_bottom(n_slots)?));
+                edges.push((false_bb, State::try_bottom(n_slots)?));
+            }
+            Terminator::Return { .. } | Terminator::Stop => {}
+        }
+        out_edges.push(edges);
+    }
 
-    in_states[0] = State::entry(&fn_ir.slot_flags);
-    let mut scratch = State::bottom(n_slots);
+    in_states[0] = State::try_entry(&fn_ir.slot_flags)?;
+    let mut scratch = State::try_bottom(n_slots)?;
     let mut edge_scratch = [
-        (0u32, State::bottom(n_slots)),
-        (0u32, State::bottom(n_slots)),
+        (0u32, State::try_bottom(n_slots)?),
+        (0u32, State::try_bottom(n_slots)?),
     ];
 
     let mut in_queue = vec![false; n_blocks];
-    let mut worklist = VecDeque::with_capacity(n_blocks);
+    let mut worklist: VecDeque<u32> = VecDeque::new();
+    worklist
+        .try_reserve_exact(n_blocks)
+        .map_err(|_| SolveError::AllocationFailed("worklist"))?;
     worklist.push_back(0u32);
     in_queue[0] = true;
 
@@ -2162,5 +2393,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn state_allocation_failure_is_an_error_not_an_abort() {
+        // A request no allocator can satisfy must come back as Err, never abort the process.
+        assert_eq!(
+            State::try_bottom(usize::MAX / 8).err(),
+            Some(SolveError::AllocationFailed("block state"))
+        );
+        assert_eq!(
+            try_vec::<SlotCell>(usize::MAX / 2, "x").err(),
+            Some(SolveError::AllocationFailed("x"))
+        );
+        assert!(State::try_bottom(16).is_ok());
+    }
+
+    #[test]
+    fn slot_cell_size_backs_the_budget_arithmetic() {
+        // MAX_STATE_CELLS_PER_FUNC is derived from 4 states x 28 bytes per cell.
+        assert!(std::mem::size_of::<SlotCell>() <= 28);
     }
 }

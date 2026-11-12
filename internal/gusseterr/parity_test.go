@@ -184,6 +184,9 @@ func buildRandomPackage(rng *rand.Rand, nFuncs, maxBlocks int) []gusseterr.FuncI
 		if rng.IntN(3) == 0 {
 			flags |= gusseterr.FuncReturnsConcreteErrPtr
 		}
+		if rng.IntN(6) == 0 {
+			flags |= gusseterr.FuncExternalMayNil
+		}
 
 		nTuples := 1 + rng.IntN(4)
 		tuples := make([]gusseterr.TupleMeta, nTuples)
@@ -205,6 +208,9 @@ func buildRandomPackage(rng *rand.Rand, nFuncs, maxBlocks int) []gusseterr.FuncI
 		}
 
 		nb := 2 + rng.IntN(maxBlocks)
+		if rng.IntN(8) == 0 {
+			nb = 0 // bodyless function: summaries come from the flags alone
+		}
 		blocks := make([]gusseterr.BlockIR, nb)
 		siteSeq := uint32(10_000 * (fi + 1))
 
@@ -295,10 +301,14 @@ func buildRandomPackage(rng *rand.Rand, nFuncs, maxBlocks int) []gusseterr.FuncI
 				if rng.IntN(3) == 0 {
 					rf |= gusseterr.RetConcreteLiteralNil
 				}
+				retSlot := uint32(rng.IntN(nSlots))
+				if rng.IntN(4) == 0 {
+					retSlot = gusseterr.NoneU32
+				}
 				term = gusseterr.Terminator{
 					Kind:     gusseterr.TermReturn,
 					SiteID:   siteSeq,
-					RetSlot:  uint32(rng.IntN(nSlots)),
+					RetSlot:  retSlot,
 					RetFlags: rf,
 				}
 			} else {
@@ -315,6 +325,9 @@ func buildRandomPackage(rng *rand.Rand, nFuncs, maxBlocks int) []gusseterr.FuncI
 					fBB := uint32(rng.IntN(nb))
 					ck := uint8(rng.IntN(4))
 					cs := uint32(rng.IntN(nSlots))
+					if ck == gusseterr.CondOpaque && rng.IntN(2) == 0 {
+						cs = gusseterr.NoneU32
+					}
 					term = gusseterr.Terminator{
 						Kind:     gusseterr.TermCond,
 						Target:   tBB,
@@ -329,6 +342,10 @@ func buildRandomPackage(rng *rand.Rand, nFuncs, maxBlocks int) []gusseterr.FuncI
 			blocks[bi] = gusseterr.BlockIR{Phis: phis, Ops: ops, Term: term}
 		}
 
+		if nb >= 4 && rng.IntN(3) == 0 {
+			stampErrPhiLoop(rng, blocks, nSlots, &siteSeq)
+		}
+
 		funcs[fi] = gusseterr.FuncIR{
 			Flags:     flags,
 			SlotFlags: slotFlags,
@@ -337,6 +354,38 @@ func buildRandomPackage(rng *rand.Rand, nFuncs, maxBlocks int) []gusseterr.FuncI
 		}
 	}
 	return funcs
+}
+
+// stampErrPhiLoop rewrites blocks 0..3 into `e := init; for { e = call() }; box(e)`: block 1 is
+// a loop header whose phi over an error-typed slot reads the pre-loop value from block 0 and
+// the value produced in the body (block 2) only through the back edge, and block 3 boxes the
+// phi. This is the shape the worklist must re-queue the header for when the back-edge state
+// changes; both engines share the algorithm, so only a generated oracle-vs-engine run on this
+// shape plus the fixtures in passes/errcheck can show it.
+func stampErrPhiLoop(rng *rand.Rand, blocks []gusseterr.BlockIR, nSlots int, siteSeq *uint32) {
+	pick := func() uint32 { return uint32(rng.IntN(nSlots)) }
+	dst, pre, body := pick(), pick(), pick()
+	callee := uint32(0)
+	*siteSeq++
+	blocks[0].Ops = append(blocks[0].Ops, gusseterr.OpIR{
+		Kind: gusseterr.OpAssignSlot, SiteID: *siteSeq, SlotA: pre, SlotB: gusseterr.NoneU32, NilHint: gusseterr.AssignNilNonNil,
+	})
+	blocks[0].Term = gusseterr.Terminator{Kind: gusseterr.TermJump, Target: 1}
+	blocks[1].Phis = []gusseterr.PhiIR{{DstSlot: dst, Incoming: []gusseterr.PhiEdge{
+		{PredBB: 0, SrcSlot: pre}, {PredBB: 2, SrcSlot: body},
+	}}}
+	blocks[1].Term = gusseterr.Terminator{
+		Kind: gusseterr.TermCond, Target: 2, FalseBB: 3, CondKind: gusseterr.CondOpaque, CondSlot: gusseterr.NoneU32,
+	}
+	*siteSeq++
+	blocks[2].Ops = append(blocks[2].Ops, gusseterr.OpIR{
+		Kind: gusseterr.OpCallConcretePtr, SiteID: *siteSeq, SlotA: body, SlotB: callee,
+	})
+	blocks[2].Term = gusseterr.Terminator{Kind: gusseterr.TermJump, Target: 1}
+	*siteSeq++
+	blocks[3].Ops = append(blocks[3].Ops, gusseterr.OpIR{
+		Kind: gusseterr.OpBoxConcreteErr, SiteID: *siteSeq, SlotA: dst,
+	})
 }
 
 func TestLatePhiActivationAndCyclicErrLinkOracleParity(t *testing.T) {

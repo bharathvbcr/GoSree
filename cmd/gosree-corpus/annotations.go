@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -68,6 +69,11 @@ func annotatedTests() []string {
 // it fails: an annotation that silently did not apply would make the annotated run measure the
 // unannotated code. Anchors are found in the original text, so insertions do not move later anchors.
 func applyAnnotations(dir string, anns []annotation) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	byFile := map[string][]annotation{}
 	var files []string
 	for _, a := range anns {
@@ -77,8 +83,11 @@ func applyAnnotations(dir string, anns []annotation) error {
 		byFile[a.file] = append(byFile[a.file], a)
 	}
 	for _, file := range files {
-		path := filepath.Join(dir, filepath.FromSlash(file))
-		data, err := os.ReadFile(path)
+		name, err := archiveFile(root, file)
+		if err != nil {
+			return err
+		}
+		data, err := root.ReadFile(name)
 		if err != nil {
 			return err
 		}
@@ -125,11 +134,44 @@ func applyAnnotations(dir string, anns []annotation) error {
 				lines = slices.Insert(lines, e.at, indent+e.a.directive)
 			}
 		}
-		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		if err := root.WriteFile(name, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// archiveFile validates a table's file column and returns the name to open under root. The table is
+// data, so the name must be a plain forward-slash path with no ".." element and no absolute or
+// volume form, and no component of it, the file included, may be a symlink: an archive can carry
+// links, and reading or writing through one would reach a file the table never named. root itself
+// refuses anything that resolves outside the archive, so this check only narrows what is allowed.
+func archiveFile(root *os.Root, file string) (string, error) {
+	if file == "" {
+		return "", fmt.Errorf("a table row has no file")
+	}
+	local := filepath.FromSlash(file)
+	if strings.Contains(file, `\`) || path.IsAbs(file) || !filepath.IsLocal(local) {
+		return "", fmt.Errorf("table file %q is not a path inside the archive", file)
+	}
+	parts := strings.Split(file, "/")
+	for i, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("table file %q is not a clean path inside the archive", file)
+		}
+		prefix := strings.Join(parts[:i+1], "/")
+		fi, err := root.Lstat(prefix)
+		if err != nil {
+			return "", fmt.Errorf("table file %q: %w", file, err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("table file %q goes through the symlink %q; annotations are written only to regular files in the archive", file, prefix)
+		}
+		if i == len(parts)-1 && !fi.Mode().IsRegular() {
+			return "", fmt.Errorf("table file %q is not a regular file", file)
+		}
+	}
+	return file, nil
 }
 
 func anchor(lines []string, a annotation) (int, error) {

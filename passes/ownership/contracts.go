@@ -2374,10 +2374,11 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 		}
 	}
 
-	for len(queue) > 0 {
-		fn := queue[0]
-		queue = queue[1:]
-		enqueued[fn] = false
+	// Findings are emitted only after the origins reach their fixpoint: a hatch is recorded as used
+	// by a muted finding, and a muted finding made while an unhatched origin was still on its way
+	// (it arrives later through a longer call chain) would count the hatch as used for a write
+	// that is then reported anyway.
+	process := func(fn *ssa.Function, emitting bool) {
 		origins := shared[fn]
 		roots := make(map[ssa.Value]string, len(origins))
 		unmuted := make(map[ssa.Value]string, len(origins))
@@ -2409,10 +2410,12 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 					return
 				}
 				if root, ok := rootOf(w.addr); ok {
-					orig := origins[root]
-					emit(ins, orig, fmt.Sprintf(
-						"write through shared value loaded from %s%s; published atomic values are read-only once shared",
-						orig.desc, st.at(orig.pos)))
+					if emitting {
+						orig := origins[root]
+						emit(ins, orig, fmt.Sprintf(
+							"write through shared value loaded from %s%s; published atomic values are read-only once shared",
+							orig.desc, st.at(orig.pos)))
+					}
 				}
 				return
 			}
@@ -2432,12 +2435,18 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 				return
 			}
 			cc := c.Common()
+			stepAdd := add
+			stepEmit := func(ssa.Instruction, sharedLoadOrigin, string) {}
+			if emitting {
+				stepAdd = func(*ssa.Function, ssa.Value, sharedLoadOrigin) {}
+				stepEmit = emit
+			}
 			for _, a := range cc.Args {
 				if mc := resolveClosureVal(a, 0); mc != nil {
 					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
-						st.forwardShared(ins, argFn, nil, mc.Bindings, origins, rootOf, add, emit)
+						st.forwardShared(ins, argFn, nil, mc.Bindings, origins, rootOf, stepAdd, stepEmit)
 						for j, b := range mc.Bindings {
-							if root, ok := rootOf(b); ok && j < len(argFn.FreeVars) {
+							if root, ok := rootOf(b); ok && j < len(argFn.FreeVars) && !emitting {
 								add(argFn, argFn.FreeVars[j], origins[root])
 							}
 						}
@@ -2445,12 +2454,12 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 				}
 			}
 			if cc.IsInvoke() {
-				st.propagateSharedToMethods(ins, fn, cc, origins, rootOf, add, emit)
+				st.propagateSharedToMethods(ins, fn, cc, origins, rootOf, stepAdd, stepEmit)
 				return
 			}
 			callee, bindings := directCallee(cc.Value)
 			if callee != nil {
-				st.propagateSharedToCallee(ins, cc, callee, bindings, origins, rootOf, add, emit)
+				st.propagateSharedToCallee(ins, cc, callee, bindings, origins, rootOf, stepAdd, stepEmit)
 				return
 			}
 			st.originCut = false
@@ -2464,14 +2473,26 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 			for _, lf := range leaves {
 				switch x := lf.v.(type) {
 				case *ssa.Function:
-					st.propagateSharedToCallee(ins, cc, x, nil, origins, rootOf, add, emit)
+					st.propagateSharedToCallee(ins, cc, x, nil, origins, rootOf, stepAdd, stepEmit)
 				case *ssa.MakeClosure:
 					if mcFn, ok := x.Fn.(*ssa.Function); ok {
-						st.propagateSharedToCallee(ins, cc, mcFn, x.Bindings, origins, rootOf, add, emit)
+						st.propagateSharedToCallee(ins, cc, mcFn, x.Bindings, origins, rootOf, stepAdd, stepEmit)
 					}
 				}
 			}
 		})
+	}
+
+	for len(queue) > 0 {
+		fn := queue[0]
+		queue = queue[1:]
+		enqueued[fn] = false
+		process(fn, false)
+	}
+	for _, fn := range fns {
+		if shared[fn] != nil {
+			process(fn, true)
+		}
 	}
 }
 
