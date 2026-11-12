@@ -1221,6 +1221,10 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 			return
 		}
 		published, rc, hasContract := g.applyCallContract(ins, cc)
+		if targets, all := g.st.calledFunctions(g.fn, cc.Value); all {
+			g.callOfKnown(ins, cc, result, targets, published, rc, hasContract)
+			return
+		}
 		for i, a := range cc.Args {
 			switch {
 			case !published[i]:
@@ -1340,6 +1344,142 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		} else if !sum.fresh && (!hasContract || !rc.freshResult) {
 			g.add(g.val(result), ev(evForeign, ins, "result of "+name+" (not known to return a fresh value)"+note))
 		}
+	}
+}
+
+// calledFunc is one function a value that is called may be: a function, or a closure with the
+// function it runs.
+type calledFunc struct {
+	fn *ssa.Function
+	mc *ssa.MakeClosure
+}
+
+// calledFunctions returns the functions the value v, called in fn, may be, when the walk
+// (trace.go) finds every one of them. all is false when v may also be something the walk did
+// not reach (a parameter of a function whose callers are not all in sight, the result of a call
+// with no body here, a walk cut at a limit) or something that is not a function.
+//
+// It is what makes a call through a value the call of its targets. What each target does with
+// what it is handed is in its summary, as for a function called by name; a bound method's and a
+// method expression's wrapper have a summary lined up with the call's arguments (wrapperSummary).
+func (st *state) calledFunctions(fn *ssa.Function, v ssa.Value) (targets []calledFunc, all bool) {
+	if st.contracts == nil {
+		return nil, false
+	}
+	leaves, incomplete := st.ask().origins(fn, v)
+	if incomplete || len(leaves) == 0 {
+		return nil, false
+	}
+	for _, lf := range leaves {
+		var t calledFunc
+		switch x := lf.v.(type) {
+		case *ssa.Function:
+			t.fn = x
+		case *ssa.MakeClosure:
+			t.fn, _ = x.Fn.(*ssa.Function)
+			t.mc = x
+		}
+		if t.fn == nil {
+			return nil, false
+		}
+		if !slices.Contains(targets, t) {
+			targets = append(targets, t)
+		}
+	}
+	return targets, true
+}
+
+// callOfKnown is a call through a function value whose targets are all known (calledFunctions).
+// An argument is what the targets make of it, taken together: owned or started on a goroutine
+// by one of them, it is transferred; kept by one, it escapes; written by one, it is written;
+// and the memory any of them joins is joined. That is what a call by name does with its one
+// callee's summary. A call whose targets are not all known treats every argument as kept and
+// written (call).
+//
+// What a target that is a closure does with what it captured is not this call's to say: the
+// captures are values of the function that made the closure, which charges what the closure
+// keeps where it is made (closureRetains). The called value is written only if a target writes
+// something it captured.
+func (g *graph) callOfKnown(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value, targets []calledFunc, published map[int]bool, rc resolvedCallContract, hasContract bool) {
+	sums := make([]*summary, len(targets))
+	for k, t := range targets {
+		sums[k] = g.st.summary(t.fn)
+		g.link(cc, sums[k], result, -1)
+	}
+	// which names the first target that does something with an argument, for the report.
+	which := func(does func(*summary) bool) (string, bool) {
+		for k, s := range sums {
+			if !does(s) {
+				continue
+			}
+			fn := targets[k].fn
+			if m := methodBehind(fn); m != nil {
+				fn = m
+			}
+			name := calleeName(fn) + s.unavailable()
+			if len(targets) > 1 {
+				name += fmt.Sprintf(" (one of %d functions the value called here may be)", len(targets))
+			}
+			return name, true
+		}
+		return "", false
+	}
+	for i, a := range cc.Args {
+		an := g.val(a)
+		if an == nil {
+			continue
+		}
+		if published[i] {
+			// The contract stands for the publish; what else a callee does with it is an escape.
+			if rc.alsoEscapes(i) {
+				g.add(an, ev(evEscape, ins, "passed to a dynamic function call"))
+			}
+		} else if name, ok := which(func(s *summary) bool { return s.isIso(i) }); ok {
+			g.transferWithOp(ins, a, token.NoPos, i, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
+			g.writtenCaptures(ins, a, "captured by a closure passed to "+name+", which may write it")
+		} else if name, ok := which(func(s *summary) bool { return s.spawns(i) }); ok {
+			what := "started on a goroutine by " + name
+			if _, closure := a.(*ssa.MakeClosure); closure {
+				what = "captured by a goroutine started by " + name
+			}
+			g.transferWithOp(ins, a, token.NoPos, i, what)
+			g.writtenCaptures(ins, a, "captured by a callback started by "+name+", which may write it")
+		} else if name, ok := which(func(s *summary) bool { return s.leaks(i) }); ok {
+			g.add(an, g.forwardedEscape(ins, cc, i, a, "passed to "+name+", which may retain or share it"))
+		}
+		if name, ok := which(func(s *summary) bool { return s.writes(i) }); ok && (!hasContract || !rc.suppressWrite) {
+			g.written(ins, a, "passed to "+name+", which may write it")
+		}
+	}
+	for k, t := range targets {
+		if t.mc == nil {
+			continue
+		}
+		writes := false
+		for j := range t.mc.Bindings {
+			writes = writes || sums[k].writesFree(j)
+		}
+		if writes {
+			g.written(ins, cc.Value, "called dynamically; its captures may be written")
+			break
+		}
+	}
+	// The result is fresh when every target's is: a fresh allocation, or memory of the arguments
+	// it is linked to, which the links above have joined to it.
+	if result == nil {
+		return
+	}
+	fresh := func(k int) bool {
+		return !slices.ContainsFunc(sums, func(s *summary) bool { return !s.isFreshResult(k) })
+	}
+	if cc.Signature().Results().Len() > 1 && result.Referrers() != nil {
+		for _, r := range *result.Referrers() {
+			if ext, ok := r.(*ssa.Extract); ok && ext.Tuple == result && !fresh(ext.Index) && !(ext.Index == 0 && hasContract && rc.freshResult) {
+				g.add(g.val(ext), ev(evForeign, ins, "result of a dynamic function call"))
+			}
+		}
+	} else if !fresh(0) && (!hasContract || !rc.freshResult) {
+		g.add(g.val(result), ev(evForeign, ins, "result of a dynamic function call"))
 	}
 }
 

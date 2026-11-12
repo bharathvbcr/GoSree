@@ -172,6 +172,26 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 			// and is followed with it.
 			targets, rest := callTargets(cc.Value)
 			if len(rest) > 0 {
+				// What is left is asked of the walk that follows a value through parameters,
+				// fields, package variables and results (calledFunctions). Where it finds every
+				// function the value may be, those are the targets and nothing is left: each is
+				// followed or read from its summary below, like a function called by name. A
+				// closure among them was made somewhere else, and what it captured is not a
+				// value of this function: when the called value is itself read from shared
+				// memory, a closure that writes what it captured may be writing that memory, and
+				// the call stays reported.
+				if known, all := st.calledFunctions(fn, cc.Value); all && !st.sharedClosureWrites(known, rest, r, walk) {
+					targets, rest = targets[:0], nil
+					for _, k := range known {
+						t := callTarget{fn: k.fn}
+						if k.mc != nil && k.mc.Parent() == fn {
+							t.mc = k.mc // made here: what it captured are values of this function
+						}
+						targets = append(targets, t)
+					}
+				}
+			}
+			if len(rest) > 0 {
 				handed := append(append([]ssa.Value(nil), cc.Args...), rest...)
 				for _, v := range handed {
 					if _, guarded := st.slotOf(v); guarded {
@@ -231,6 +251,31 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) {
 			"the write check of the handler registered with %s stopped after scanning %d function bodies with shared memory still to follow, so a write to memory the handler shares with every concurrent request may be unreported",
 			sp.via, steps))
 	}
+}
+
+// sharedClosureWrites reports whether a called value that leads back to shared memory (one of
+// rest does) may be a closure that writes something it captured: such a closure, stored in the
+// memory every request shares, may have captured that memory where it was made.
+func (st *state) sharedClosureWrites(known []calledFunc, rest []ssa.Value, r map[ssa.Value]string, walk *rootWalk) bool {
+	fromShared := slices.ContainsFunc(rest, func(v ssa.Value) bool {
+		_, ok := walk.root(v, r)
+		return ok
+	})
+	if !fromShared {
+		return false
+	}
+	for _, k := range known {
+		if k.mc == nil {
+			continue
+		}
+		sum := st.summary(k.fn)
+		for j := range k.mc.Bindings {
+			if sum.writesFree(j) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkCalleeWrites reports SAFE008 at a call the write check does not follow into (a function of
