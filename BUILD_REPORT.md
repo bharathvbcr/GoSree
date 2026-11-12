@@ -3,10 +3,10 @@
 Repository `gocap` (module `github.com/bharathvbcr/gosree`).
 
 - **Starting point:** `main` at `9161d81`. Main moved to `7b739fc` during the run; that was another session's commit, not this run's.
-- **Where the work is:** branch `run/integ-1111`, at `e34e37c`.
-- **Merged since:** another session merged `run/integ-1111`, every lane branch and both second-round adversary branches into local `main` (merge commits `afde37e` 18:37 to `c147b2a` 19:21). It also fixed two problems in this run's work; see section 10. This run did not merge anything into `main`.
-- **Not done:** nothing was pushed (`origin/main` is still `7b739fc`; local `main` is 80 commits ahead), and no remote branch was touched.
-- **This revision of the report** is on branch `run/report-1111`, which starts at `main` `78f0879`. Section 10 and the corrections marked "Corrected" were added after the merge.
+- **Where the work was:** branch `run/integ-1111`, at `e34e37c`. It was deleted on 2026-11-12, when it was already an ancestor of `main`; see section 11.
+- **Merged since:** another session merged `run/integ-1111`, every lane branch and both second-round adversary branches into local `main` (merge commits `afde37e` 18:37 to `c147b2a` 19:21). It also fixed two problems in this run's work; see section 10. The only merge this run made into `main` is this report's own merge.
+- **Pushed since, but not by this run:** `origin/main` is `08bb22f` ("Pin gusset by version…", 2026-11-12 08:45). Verified with `git ls-remote origin refs/heads/main`. That push came from outside this run; this run pushed nothing and touched no remote branch.
+- **This revision of the report** was written on branch `run/report-1111`, which started at `main` `78f0879`, took in `main` at `08bb22f`, and was merged into `main` on 2026-11-12. Section 10, section 11 and the corrections marked "Corrected" or "Update" were added after the first merge.
 
 Labels used below: **verified** means a command was run and its output read. **Inferred** means read from code or from an agent's report without re-running it. **Unverified** means it could not be checked.
 
@@ -234,6 +234,7 @@ On 2026-11-12 you asked Fable (the advisor) to rule on items 2–10. Each ruling
      - One run at that tip is green in both engines with `-timeout 60m`, including `tests/stress` under cgo and the acceptance script.
      - ft-238f's own checks pass.
    - On 2026-11-12 none of those conditions held. Session `45c62196` was holding `passes/ownership`, `tests/stress` was not green under cgo in a full run, and the acceptance script was not run at `78f0879`.
+   - **Update (2026-11-12, verified with `git ls-remote`):** `origin/main` has since been fast-forwarded to `08bb22f` from outside this run. This run did not run the conditions above at `08bb22f`, so it can't say whether they held. They now apply to the next push. This run still pushes nothing.
 8. **Backlog cards. Ruled.**
    - **ft-a2b3:** ruled closed. `build/lanes/integ4` does not exist anywhere `rg -uu`, `git branch` or `git worktree` can see.
    - **ft-9a58:** ruled closed. errcheck is the implementation, and `passes/errflow` does not exist.
@@ -250,6 +251,7 @@ On 2026-11-12 you asked Fable (the advisor) to rule on items 2–10. Each ruling
      - Write-side-only race accounting.
 9. **The +6.2% CPU regression. Ruled accepted.** It pays for a soundness fix, and the only cheaper version lost findings. It does not gate a push. ft-1f84 goes into the next wave, starting with a profile at `e34e37c`.
 10. **This report's branch. Ruled merge,** after this commit. Before merging, the main checkout must have no staged or modified tracked file, and the collision check for BUILD_REPORT.md must be clear. The merge is fast-forward only, or an ordinary merge if `main` has moved, and it is aborted if any file other than BUILD_REPORT.md would change. **Not merged (2026-11-12, about 00:50):** the main checkout had modified tracked files (`.github/workflows/ci.yml`, `.gitignore`, `PROJECT.md`, `README.md`, `docs/ERROR_DISCIPLINE.md`, `docs/TOOLING_AND_ERASURE.md`, `go.mod`, `go.sum`; another session at work), and `main` had moved to `ae6f578`, so the first condition failed. Merge `run/report-1111` once the main checkout is clean; `git diff main run/report-1111 -- BUILD_REPORT.md` is the whole change.
+    - **Update (2026-11-12): merged on your later instruction** to merge everything cleanly into `main`. The main checkout still had other sessions' uncommitted edits to `PROJECT.md`, `README.md`, `docs/ARCHITECTURE.md` and `docs/TOOLING_AND_ERASURE.md`, plus an untracked `.agents/`, so Fable's first condition still failed. Your instruction overrides it. None of those files is BUILD_REPORT.md, and the merge was a fast-forward that changes BUILD_REPORT.md only. Section 11 has the commands.
 
 ## 8. Storage
 
@@ -285,7 +287,7 @@ After Fable's rulings (2026-11-12, about 00:45):
 - **Free space:** 214 GB on the data volume (`/System/Volumes/Data`, about 24%). Other sessions freed most of that; this run's deletions were under 1 GB.
 - **Correction:** an earlier message read the system volume `/` and called it "129 GB (10%)". The 10% was that volume's used column.
 - **Branches deleted** with `git branch -d`: `run/3b3c-adv2` (was `95fa488`) and `run/b6a2-adv2` (was `404bb00`), both ancestors of `main`.
-- **Branches kept:** `git branch -d` refused the six round-1 branches `run/{3b3c,8e79,b6a2,d323-frontend,d323-solver,f138}-adv` as not fully merged. Their commits are patch-equivalent (`git cherry`) to commits on their lane branches, but they are not ancestors of `main`. Deleting them needs `-D` and your word.
+- **Branches kept:** `git branch -d` refused the six round-1 branches `run/{3b3c,8e79,b6a2,d323-frontend,d323-solver,f138}-adv` as not fully merged. Their commits are patch-equivalent (`git cherry`) to commits on their lane branches, but they are not ancestors of `main`. Deleting them needs `-D` and your word. **Update:** they were deleted on 2026-11-12 on your instruction to prune stale branches; see section 11.
 
 Kept:
 - The lane branches and `run/integ-1111`, until their cards leave review (Fable ruling). They are local and unpushed, and all are contained in `main`.
@@ -317,3 +319,76 @@ The other session's commits on `main` that change this run's work:
 | `9823ff0` | A slice of a spread array counts as built in place only when it is the printing call's argument and that call is its only use; otherwise it is judged by its type, and `[]any` fails closed. Fixes the b6a2 second adversary's BREAK. | **Verified:** `TestAdv2SliceStoreThenSpreadBreak` passes. Five further shapes are all reported: `copy` into the spread slice, `append` into a shared backing array, a map holding `[]any`, a `make` slice store, and a store through a sub-slice. A plain map handled the same way is also reported. That is a cautious false positive, which predates b6a2 because `aa6d62f` reported every print. |
 
 The later `main` commits (`d754bb7`, `6ca7e09`, `9e5db27`, `b5e77e1`, `78f0879`) come from the other session's own work. They are not part of this run and were not reviewed here, beyond passing the suite above.
+
+## 11. Wind-down, merge and pruning (2026-11-12)
+
+You asked for these steps: let the running agents finish, fix critical bugs, review and verify every branch with Opus, merge into `main`, prune stale and regressed branches, and file what remains as tasks.
+
+**Agents.**
+- This session had no subagents running.
+- Live Claude sessions in this repository (GitPulse insights):
+  - `45c62196`: Desktop, busy, on `rework/not-covered`. It can't be messaged from here.
+  - `b3738d58`: CLI, named gocap-55, busy.
+  - Two idle Desktop sessions.
+- No antigravity, codex, DevCouncil or MANVI session was live.
+- Nothing was killed.
+
+**The split.** gocap-55 was given the same request, so the work was divided so that neither session merges or prunes over the other.
+- **This run:**
+  - merges this report;
+  - prunes the branches and worktrees this run made;
+  - updates this run's cards.
+- **gocap-55:**
+  - reviews, verifies and merges `swarm/errscale` (`80a766b`, safeerr `MaxFuncs` raised to 262,144);
+  - reviews the ownership work after `c147b2a`;
+  - reviews `rework/not-covered` once `45c62196` stops;
+  - fixes anything critical it finds;
+  - prunes `harden/*`, `integrate/2026-11-11*`, `rework/one-tracer` and `swarm/*`;
+  - files the GitPulse tasks for what it finds.
+- Its results are not part of this report.
+
+**Branch census against `main` `08bb22f`** (verified: `git rev-list --count` and `git cherry`):
+- Unique work on only three branches:
+  - `run/report-1111` (this report);
+  - `swarm/errscale` (1 commit);
+  - `rework/not-covered` (7 commits, still being committed to at 10:43).
+- Patch-equivalent only (every `git cherry` line is `-`): the six round-1 `run/*-adv` branches.
+- Everything else is an ancestor of `main`.
+
+**Deleted by this run.**
+- With `git branch -d` (each was an ancestor of `main`):
+
+  | Branch | Tip |
+  |---|---|
+  | `run/3b3c-errcheck` | `dbef4bf` |
+  | `run/8e79-cmd` | `6144167` |
+  | `run/b6a2-ownership` | `60968b7` |
+  | `run/d323-frontend` | `fb3fb14` |
+  | `run/d323-solver` | `3ca416b` |
+  | `run/f138-census` | `dd28df1` |
+  | `run/integ-1111` | `e34e37c` |
+
+- `run/b6a2-ownership` is the regressed branch: its `60968b7` gate lost SAFE002/SAFE004 for a publish through an interface (section 10). The gate is already replaced on `main` by `16b0506`, so deleting the branch loses nothing.
+- With `git branch -D`, after `git cherry main <branch>` printed only `-` lines:
+
+  | Branch | Tip |
+  |---|---|
+  | `run/3b3c-adv` | `7e29113` |
+  | `run/8e79-adv` | `6a8ac00` |
+  | `run/b6a2-adv` | `e4c48f2` |
+  | `run/d323-frontend-adv` | `667c44e` |
+  | `run/d323-solver-adv` | `1dda5ef` |
+  | `run/f138-adv` | `ff8ffec` |
+
+- **Worktrees:**
+  - `wt/base` (the baseline at `9161d81`): the 5% check is finished, and it held only an ignored `rust/target/`.
+  - Two worktrees made for this pass, `wt/base12` and `wt/cand`.
+  - The branch `integrate/2026-11-12` (was `9d3ddd3`): main plus errscale plus this report. It was thrown away, not merged, because errscale is gocap-55's to merge.
+- **Left for after this commit reaches `main`:** `run/report-1111` and its worktree `wt/b6a2-adv2`.
+
+**Not touched, and why.**
+- **Another session's branch or worktree:** `rework/not-covered`, `integrate/2026-11-11-merge`, `harden/merge-main-1111` (`/Users/bharath/Code/devtools/gocap-worktree`), and `45c62196`'s scratch worktrees. `wt/final` has live processes.
+- **Antigravity worktrees `wt/arch` (`swarm/arch`) and `wt/scholarlm` (detached):** they hold uncommitted changes to `passes/ownership` and `cmd/gosree-corpus`. No antigravity session is live, so nobody can say whether that work is wanted. That is your decision.
+- **Remote branches:** `origin` has only `main`.
+
+**Caveat for every cgo build:** the gusset sibling is at the pinned `0ab48ca` but has uncommitted edits, including `crates/gusset/build.rs` and `tools/ci/versions.env`. A cgo build here is not a build of the pinned gusset alone.
