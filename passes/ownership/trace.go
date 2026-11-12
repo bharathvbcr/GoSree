@@ -1,0 +1,591 @@
+package ownership
+
+import (
+	"go/token"
+	"go/types"
+	"slices"
+
+	"golang.org/x/tools/go/ssa"
+)
+
+// trace is one walk backwards from a value to what it may be. There is one walk (follow), with one
+// place where it stops at a limit and one visited set, and one step for each construct it goes
+// through: the edges of a phi, the arguments a parameter is called with, the bindings of a
+// captured variable, the values a call returns, the stores to a local cell or to a package
+// variable. What is asked about the value is a parameter of the walk (ask), not a walk of its own:
+// these were eleven functions that handed a visited set to one another, and the same step written
+// two or three times had come apart.
+type trace struct {
+	q    *question
+	seen map[valVisitKey]bool
+}
+
+// askKind is what a walk is asked about a value.
+type askKind uint8
+
+const (
+	// askValue: the functions, closures and boxed values the value may be.
+	askValue askKind = iota
+	// askBase: the allocations and package variables a pointer may point to.
+	askBase
+	// askField: as askValue, for one field of a struct value.
+	askField
+	// askStored: as askValue, for what may be stored at an address.
+	askStored
+)
+
+type ask struct {
+	kind  askKind
+	field int // for askField
+}
+
+// origins returns the functions, closures and boxed values v may be in fn, and whether there may be
+// others. It is the walk's entry: a check that asks starts here, on a visited set of its own.
+func (q *question) origins(fn *ssa.Function, v ssa.Value) ([]leafValue, bool) {
+	t := &trace{q: q, seen: map[valVisitKey]bool{}}
+	return t.follow(fn, v, ask{kind: askValue}, 0)
+}
+
+// resolveInterfaceTypes returns the concrete types an interface value may hold, and whether there
+// may be others: a leaf that is not a boxed value, or one boxed from another interface.
+func (q *question) resolveInterfaceTypes(fn *ssa.Function, v ssa.Value) ([]types.Type, bool) {
+	leaves, incomplete := q.origins(fn, v)
+	var out []types.Type
+	addType := func(t types.Type) {
+		if t == nil || types.IsInterface(t) {
+			incomplete = true
+			return
+		}
+		for _, ex := range out {
+			if types.Identical(ex, t) {
+				return
+			}
+		}
+		out = append(out, t)
+	}
+	for _, lf := range leaves {
+		if mi, ok := lf.v.(*ssa.MakeInterface); ok {
+			addType(mi.X.Type())
+		} else {
+			incomplete = true
+		}
+	}
+	return out, incomplete
+}
+
+// follow answers a for v in fn: what it found, and whether that may not be all.
+//
+// The limits are here and nowhere else. A walk that goes deeper than originDepth, or visits more
+// than originBudget values, answers "may not be all" and marks its question as cut. Two things are
+// as the separate walks had them and are not what one walk would choose: askField and askStored
+// neither mark what they visit nor spend budget, and askStored is not stopped by depth (the walks
+// it starts are).
+func (t *trace) follow(fn *ssa.Function, v ssa.Value, a ask, depth int) ([]leafValue, bool) {
+	if v == nil {
+		return nil, true
+	}
+	if depth > originDepth && a.kind != askStored {
+		t.q.cut = true
+		return nil, true
+	}
+	bodyFn := canonicalBodyFn(fn)
+	if a.kind == askValue || a.kind == askBase {
+		key := valVisitKey{fn: bodyFn, v: v}
+		if t.seen[key] {
+			return nil, false
+		}
+		if len(t.seen) >= originBudget {
+			// Out of budget: what v may be is not known. This used to answer "nothing more, and that
+			// is all", which made a callee chosen among more values than the budget look fully known.
+			t.q.cut = true
+			return nil, true
+		}
+		t.seen[key] = true
+	}
+
+	switch x := v.(type) {
+	case *ssa.Function, *ssa.MakeClosure, *ssa.MakeInterface:
+		if a.kind == askValue {
+			return []leafValue{{fn: bodyFn, v: v}}, false
+		}
+	case *ssa.Alloc:
+		switch a.kind {
+		case askBase:
+			return []leafValue{{fn: bodyFn, v: v}}, false
+		case askStored:
+			if x.Referrers() != nil {
+				return t.storedInCell(x, bodyFn, ask{kind: askValue}, depth)
+			}
+		}
+	case *ssa.Global:
+		switch a.kind {
+		case askBase:
+			return []leafValue{{fn: bodyFn, v: v}}, false
+		case askStored:
+			if t.q.contracts != nil {
+				return t.storedInGlobal(x, ask{kind: askValue}, depth)
+			}
+		}
+	case *ssa.ChangeType:
+		// For a struct value too: a struct converted from another struct type has the same fields
+		// in the same order.
+		if a.kind != askStored {
+			return t.follow(bodyFn, x.X, a, depth+1)
+		}
+	case *ssa.ChangeInterface:
+		if a.kind == askValue {
+			return t.follow(bodyFn, x.X, a, depth+1)
+		}
+	case *ssa.TypeAssert:
+		if a.kind == askValue || a.kind == askBase {
+			return t.follow(bodyFn, x.X, a, depth+1)
+		}
+	case *ssa.Phi:
+		if a.kind != askStored {
+			var out []leafValue
+			incomplete := len(x.Edges) == 0
+			for _, e := range x.Edges {
+				sub, inc := t.follow(bodyFn, e, a, depth+1)
+				out = append(out, sub...)
+				if inc {
+					incomplete = true
+				}
+			}
+			return out, incomplete
+		}
+	case *ssa.FreeVar:
+		// For askStored this is a captured cell: the bindings are the cell's address in the parent.
+		if a.kind != askField {
+			return t.bindings(bodyFn, x, a, depth)
+		}
+	case *ssa.Parameter:
+		switch a.kind {
+		case askValue, askBase:
+			return t.arguments(bodyFn, x, a, depth)
+		case askField:
+			// With no call site that says anything, the field is looked up by its type below.
+			if out, incomplete := t.arguments(bodyFn, x, a, depth); len(out) > 0 {
+				return out, incomplete
+			}
+		}
+	case *ssa.UnOp:
+		switch {
+		case x.Op == token.MUL && a.kind == askValue:
+			return t.follow(bodyFn, x.X, ask{kind: askStored}, depth+1)
+		case x.Op == token.MUL && a.kind == askField:
+			return t.fieldBehind(bodyFn, x.X, a.field, depth)
+		case x.Op == token.MUL && a.kind == askBase:
+			if alloc, ok := x.X.(*ssa.Alloc); ok && alloc.Referrers() != nil {
+				return t.storedInCell(alloc, bodyFn, a, depth)
+			}
+			if g, ok := x.X.(*ssa.Global); ok && t.q.contracts != nil {
+				return t.storedInGlobal(g, a, depth)
+			}
+		case x.Op == token.ARROW && a.kind == askValue:
+			return t.received(bodyFn, x.X, depth+1)
+		}
+	case *ssa.Field:
+		if a.kind == askValue {
+			return t.follow(bodyFn, x.X, ask{kind: askField, field: x.Field}, depth+1)
+		}
+	case *ssa.FieldAddr:
+		if a.kind == askStored {
+			return t.fieldBehind(fn, x.X, x.Field, depth)
+		}
+	case *ssa.IndexAddr:
+		if a.kind == askStored {
+			return t.elements(fn, x, depth)
+		}
+	case *ssa.Lookup:
+		if a.kind == askValue {
+			return t.looked(bodyFn, x.X, depth+1)
+		}
+	case *ssa.Extract:
+		if a.kind == askValue {
+			if lk, ok := x.Tuple.(*ssa.Lookup); ok && x.Index == 0 {
+				return t.looked(bodyFn, lk.X, depth+1)
+			}
+			if recv, ok := x.Tuple.(*ssa.UnOp); ok && recv.Op == token.ARROW && x.Index == 0 {
+				return t.received(bodyFn, recv.X, depth+1)
+			}
+		}
+		if a.kind == askValue || a.kind == askBase {
+			if callIns, ok := x.Tuple.(*ssa.Call); ok {
+				return t.returned(bodyFn, callIns, x.Index, a, depth+1)
+			}
+		}
+	case *ssa.Call:
+		if a.kind == askValue || a.kind == askBase {
+			return t.returned(bodyFn, x, 0, a, depth+1)
+		}
+	}
+	if a.kind == askField {
+		return t.fieldByType(v, a.field, depth)
+	}
+	return nil, true
+}
+
+// bindings walks what each closure made from bodyFn binds to its free variable fv.
+func (t *trace) bindings(bodyFn *ssa.Function, fv *ssa.FreeVar, a ask, depth int) ([]leafValue, bool) {
+	if t.q.contracts == nil || bodyFn == nil {
+		return nil, true
+	}
+	fvIdx := slices.Index(bodyFn.FreeVars, fv)
+	if fvIdx < 0 {
+		return nil, true
+	}
+	mcs := t.q.contracts.closuresOf[bodyFn]
+	if len(mcs) == 0 {
+		return nil, true
+	}
+	var out []leafValue
+	incomplete := false
+	for _, mc := range mcs {
+		if fvIdx < len(mc.Bindings) {
+			sub, inc := t.follow(mc.Parent(), mc.Bindings[fvIdx], a, depth+1)
+			out = append(out, sub...)
+			if inc {
+				incomplete = true
+			}
+		} else {
+			incomplete = true
+		}
+	}
+	return out, incomplete
+}
+
+// arguments walks what each call of bodyFn in sight passes for its parameter p. With no call in
+// sight it answers nothing, and that this may not be all.
+//
+// At a call through a method value the argument is taken one place to the left for askValue and
+// askBase and as it stands for askField. That is how the separate walks had it.
+func (t *trace) arguments(bodyFn *ssa.Function, p *ssa.Parameter, a ask, depth int) ([]leafValue, bool) {
+	if t.q.contracts == nil || bodyFn == nil {
+		return nil, true
+	}
+	pIdx := slices.Index(bodyFn.Params, p)
+	if pIdx < 0 {
+		return nil, true
+	}
+	sites := t.q.contracts.callSitesOf[bodyFn]
+	if len(sites) == 0 {
+		return nil, true
+	}
+	incomplete := t.q.contracts.openCallers[bodyFn]
+	var out []leafValue
+	for _, site := range sites {
+		cc := site.ins.Common()
+		argIdx := pIdx
+		if a.kind != askField {
+			if _, isMC := cc.Value.(*ssa.MakeClosure); isMC && isBoundMethodWrapper(cc.StaticCallee()) {
+				if pIdx == 0 {
+					incomplete = true
+					continue
+				}
+				argIdx = pIdx - 1
+			}
+		}
+		if argIdx < 0 || argIdx >= len(cc.Args) {
+			incomplete = true
+			continue
+		}
+		sub, inc := t.follow(site.caller, cc.Args[argIdx], a, depth+1)
+		out = append(out, sub...)
+		if inc {
+			incomplete = true
+		}
+	}
+	return out, incomplete
+}
+
+// storedInCell walks every value stored to a local cell. fn stands in for a store with no function.
+func (t *trace) storedInCell(alloc *ssa.Alloc, fn *ssa.Function, a ask, depth int) ([]leafValue, bool) {
+	var out []leafValue
+	incomplete := false
+	for _, ref := range *alloc.Referrers() {
+		if stIns, ok := ref.(*ssa.Store); ok && stIns.Addr == alloc {
+			pFn := stIns.Parent()
+			if pFn == nil {
+				pFn = fn
+			}
+			sub, inc := t.follow(pFn, stIns.Val, a, depth+1)
+			out = append(out, sub...)
+			if inc {
+				incomplete = true
+			}
+		}
+	}
+	if len(out) == 0 {
+		incomplete = true
+	}
+	return out, incomplete
+}
+
+// storedInGlobal walks every value this package stores to a package variable. An exported one may be
+// stored to from elsewhere.
+func (t *trace) storedInGlobal(g *ssa.Global, a ask, depth int) ([]leafValue, bool) {
+	vals := t.q.contracts.globalStores[g]
+	incomplete := len(vals) == 0 || token.IsExported(g.Name())
+	var out []leafValue
+	for _, sv := range vals {
+		sub, inc := t.follow(parentOf(sv), sv, a, depth+1)
+		out = append(out, sub...)
+		if inc {
+			incomplete = true
+		}
+	}
+	return out, incomplete
+}
+
+// parentOf returns the function a stored value is computed in, when it is computed.
+func parentOf(v ssa.Value) *ssa.Function {
+	if ins, ok := v.(ssa.Instruction); ok {
+		return ins.Parent()
+	}
+	return nil
+}
+
+// returned walks what a call returns in its result resIdx: for each return of the one function the
+// call can run, the returned value, or the call's own argument when the value is a parameter.
+func (t *trace) returned(caller *ssa.Function, callIns *ssa.Call, resIdx int, a ask, depth int) ([]leafValue, bool) {
+	if callIns.Call.IsInvoke() {
+		return nil, true
+	}
+	callee, _ := directCallee(callIns.Call.Value)
+	if callee == nil {
+		return nil, true
+	}
+	bodyFn := canonicalBodyFn(callee)
+	if len(bodyFn.Blocks) == 0 {
+		return nil, true
+	}
+	var out []leafValue
+	incomplete := false
+	sawRet := false
+	forEachInstr(bodyFn, func(ins ssa.Instruction) {
+		ret, ok := ins.(*ssa.Return)
+		if !ok || resIdx >= len(ret.Results) {
+			return
+		}
+		sawRet = true
+		rv := ret.Results[resIdx]
+		if pIdx := paramFlowIndex(rv, bodyFn); pIdx >= 0 && pIdx < len(callIns.Call.Args) {
+			sub, inc := t.follow(caller, callIns.Call.Args[pIdx], a, depth+1)
+			out = append(out, sub...)
+			if inc {
+				incomplete = true
+			}
+			return
+		}
+		sub, inc := t.follow(bodyFn, rv, a, depth+1)
+		out = append(out, sub...)
+		if inc {
+			incomplete = true
+		}
+	})
+	if !sawRet {
+		incomplete = true
+	}
+	return out, incomplete
+}
+
+// fieldBehind walks what a field of the struct a pointer points to may hold: for each allocation
+// or package variable the pointer may point to, the stores to that field. Where the pointer leads
+// nowhere in sight, the stores to the field of that struct type anywhere in the package stand in,
+// and the answer may not be all.
+//
+// What the pointer points to is asked on a visited set of its own. Its answer is used here, for
+// this field; on the set of the walk that asks, a second read through the same pointer would be
+// answered "nothing more".
+func (t *trace) fieldBehind(fn *ssa.Function, ptr ssa.Value, field int, depth int) ([]leafValue, bool) {
+	fresh := &trace{q: t.q, seen: map[valVisitKey]bool{}}
+	bases, incomplete := fresh.follow(fn, ptr, ask{kind: askBase}, depth+1)
+	var out []leafValue
+	for _, b := range bases {
+		sub, inc := t.fieldOfBase(b, field, depth+1)
+		out = append(out, sub...)
+		if inc {
+			incomplete = true
+		}
+	}
+	if len(out) == 0 && t.q.contracts != nil && ptr != nil {
+		if keyStr, ok := derefStructTypeKey(ptr.Type()); ok {
+			for _, iv := range t.q.contracts.fieldStores(keyStr, field) {
+				sub, _ := t.follow(iv.fn, iv.v, ask{kind: askValue}, depth+1)
+				out = append(out, sub...)
+			}
+			incomplete = true
+		}
+	}
+	if len(out) == 0 {
+		incomplete = true
+	}
+	return out, incomplete
+}
+
+// fieldOfBase walks what is stored to one field of an allocation or a package variable: the stores
+// to the field, and that field of each whole value stored.
+func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bool) {
+	switch base := lf.v.(type) {
+	case *ssa.Alloc:
+		if base.Referrers() == nil {
+			return nil, true
+		}
+		var out []leafValue
+		incomplete := false
+		for _, ref := range *base.Referrers() {
+			if fa, ok := ref.(*ssa.FieldAddr); ok && fa.Field == field && fa.Referrers() != nil {
+				for _, r2 := range *fa.Referrers() {
+					if stIns, ok := r2.(*ssa.Store); ok && stIns.Addr == fa {
+						pFn := stIns.Parent()
+						if pFn == nil {
+							pFn = lf.fn
+						}
+						sub, inc := t.follow(pFn, stIns.Val, ask{kind: askValue}, depth+1)
+						out = append(out, sub...)
+						if inc {
+							incomplete = true
+						}
+					}
+				}
+			}
+			if stIns, ok := ref.(*ssa.Store); ok && stIns.Addr == base {
+				pFn := stIns.Parent()
+				if pFn == nil {
+					pFn = lf.fn
+				}
+				sub, inc := t.follow(pFn, stIns.Val, ask{kind: askField, field: field}, depth+1)
+				out = append(out, sub...)
+				if inc {
+					incomplete = true
+				}
+			}
+		}
+		if len(out) == 0 {
+			incomplete = true
+		}
+		return out, incomplete
+	case *ssa.Global:
+		if t.q.contracts == nil {
+			return nil, true
+		}
+		vals := t.q.contracts.globalFieldStores[base][field]
+		wholeVals := t.q.contracts.globalStores[base]
+		incomplete := (len(vals) == 0 && len(wholeVals) == 0) || token.IsExported(base.Name())
+		var out []leafValue
+		for _, sv := range vals {
+			sub, inc := t.follow(parentOf(sv), sv, ask{kind: askValue}, depth+1)
+			out = append(out, sub...)
+			if inc {
+				incomplete = true
+			}
+		}
+		for _, wv := range wholeVals {
+			sub, inc := t.follow(parentOf(wv), wv, ask{kind: askField, field: field}, depth+1)
+			out = append(out, sub...)
+			if inc {
+				incomplete = true
+			}
+		}
+		if len(out) == 0 {
+			incomplete = true
+		}
+		return out, incomplete
+	}
+	return nil, true
+}
+
+// fieldByType walks the stores to a field of a struct type anywhere in the package. It is what is
+// left when the struct value itself leads nowhere, and its answer may never be all.
+func (t *trace) fieldByType(structVal ssa.Value, field int, depth int) ([]leafValue, bool) {
+	if t.q.contracts != nil {
+		if keyStr, ok := structValueTypeKey(structVal.Type()); ok {
+			var out []leafValue
+			for _, iv := range t.q.contracts.fieldStores(keyStr, field) {
+				sub, _ := t.follow(iv.fn, iv.v, ask{kind: askValue}, depth+1)
+				out = append(out, sub...)
+			}
+			if len(out) > 0 {
+				return out, true
+			}
+		}
+	}
+	return nil, true
+}
+
+// elements walks the stores to the elements of a local array, directly and through slices of it.
+// Which element is read is not followed, so the answer may never be all.
+func (t *trace) elements(fn *ssa.Function, ia *ssa.IndexAddr, depth int) ([]leafValue, bool) {
+	base := ia.X
+	if sl, ok := base.(*ssa.Slice); ok {
+		base = sl.X
+	}
+	baseAlloc, ok := base.(*ssa.Alloc)
+	if !ok || baseAlloc.Referrers() == nil {
+		return nil, true
+	}
+	var out []leafValue
+	stores := func(ia *ssa.IndexAddr) {
+		if ia.Referrers() == nil {
+			return
+		}
+		for _, r2 := range *ia.Referrers() {
+			if stIns, ok := r2.(*ssa.Store); ok && stIns.Addr == ia {
+				sub, _ := t.follow(fn, stIns.Val, ask{kind: askValue}, depth+1)
+				out = append(out, sub...)
+			}
+		}
+	}
+	for _, r := range *baseAlloc.Referrers() {
+		if ia, ok := r.(*ssa.IndexAddr); ok {
+			stores(ia)
+		}
+		if sl, ok := r.(*ssa.Slice); ok {
+			for _, sr := range *sl.Referrers() {
+				if ia, ok := sr.(*ssa.IndexAddr); ok {
+					stores(ia)
+				}
+			}
+		}
+	}
+	return out, true
+}
+
+// looked walks what is put into a map made in sight. What a map holds is never all in sight.
+func (t *trace) looked(fn *ssa.Function, m ssa.Value, depth int) ([]leafValue, bool) {
+	mm, ok := m.(*ssa.MakeMap)
+	if !ok || mm.Referrers() == nil {
+		return nil, true
+	}
+	var out []leafValue
+	for _, ref := range *mm.Referrers() {
+		if mu, ok := ref.(*ssa.MapUpdate); ok && mu.Map == mm {
+			sub, _ := t.follow(fn, mu.Value, ask{kind: askValue}, depth+1)
+			out = append(out, sub...)
+		}
+	}
+	return out, true
+}
+
+// received walks what is sent on a channel made in sight.
+func (t *trace) received(fn *ssa.Function, ch ssa.Value, depth int) ([]leafValue, bool) {
+	mc, ok := ch.(*ssa.MakeChan)
+	if !ok || mc.Referrers() == nil {
+		return nil, true
+	}
+	var out []leafValue
+	incomplete := false
+	for _, ref := range *mc.Referrers() {
+		if snd, ok := ref.(*ssa.Send); ok && snd.Chan == mc {
+			sub, inc := t.follow(snd.Parent(), snd.X, ask{kind: askValue}, depth+1)
+			out = append(out, sub...)
+			if inc {
+				incomplete = true
+			}
+		}
+	}
+	if len(out) == 0 {
+		incomplete = true
+	}
+	return out, incomplete
+}
