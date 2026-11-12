@@ -1436,18 +1436,33 @@ func valuesHere(here *ssa.Function, v ssa.Value, steps string, entered map[*ssa.
 		from := functionOf(v)
 		return nil, from != nil && from != here
 	}
-	return rootHere(here, guardPath{p.root, p.steps + steps}, entered, map[guardPath]bool{})
+	return rootHere(here, guardPath{p.root, p.steps + steps}, entered, &rootSeen{paths: map[guardPath]bool{}, perRoot: map[ssa.Value]int{}})
 }
 
-func rootHere(here *ssa.Function, p guardPath, entered map[*ssa.Function][]*ssa.Call, seen map[guardPath]bool) (paths []guardPath, lost bool) {
+// rootSeen is what one valuesHere walk has brought: each path once, and how many distinct paths
+// it met for each root. A helper that calls itself on a field of its parameter is entered with a
+// longer path every time, so no path repeats; past rootPathLimit paths for one root the value is
+// lost (reported as unknown) instead of followed without end.
+type rootSeen struct {
+	paths   map[guardPath]bool
+	perRoot map[ssa.Value]int
+}
+
+const rootPathLimit = 8
+
+func rootHere(here *ssa.Function, p guardPath, entered map[*ssa.Function][]*ssa.Call, seen *rootSeen) (paths []guardPath, lost bool) {
 	from := functionOf(p.root)
 	if from == nil || from == here {
 		return []guardPath{p}, false
 	}
-	if seen[p] {
+	if seen.paths[p] {
 		return nil, false
 	}
-	seen[p] = true
+	if seen.perRoot[p.root] >= rootPathLimit {
+		return nil, true
+	}
+	seen.paths[p] = true
+	seen.perRoot[p.root]++
 	bring := func(v ssa.Value, steps string) {
 		vp, ok := pathOf(v)
 		if !ok {
