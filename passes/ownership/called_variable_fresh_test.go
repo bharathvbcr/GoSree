@@ -60,15 +60,22 @@ func calledVariableFreshDiags(t *testing.T, body string) []string {
 }
 
 func TestCallOfAVariableThatHoldsFreshFunctionsIsFresh(t *testing.T) {
+	if got := calledVariableFreshDiags(t, "x := newA()\n\tp.Store(x)"); len(got) != 0 {
+		t.Errorf("control: called by name: newA returns a fresh value, and the publish was reported: %s", strings.Join(got, "; "))
+	}
+	// False positives, reported on purpose for now. Every function these calls may run returns a
+	// fresh value, but taking that as an answer also silenced real findings, because the trace's
+	// "these are all the functions" is not honest everywhere
+	// (TestCallOfAVariableWithHiddenTargetsIsNotFresh). These are to be quiet again once it is;
+	// until then they are reported, as they were before 5bfec07.
 	for name, body := range map[string]string{
 		"called where it is published":           "m := newA\n\tif c {\n\t\tm = newB\n\t}\n\tx := m()\n\tp.Store(x)",
 		"one function, through a variable cell":  "m := newA\n\tset := func() { m = newB }\n\tset()\n\tx := m()\n\tp.Store(x)",
 		"returned by a function that calls it":   "x := mk(c)\n\tp.Store(x)",
 		"returned by a function it is passed to": "x := via(newA)\n\tp.Store(x)",
-		"control: called by name":                "x := newA()\n\tp.Store(x)",
 	} {
-		if got := calledVariableFreshDiags(t, body); len(got) != 0 {
-			t.Errorf("%s: every function that may run returns a fresh value, and the publish was reported: %s", name, strings.Join(got, "; "))
+		if got := calledVariableFreshDiags(t, body); len(got) == 0 {
+			t.Errorf("%s: now quiet; if the trace's answers for hidden targets are honest, move this case back to the quiet cases", name)
 		}
 	}
 	for name, body := range map[string]string{

@@ -1858,12 +1858,14 @@ func (st *question) evalFunctionOutcome(caller *ssa.Function, fn *ssa.Function, 
 		out.freshResult = true
 		out.matched = true
 	} else if bodyFn.Signature != nil && bodyFn.Signature.Results() != nil && bodyFn.Signature.Results().Len() > 0 {
-		// Fresh by what the body does, which its summary says. That is an answer about the call
-		// like any other: a call whose targets were all fresh in this way used to merge to "no
-		// contract", and its result was not owned.
+		// Fresh by what the body does, which its summary says. This is not taken as an answer about
+		// the call (out.matched stays false): a call whose targets are all fresh in this way would
+		// then be fresh whenever the trace says it has every target, and that "every" is not yet
+		// honest for a package variable set through its address, a field set through a receiver,
+		// a parameter of a method reached through an interface, or a channel handed on
+		// (TestCallOfAVariableWithHiddenTargetsIsNotFresh).
 		if s := st.summaryRead(bodyFn); s != nil && !s.pessimistic && s.fresh && len(s.links) == 0 {
 			out.freshResult = true
-			out.matched = true
 		}
 	}
 	return out
