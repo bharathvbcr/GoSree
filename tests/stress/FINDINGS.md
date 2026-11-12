@@ -10,9 +10,9 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `b5f6c76` on `rework/source` (five commits on top of `b2f480c`, each of which changes a checker file), and the commit after it that carries this text |
-| Checker fingerprint | `93eeb489cf17a6c5`: `bash tests/stress/fingerprint.sh` |
-| Run | 2026-11-12 afternoon, at `b5f6c76`, load average 30-50: `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo (17 packages with tests; 16 `ok`, and `tests/stress` failed on one witness that passes when run again, section 5). The markers were not edited and `TestStress` holds, so the ledger below stands as counted at `dcbc28b`. Not run at `b5f6c76`: the tests with cgo and the Rust suite; no Rust or cgo file changed. Before that, 2026-11-12 morning, at `dcbc28b`, load average 50-65: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; `passes/ownership` takes about twelve minutes at that load). The ledger below was counted at that commit by `go test ./tests/stress -run '^(TestStress|TestWitnesses)$' -v` without cgo (58 of 58 witnesses convicted). The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
+| Git HEAD | `5f13bac` on `rework/source` (six commits on top of `b2f480c` that change a checker file, and `c353e05`, the first writing of this record), and the commit after it that carries this text |
+| Checker fingerprint | `0a7c0d8fd423bea4`: `bash tests/stress/fingerprint.sh` |
+| Run | 2026-11-12 afternoon, at `5f13bac`, with nothing else of this run alongside: `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo, 17 packages with tests, all `ok`. The markers were not edited and `TestStress` holds, so the ledger below stands as counted at `dcbc28b`. Not run at this commit: the tests with cgo and the Rust suite; no Rust or cgo file changed. Before that, 2026-11-12 morning, at `dcbc28b`, load average 50-65: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; `passes/ownership` takes about twelve minutes at that load). The ledger below was counted at that commit by `go test ./tests/stress -run '^(TestStress|TestWitnesses)$' -v` without cgo (58 of 58 witnesses convicted). The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
 is expected and is the suite working: each failure names the marker to promote or the lock that
@@ -989,9 +989,10 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
     call (not committed) was run on the reference service's production code and on the standard
     library with tests, and x/tools' whole-program call graph (CHA, then VTA, in
     `golang.org/x/tools/go/callgraph`, already a dependency) was built for both as an oracle:
-    28 s and 4.5 GB for the service, 229 s and 16 GB for the standard library with tests. Five
-    commits on the branch `rework/source` (`eb228af` to `b5f6c76`, on top of `b2f480c`) came of
-    it. Every number below is for `b5f6c76` against `b2f480c` unless it says otherwise.
+    28 s and 4.5 GB for the service, 229 s and 16 GB for the standard library with tests. Six
+    commits that change the checker came of it on the branch `rework/source` (`eb228af` to
+    `5f13bac`, on top of `b2f480c`). Every number below is for `5f13bac` against `b2f480c` unless
+    it says otherwise; the corpus rows are the same at `ba9c7f4`, `b5f6c76` and `5f13bac`.
     - **Where the calls are.** Reference service, production code: 87,917 call sites, 53,344 of
       which hand over memory (an argument that is not of a shareable type). Of those, 64.9% are
       calls by name (19,511 in the package, 15,079 into another package, each of them with a
@@ -1015,8 +1016,9 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
       248 such arguments; a target keeps and writes 82% of them, 11% are only read, and at 21
       calls (13%) every argument is only read. Interface calls: 711 calls, 789 arguments (the
       receiver not counted); 73% kept and written, 15% handed to a target with no summary, 7%
-      only read, and at 46 calls (6.5%) every argument is only read. So resolving these calls
-      would clear about one in eight calls through a value and one in fifteen interface calls;
+      only read, and at 46 calls (6.5%) every argument is only read. So resolving these calls,
+      with the targets' summaries as they are, would clear about one in eight calls through a
+      value and one in fifteen interface calls;
       the rest are kept pessimistic by the summaries, which hold one bit for each parameter over
       a class of values that does not tell fields apart. Across the service's 13,701 functions
       with a body, 22% keep and write some parameter; at calls into other packages the callees
@@ -1027,7 +1029,7 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
       not know (a registry, an unlisted callback), 24 a way a value travels that one check does
       not follow, 14 a called value not resolved, 14 the trust base, 11 the table of types
       assumed shareable, 9 a kind of access that is not counted, 7 out of the package, and 8 in
-      four smaller groups. About half were sorted from the marker's own text without running
+      three smaller groups. About half were sorted from the marker's own text without running
       the fixture.
     - **What was wrong in the checker and is changed.**
       1. A call through a function value whose targets are all known took nothing from the
@@ -1045,11 +1047,15 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
          summary says it writes something it captured (`eb228af`, `a303048`).
       3. "Every target is known" now takes a report away, so three places where the walk said
          it without being able to know were closed. A method this package calls through an
-         interface has callers the list of its calls does not show (`a303048`). A package
+         interface has callers the list of its calls does not show (`a303048`), also where
+         the interface call is made by a wrapper the compiler writes, for a method value of the
+         interface or of a struct that embeds it (`5f13bac`; found by asking of each of these
+         rules which other way the same thing is written). A package
          variable, or a field of one, whose address is stored, returned or passed on can be
          assigned through that address anywhere: `var LstatP = &lstat` in `path/filepath`,
          `hookSetter(&testHookEnterRoundTrip)` in `net/http` (`ba9c7f4`, `b5f6c76`). These two
-         were found by the oracle on the standard library, not by a fixture.
+         were found by the oracle on the standard library, not by a fixture. The stores to a
+         package variable have two readers in the walk and both now read that record.
       4. In a forwarding helper, the targets' joins put a key and the value stored under it in
          one region, and the escape accounted to the key was read as something the helper does
          with the value besides its contract (`7a0f643`).
@@ -1070,9 +1076,11 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
     - **Reference service, production code**: 2,037 findings before and 1,958 after; 83 gone, 4
       new, 6 reworded; 431 of 578 transfers flagged, one fewer. SAFE008 420 to 344. Two runs
       with one binary give the same rows.
-      - 51 SAFE008 gone for the builtins. A script names the builtin at the reported column of
-        each: 44 are `len`. The other 7 are at the line of the registration itself, where a
-        builtin that has no position of its own is reported (not read further).
+      - 51 SAFE008 gone for the builtins, all `len`. A script names the builtin at the reported
+        column of 44. The other 7 are at the line of the registration itself, where a builtin
+        that has no position of its own is reported; a build that prints such a builtin names
+        `len` for each, the length the compiler takes of a slice a function the handler calls
+        ranges over (`buildCommitteePapers`, `keepSourcesAdmittedByGate` and two more).
       - 24 SAFE008 gone where a handler calls a function variable declared beside it
         (`requireQuestioningStateStore`, `writeQuestionOptionResponse`,
         `patchDynamicQuestionOptions` and three more in `questioning_routes.go`, `run` in
@@ -1081,8 +1089,8 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
         nothing and hands its arguments to a method.
       - 1 SAFE008 gone at `mux.Handler(probe)` in `route_not_found.go:95`, a lookup. The
         summary of `(*net/http.ServeMux).Handler` said it keeps and writes; it now says keeps.
-        Of the 92,131 function summaries the run computes, 111 changed: 110 lost a bit and one
-        gained one (`ai.typedConfigFn$1` in genkit, not read).
+        Of the 92,131 function summaries the run computes, 111 changed (compared at `ba9c7f4`):
+        110 lost a bit and one gained one (`ai.typedConfigFn$1` in genkit, not read).
       - 1 SAFE008 moved: the call of the package variable `runUnifiedResearchLoop` was reported
         at the call and is now reported inside it, at `runtime.RunLoop`
         (`research_routes.go:118`).
@@ -1127,9 +1135,10 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
         through a parameter with five known targets.
       - 3 new SAFE006 that are false: the test tables `upperTests`, `lowerTests` and
         `trimSpaceTests` in `bytes_test.go`. `runStringTests` calls its parameter `f`; the
-        summary of `ToUpper` says it writes its argument (it does not), and the result is now
-        joined to the argument as it is for a call by name, so the write reaches the table
-        through the arguments of `t.Errorf`. A call by name reports the same.
+        summary of `ToUpper` says it writes its argument (its body only reads it), and the
+        result is now joined to the argument as it is for a call by name, so the write reaches
+        the table through the arguments of `t.Errorf`. A fixture with the same loop written
+        both ways reports the table for the call by name too.
       - 4 SAFE006 gone (`cipherSuites`, two OIDs in `crypto/x509`, `NoStack`); three read: each
         was handed to a function variable or parameter whose targets only read it. 1 SAFE008
         gone for a builtin (`net/http/server_test.go:139`).
@@ -1142,29 +1151,36 @@ dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in bo
       is capped), except one, where the walk has 2 of the graph's 5: `stage.newEvent` in
       `recordRefusedRewrite`, which two callers reach with two of five stage values. The walk
       follows the parameter to its callers; the graph goes by the field's type. Standard
-      library with tests: 2,471 equal, 31 equal with the list capped, 29 where the graph has
-      more: 19 are instances of one generic function in `runtime/malloc_test.go` named
-      differently by the two (told by the names, not read), 9 are closures of packages the
-      caller cannot reach (`net/http_test` closures at a call in `reflect`; one read), and 1 is
-      a call after `t.Skip`, which the walk does not count. Before the address rule there were
-      32, the other 3 being the two hooks above. At 16 more sites the walk is complete in the
-      build of a package without its tests and not in the build with them.
-    - **Tests.** `call_through_value_test.go` and `open_callers_internal_test.go`, each test
-      failing at the commit before the one that carries it. `go vet ./...` and
-      `go test ./... -count=1 -timeout 60m` without cgo: 17 packages, all `ok` at `ba9c7f4`; at
-      `b5f6c76`, 16 `ok` and `tests/stress` failed on one witness.
-      `TestWitnesses/lk_wit_maplookup` failed once in that run, at a load average near 50 with
-      the corpus runs alongside: "the runtime did not convict this program of a race". Alone it
-      failed 2 more times in about 200 runs at `b5f6c76` and 0 times in 120 at `b2f480c`. The witness
-      program and the harness are the same files at both commits, and the checker has no part
-      in a conviction, so this is a witness the race detector convicts most of the time and
-      not every time. `go test ./tests/stress -run '^(TestStress|TestWitnesses)$' -count=3`
-      passed after it.
+      library with tests: 2,490 equal, 31 equal with the list capped, 10 where the graph has
+      more. 9 of the 10 are closures of packages the caller cannot reach (`net/http_test`
+      closures at a call in `reflect`; one read). The tenth is `mustPanic` in
+      `crypto/internal/cryptotest`, 22 targets against 23: the missing one is passed at a call
+      after `t.Skip`. The intermediate form the checker is given ends a block at a call that
+      cannot return (`buildssa` hands go/ssa the `NoReturn` answers, x/tools v0.52.0), and the
+      count has no call of the checker's on the lines after that `t.Skip`; the oracle's form
+      was built without it. Before the address rule there were 13, the other 3 being the two
+      hooks above. At 16 more sites the walk is complete in the build of a package without its
+      tests and not in the build with them.
+    - **Tests.** `call_through_value_test.go` and `open_callers_internal_test.go`. Each test
+      named in a commit as proving it was run at the commit before and fails there. The cases
+      added after the take-out pass (below) hold a part in place and were not run against the
+      commit before. `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo at
+      `5f13bac`, with nothing else of this run alongside: 17 packages, all `ok`.
+      At `b5f6c76`, with the corpus runs alongside and a load average near 50,
+      `TestWitnesses/lk_wit_maplookup` failed once: "the runtime did not convict this program
+      of a race". Alone it failed 2 more times in about 200 runs there and 0 times in 120 at
+      `b2f480c`. The harness runs the witness with `go run -race` and reads its output (read:
+      `runWitness`); the checker has no part in it, and the program and the harness are the
+      same files at both commits. It is a witness the race detector convicts most of the time
+      and not every time.
       Not run at this commit: the tests with cgo, and `cargo test`; no Rust file and no cgo file
       changed since `dcbc28b`. Not measured: time. The corpus runs took 17 to 100 s of wall
       time each at loads that differed between runs.
-    - **Each part taken out in turn** (37 parts over the five commits, by a script that edits one
-      line and runs the tests above with `TestStress` and `TestWitnesses`): a test fails for 32.
+    - **Each part taken out in turn** (39 parts over the six commits, by a script that edits one
+      line and runs the tests above with `TestStress` and `TestWitnesses`): a test fails for 33,
+      and without the guard that keeps the reading of wrappers to the ones the compiler writes
+      the tests did not finish in ten minutes. A wrapper that calls another wrapper was
+      followed at first; no test needed it and it was removed.
       The first round left 8 parts that no test noticed or that the script could not apply;
       tests were added for 3 (an argument written by a target, a closure that only reads what
       it captured, a published argument a target also keeps). No test tells these 5 from their
@@ -1257,7 +1273,7 @@ reports them.
     store to the field by type stands in. Two tests had to give a struct a function of its
     own to see past it. Errs toward reporting.
 - Left open by the changes of 2026-11-12 to a call through a function value (section 5, `eb228af`
-  to `b5f6c76`):
+  to `5f13bac`):
   - An interface call whose receiver types are all known is still treated as keeping and writing
     everything. The walk has every type at 5 of the 805 interface calls that hand over memory on
     the reference service; the whole-program graph resolves 711, and at 46 of those every
