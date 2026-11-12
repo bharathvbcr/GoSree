@@ -1,8 +1,8 @@
 // WITNESS: race
 //
-// Fork-join recovery restores j after wg.Wait because the callback's region shows no escape or
-// transfer (forkjoin.go computeJoins). The callback has handed j to a grandchild goroutine inside an
-// error value, which the checker treats as shareable, so the grandchild still writes j after Wait.
+// Fork-join recovery restored j after wg.Wait because the callback's region showed no escape or
+// transfer (forkjoin.go computeJoins): the callback hands j to a grandchild goroutine inside an
+// error value, which was treated as shareable. Reported since 2026-11-11 (boxed values are tracked).
 package main
 
 import "sync"

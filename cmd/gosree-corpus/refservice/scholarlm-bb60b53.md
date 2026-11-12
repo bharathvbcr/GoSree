@@ -723,3 +723,29 @@ this changes the recorded failure.
   is inside the spread of either build; on the standard library with tests whichever build ran
   first in a round took about 35 s longer (149.7, 113.7, 145.5 against 109.2, 145.3, 110.0), so
   that comparison shows the order and no difference between the builds.
+
+### After the merge of 2026-11-11
+
+The main checkout's work and every branch of 2026-11-11 are on one line (see
+`tests/stress/FINDINGS.md`, section 5, "The merge of 2026-11-11"). Measured on it without cgo:
+
+| Run | before the merge (`2fd93f0`) | after |
+|---|---|---|
+| production | 2,036 findings | 2,036 |
+| with tests | 7,721 | 7,721, from a build with the function limit raised (below) |
+| annotated | 694; 578 transfers, 427 flagged, 344 hatched, 59.5% | the same five numbers |
+
+- No finding changed in any of the three runs: same package, position, rule and message. That
+  includes the one checker change that came with the merge (a value boxed in an interface is
+  tracked when the value is), which adds 38 findings on the standard library's tests and none
+  here.
+- The verdict of roadmap item 4 is unchanged: 59.5% hatched against the 20% criterion.
+- The run with tests no longer completes with the product as built. Since `a6693fc` the build
+  without cgo enforces the solver's limits as the Rust engine does, and `internal/wisdev` with
+  its tests has 18,973 functions against a limit of 16,384
+  (`safeerr solver failed: gusseterr: func count 18973 exceeds 16384`). Task ft-bc5b records the
+  same failure on main with the Rust engine; the earlier with-tests figures in this record were
+  taken without cgo, before that commit. The 7,721 above comes from a second binary built from the same tree with only
+  `MaxFuncs` raised to 65,536, which analyses the package in about half a minute. Raising the
+  limit in the product, in `internal/gusseterr/wire.go` and `rust/gosree-errsolve/src/lib.rs`
+  together, is task ft-bc5b and was not done here.

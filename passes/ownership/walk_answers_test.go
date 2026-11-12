@@ -256,6 +256,15 @@ func TestEveryBoundOnAWalkIsListed(t *testing.T) {
 					if v, ok := intLit(x.X); ok && v >= 2 {
 						found[fd.Name.Name+": for range "+strconv.Itoa(v)] = true
 					}
+				case *ast.ForStmt:
+					// A counted loop: for i := 0; i < 16; i++.
+					if c, ok := x.Cond.(*ast.BinaryExpr); ok {
+						if id, ok := c.X.(*ast.Ident); ok {
+							if v, ok := intLit(c.Y); ok && v >= 2 {
+								found[fd.Name.Name+": for "+id.Name+" "+c.Op.String()+" "+strconv.Itoa(v)] = true
+							}
+						}
+					}
 				case *ast.BinaryExpr:
 					switch x.Op {
 					case token.GTR, token.GEQ, token.LSS, token.LEQ, token.EQL, token.NEQ:
@@ -269,6 +278,19 @@ func TestEveryBoundOnAWalkIsListed(t *testing.T) {
 						if name, ok := counted(x.X); ok && x.Op != token.EQL && x.Op != token.NEQ {
 							if v, ok := intLit(x.Y); ok && v >= 2 {
 								found[fd.Name.Name+": "+name+" "+x.Op.String()+" "+strconv.Itoa(v)] = true
+							}
+						}
+						// The size of something compared with a written-out number: len(seen) >= 64.
+						// Below 8 it is how many arguments or results a call has, not a limit.
+						if call, ok := x.X.(*ast.CallExpr); ok && x.Op != token.EQL && x.Op != token.NEQ {
+							if fn, ok := call.Fun.(*ast.Ident); ok && fn.Name == "len" && len(call.Args) == 1 {
+								if v, ok := intLit(x.Y); ok && v >= 8 {
+									if arg, ok := call.Args[0].(*ast.Ident); ok {
+										found[fd.Name.Name+": len("+arg.Name+") "+x.Op.String()+" "+strconv.Itoa(v)] = true
+									} else {
+										found[fd.Name.Name+": len(...) "+x.Op.String()+" "+strconv.Itoa(v)] = true
+									}
+								}
 							}
 						}
 					}

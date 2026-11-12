@@ -1,8 +1,8 @@
 // WITNESS: race
 //
-// A pointer boxed as error is classified shareable by the override table ("error": an unchecked
-// convention that error values are not mutated), so passing it to a goroutine is no transfer and
-// the parent keeps writing the memory the error carries.
+// A pointer boxed as error was classified shareable by the override table ("error": an unchecked
+// convention that error values are not mutated), so passing it to a goroutine was no transfer.
+// Reported since 2026-11-11: an interface value is tracked when the value boxed in it is.
 package main
 
 type Job struct{ ID int }

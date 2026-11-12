@@ -1,6 +1,6 @@
 # GoSree stress findings
 
-What the adversarial suite finds, as of 2026-11-10 (re-counted 2026-11-11 on the build run's integration branch). Every finding below is
+What the adversarial suite finds, as of 2026-11-10 (re-counted 2026-11-11 after that day's branches were merged into one line). Every finding below is
 locked into a fixture or a test; the paths are given so each can be read and re-run. Counts come
 from the harness's own ledger (`go test ./tests/stress -run '^TestStress$' -v`), not from the text of
 an earlier version of this file.
@@ -10,9 +10,9 @@ an earlier version of this file.
 | | |
 |---|---|
 | Toolchain | go1.27.3 darwin/arm64 |
-| Git HEAD | `25779ca` on `run/integ-1111` (no uncommitted checker edits) |
-| Checker fingerprint | `77f03b52f18b13af`: `bash tests/stress/fingerprint.sh` |
-| Run | 2026-11-11 16:12-16:18, load average 55-84: `go vet ./...`, `cargo test --release`, `go test ./... -count=1` with and without cgo (all 15 packages with tests `ok` in both), the ledger below, and the acceptance tiers (12/12). The 2026-11-10 suites are listed under [What was run](#what-was-run) |
+| Git HEAD | `c6cf9a9` on `integrate/2026-11-11`, and the commit after it that carries this text and changes no checker file |
+| Checker fingerprint | `4caa5e67c575d63d`: `bash tests/stress/fingerprint.sh` |
+| Run | 2026-11-11 evening, load average 50-80: `cargo test --release` and `cargo build --release` in `rust/`, `go vet ./...` and `go test ./... -count=1 -timeout 60m` without cgo and with it (17 packages with tests, all `ok` in both; under that load `passes/ownership` takes 7 to 8 minutes and once ran past the default 10-minute timeout), and the ledger below. The acceptance tiers were not run again at this commit; `25779ca` on `run/integ-1111` had them at 12/12. The 2026-11-10 suites are listed under [What was run](#what-was-run) |
 
 The suite is green at a fingerprint when every marker still holds. At any other fingerprint a red run
 is expected and is the suite working: each failure names the marker to promote or the lock that
@@ -137,16 +137,20 @@ now modelled as transfers; unmodelled user registries and process/IO structs rem
 ### B. Types on the "assumed shareable" table launder pointers
 
 `error`, `context.Context`, `context.CancelFunc`, `net.Listener` and `testing.TB` are treated as
-shareable (`internal/kinds/kinds.go`), so a value converted to one stops being tracked. Any
-`func()` converts to `CancelFunc`.
+shareable (`internal/kinds/kinds.go`), so a value converted to one stopped being tracked. Any
+`func()` converts to `CancelFunc`. Since 2026-11-11 a value boxed into an interface is tracked
+when the value itself is, whatever the interface (`graph.go`, the `MakeInterface` case), which
+closes the first and the last line below; the others are as they were.
 
-- pointer sent or spawned as `error`: `sp_w_error`, `mv_w_error`, `im_w_errfield`
+- pointer sent or spawned as `error`: reported now in `sp_w_error`, `mv_w_error`, `sp_launder`
+  and `mv_shareable`; `im_w_errfield` is as it was
 - closure over a local as `CancelFunc`: `sp_w_cancelfunc`, `mv_w_cancelfunc`
 - `context.WithValue` carrying a mutable pointer: reported now in `sp_w_ctxvalue`, `mv_w_ctxvalue`,
   `mv_shareable`, `sp_launder`; custom `context.Context` implementations remain open (`sp_launder`,
   `mv_shareable`)
 - knock-on in fork-join: a joined goroutine hands the value to a grandchild inside an `error`, and
-  `wg.Wait` returns ownership to the parent while the grandchild still writes: `sp_w_grandchild`
+  `wg.Wait` returned ownership to the parent while the grandchild still writes: reported now in
+  `sp_w_grandchild` and `sp_forkjoin`
 
 ### C. Only static calls are modelled
 
@@ -384,7 +388,7 @@ Fixed, each locked by a regression assertion:
     none on the reference service. Whether any of the 11 is a real defect was not established.
   On the standard library with its tests (12,933 SAFE findings) and the reference service with its
   tests (7,538), no finding of any pass is at no position and none carries the "reported
-  elsewhere" note. The same holds for the 664 diagnostics of the 133 fixture roots here
+  elsewhere" note. The same holds for the 664 diagnostics of the 133 fixture roots there were then
   (`TestDump` over all of them) and for the reference service with its annotation table applied
   (693 findings, 37 of them SAFE009), which are the runs that reach the annotation-driven checks.
 - Five fixed sizes at which the handler write check (SAFE008) stopped without saying so, each of
@@ -439,7 +443,7 @@ Fixed, each locked by a regression assertion:
   tests, and with its annotation table), measured on two frozen copies that differ only in these
   files, nothing changed: 12,933, 2,035, 7,538 and 693 findings before and after, the same
   position and rule for every one, none in an `-incomplete` category. The 664 diagnostics of the
-  133 fixture roots here are the same lines before and after. Of the old limits, four were reached
+  133 fixture roots there were then are the same lines before and after. Of the old limits, four were reached
   on that code (the 16 types, the 64 values to a package variable, the 32 values to a closure and
   the borrow lookup's depth); with them lifted, 420 walks on the reference service and 772 on the
   standard library go past 64 values, 36 and 8 of them reach a package variable they did not
@@ -653,6 +657,64 @@ facts survive the vet driver's round trip, and unanalysable inputs exit 1: a typ
 error, one broken file and a nonexistent path in both drivers; a missing import and a broken
 dependency in `gosree`; and an unknown go version (1.99) is a nonzero exit in both.
 
+- The merge of 2026-11-11. The main checkout's uncommitted work (committed as `2fd93f0`) and
+  every branch of that day were merged into one line: `run/integ-1111`, the four branches made
+  after it (`run/b6a2-ownership`, `run/3b3c-errcheck`, `run/3b3c-adv2`, `run/b6a2-adv2`),
+  `harden/gosree-gates`, and `harden/merge-main-1111`, a second merge of the first two made by
+  another session at the same time. What the merge itself changed, beyond joining the two sides:
+  - Three defects were fixed, each with a test that fails without the fix; the first two came in
+    with the branches and the third is older than both sides. (1) `60968b7` skipped the search for escaped package variables in a package with no
+    direct call to a freezing publisher, so a publish reached through an interface took an escaped
+    table for init-only and lost both its findings; the set is now built when the exemption first
+    asks (`globals_escape_routes_test.go`). (2) A printing call handed a slice that had been
+    written through (`s[0] = g; fmt.Println(s...)`) was judged harmless though fmt runs the
+    element's `String` method; `404bb00` carried that as a failing test with no fix
+    (`TestAdv2SliceStoreThenSpreadBreak`). (3) A `go` statement on a variable that may hold one
+    of two closures reported what one of them borrows. Two more changes came with
+    `harden/merge-main-1111`: a borrowed parameter handed to a publishing container is CAP003
+    (the check skipped every parameter), and CI runs the tests with a 30-minute timeout.
+  - One change of the checker came from `harden/gosree-gates`: an interface value is tracked when
+    the value boxed in it is. A pointer boxed as an `error` counted as shareable, so handing it
+    to a goroutine or a channel was no transfer. Ten fixture lines went from miss to hit (ledger
+    612/188/46 before it, 622/178/46 after). The rest of that branch's pass files are an older
+    form of work this line has in a later form and were not taken; its tests for them are here
+    and pass. Three fixture lines it marks as hits are not reported here and keep their markers
+    (`rs_w_mixedatomic`, two in `lk_w_getter`).
+  - Measured without cgo, the same four runs as above. Before the merge (`2fd93f0`), after the
+    branches and the first two fixes, and after the boxed-value change:
+
+    | Run | before | merged | with the boxed-value change |
+    |---|---|---|---|
+    | reference service, production | 2,036 | 2,036 | 2,036 |
+    | reference service, with tests | 7,721 | 7,721 (limit raised) | 7,721 (limit raised) |
+    | reference service, annotated | 694 | 694 | 694 |
+    | standard library, with tests | 13,029 | 13,031 | 13,073 |
+    | fixtures (`TestDump`) | 664 | 667 | 677 |
+
+    On the reference service no finding changed in any of the three runs at either step (same
+    package, position, rule and message). On the standard library the merge adds two findings
+    and renames the package variable in two (`net/conf_test.go`: a variable now seen to escape,
+    and the choice among variables at one position made stable); the boxed-value change adds 38,
+    of which 37 are in `net/http/serve_test.go` and one in `context`: values boxed in an
+    interface, handed to a goroutine and used afterwards. They were not read one by one. The
+    fixtures gain the three lines of the new root `er_w_rangecapture`, then the ten hits. The
+    changes made after the boxed-value one (CAP003 for a published borrowed parameter, every
+    closure a started value may be, the two limits) change no line of any of the five runs.
+  - "Limit raised": since `a6693fc` the build without cgo enforces the solver's limits as the
+    Rust engine does, so the run with tests now stops at `internal/wisdev` (18,973 functions,
+    limit 16,384), as it always did with cgo. The with-tests column comes from a second binary
+    built from the same tree with only `MaxFuncs` raised to 65,536 (`go build -overlay`); the
+    product was not changed. The measurements made earlier in this section without cgo did not
+    pass through that limit.
+  - The 43 "take one part out and see a test fail" checks of the earlier fixes were run again at
+    `9823ff0` (the branches and the first two fixes merged; before the boxed-value change and
+    what followed): each of the 43 still makes a test fail.
+  - The two tests that read the source (`walk_answers_test.go`) were themselves tried against
+    seven planted defects: a sub-walk's answer dropped, an answer passed straight to another
+    call, a counted loop, a size limit written as a number, a `for range` with a count, a new
+    named limit, and a listed limit removed. Each makes one of the two fail. The first version
+    of the limit test missed the counted loop and the written-out size limit.
+
 ## 6. Distance to Rust
 
 | Rust guarantee | gosree today | Fixture | What would close it |
@@ -734,7 +796,12 @@ programs are in this state: the runtime convicts them and the checker reports th
   another file of the package than the write.
 - Fixed bounds that remain in the ownership pass and say nothing when reached (a sweep of the code
   for numeric limits on 2026-11-11; an earlier note here counted 13 in all, which was an
-  undercount: 20 were fixed and then six more in `contracts.go`, section 5, and these are left):
+  undercount: 20 were fixed and then six more in `contracts.go`, section 5, and these are left).
+  This list was made by reading the code on one day. Since the merge of 2026-11-11 a test reads
+  the source instead: `TestEveryBoundOnAWalkIsListed` (`passes/ownership/walk_answers_test.go`)
+  finds every fixed number a walk or a fixpoint is compared with and fails unless each is listed
+  there with what the code does when it is reached, and fails for a listed one that is gone. It
+  covers the ownership pass only:
   - `contracts.go`, the depth of 14 and the budget of 96 values in `traceSSAOrigins`,
     `tracePtrBaseOrigins` and `traceStructFieldValueOrigins`. Both stay and both answer
     "incomplete" (section 5). A cut trace is no longer silent at the four places that act on
@@ -749,7 +816,9 @@ programs are in this state: the runtime convicts them and the checker reports th
     not one per finding lost, so the use after a publish that was missed is named only by the
     call that could not be followed.
   - `contracts.go`, `evalValueAsCallable`, depth 6. Not reachable: the nested call passes no
-    arguments, so nesting stops at one. A counter saw no depth above 1 in any run.
+    arguments, so nesting stops at one. A counter saw no depth above 1 in any run. Should it ever
+    be reached, it now marks the question as cut, like a trace out of budget, where it used to
+    answer "no contract" and nothing else (`TestCallableNestedPastTheLimitIsACut`).
   - `contracts.go`, one committed: the 16-step scan at the top of `sharedLoadRoot`. For guarded
     fields the `slotOf` check before it gives the same answer, and no program was found in which
     the scan's limit changes a finding, so it has no test and was not changed. A counter saw it
@@ -757,9 +826,10 @@ programs are in this state: the runtime convicts them and the checker reports th
   - `lockset.go`: `maxAcquireRounds` (16) and the release-summary widening (`maxReleaseSteps`,
     `maxReleasesPerFn`). Both err toward reporting, an acquisition not credited or a release
     assumed, and are described in `docs/RULES.md`.
-  - `localguard.go`: 32 rounds carrying a guarded local's cell into closures. Not reachable: a
-    function is scanned before its closures, so one round carries a cell to any depth
-    (`TestGuardedLocalInDeepClosure` pins 40).
+  - `localguard.go`: the 32 rounds carrying a guarded local's cell into closures are gone. The
+    limit was not reachable (a function is scanned before its closures, so one round carries a
+    cell to any depth) and the rounds end by themselves (`TestGuardedLocalInDeepClosure` pins 40,
+    before and after).
   - The borrow pass has six of its own (`passes/borrow/check.go`: 8, 64, 16 and 16 steps;
     `storage.go`: 16 steps and its own 64-step copy of the walk back to a package variable). Not
     looked into.
@@ -772,6 +842,26 @@ programs are in this state: the runtime convicts them and the checker reports th
   - What the new walks cost on a hub: N slices of an `imm` field stored into one variable is
     quadratic in N (40 ms at N=400, `TestScale`). Six shapes for the lifted walks are in
     `scale_test.go`; none grows faster than that.
+- A table that an unexported helper stores into memory its caller gave it
+  (`func put(h *H) { h.m = table }`), where the caller then hands that memory out, is still taken
+  for init-only: in the helper the table only joins a parameter's memory, which the search for
+  escapes does not count, and in the caller the table does not appear. Publishing it frozen is
+  then not reported. The same helper exported is reported. Pinned as a known miss in
+  `TestTableStoredIntoCallerMemoryIsAKnownMiss`; `TestAdv2DirectStoreToOtherGlobalPreExisting`
+  pins two more shapes (assigned to another package variable inside a function; stored by a
+  helper into a slice that is then printed).
+- `resolveClosureVal` names one closure where a value may be one of several: the first edge of a
+  phi that leads to a closure, the last store to a variable's cell. The borrow check at a `go`
+  statement asked it and so missed what the other closures borrow; that one now asks for every
+  candidate (`TestGoOfVariableBoundToTwoClosuresReportsEachBorrow`). Its other call sites
+  (`lockset.go` 5, `handlerwrite.go` 2, `graph.go` 1, `contracts.go` 1, `check.go` 1) were not
+  examined for whether one closure may stand for all.
+- The 38 findings the boxed-value change adds on the standard library's tests (section 5, the
+  merge of 2026-11-11) were not read one by one.
+- With its tests, the reference service cannot be analysed by the product as built: the error
+  pass refuses a package of more than 16,384 functions, and `internal/wisdev` with its tests has
+  18,973 (task ft-bc5b on the board). The with-tests figures in section 5 after the merge come
+  from a build with only that limit raised, made for measuring.
 - One de-duplication key still goes by line where there may be none: `checkGuardedFunc`
   (SAFE009) merges accesses to one variable that have no position within a function. They are
   reported, once, at the package clause. No input that produces one was found.
