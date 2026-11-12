@@ -571,33 +571,62 @@ type callTarget struct {
 	mc *ssa.MakeClosure
 }
 
-// cellUses is how a local variable that lives in memory is used. Such a variable is an Alloc in
-// the function that declares it and a free variable in each closure that captures it: several
-// addresses of one cell. Whoever asks what the cell may hold has to read the stores through all of
-// them. Reading the Alloc's alone takes the cell at what its own function stores to it.
+// cellUses is how a piece of local memory is used: a local variable that lives in memory, a
+// struct made with &T{}, or a field of one. It has several addresses. A variable is an Alloc in
+// the function that declares it and a free variable in each closure that captures it, and where
+// its address is passed to a function of this package it is that function's parameter. Whoever
+// asks what the memory may hold has to read the stores through all of them. Reading the Alloc's
+// alone takes it at what its own function stores to it.
 type cellUses struct {
-	// stores are the stores to the cell, through any of its addresses.
+	// stores are the stores to the memory, through any of its addresses.
 	stores []*ssa.Store
-	// fields, elems and slices are the addresses taken of a part of the cell: a field of a struct,
-	// an element of an array, a slice of an array. What is written through them is written to that
-	// part, and what becomes of each is for whoever asks about that part to read.
+	// fields, elems and slices are the addresses taken of a part of it: a field of a struct, an
+	// element of an array, a slice of an array. What is written through them is written to that
+	// part, and what becomes of each is for whoever asks about that part to read (usesOfAddress
+	// again, on the part's address).
 	fields []*ssa.FieldAddr
 	elems  []*ssa.IndexAddr
 	slices []*ssa.Slice
-	// open says an address of the whole cell goes somewhere other than a load, a store to the
-	// cell, the address of a part, or a closure's captures: it is stored, passed to a call,
-	// returned, converted. Something that is not in stores may then write the cell.
+	// open says an address of the whole of it goes somewhere that is not read here: it is stored,
+	// returned, converted, passed to a function that has no body in sight or is not known, or
+	// there are more addresses than cellViewLimit. Something that is not in stores may then
+	// write the memory.
 	open bool
 }
 
-// usesOfCell reads every use of the cell alloc, in its function and in the closures that capture
-// it, however deep.
+// cellViewLimit is how many addresses of one piece of memory usesOfAddress reads: the first, the
+// free variable in each closure that captures it, the parameter of each function it is passed to.
+// Past it the memory is taken as open.
+const cellViewLimit = 64
+
+// usesOfCell reads every use of the local variable alloc.
 func usesOfCell(alloc *ssa.Alloc) cellUses {
+	return usesOfAddress(alloc)
+}
+
+// usesOfAddress reads every use of the memory at addr (an Alloc, or the address of a field of
+// one), in its function, in the closures that capture it and in the functions it is passed to,
+// however deep.
+//
+// A call is followed into the callee when the callee is one function with a body: a function or
+// a method called by name, a closure called where it is made, a method value. The parameter the
+// address arrives in is then one more address of the same memory. Any other call leaves it open.
+func usesOfAddress(addr ssa.Value) cellUses {
 	var u cellUses
-	seen := map[*ssa.FreeVar]bool{}
-	// address reads the uses of one address of the cell: the Alloc, or the free variable a
-	// closure that captures it sees it as.
+	seen := map[ssa.Value]bool{addr: true}
 	var address func(addr ssa.Value, refs *[]ssa.Instruction)
+	// another reads one more address of the same memory, once.
+	another := func(v ssa.Value, refs *[]ssa.Instruction) {
+		if seen[v] {
+			return
+		}
+		if len(seen) >= cellViewLimit {
+			u.open = true
+			return
+		}
+		seen[v] = true
+		address(v, refs)
+	}
 	address = func(addr ssa.Value, refs *[]ssa.Instruction) {
 		if refs == nil {
 			u.open = true
@@ -607,7 +636,7 @@ func usesOfCell(alloc *ssa.Alloc) cellUses {
 			switch r := ref.(type) {
 			case *ssa.Store:
 				if r.Addr != addr {
-					u.open = true // the cell's address is stored somewhere
+					u.open = true // the address is stored somewhere
 					continue
 				}
 				u.stores = append(u.stores, r)
@@ -625,17 +654,36 @@ func usesOfCell(alloc *ssa.Alloc) cellUses {
 					continue
 				}
 				for j, b := range r.Bindings {
-					if b == addr && j < len(fn.FreeVars) && !seen[fn.FreeVars[j]] {
-						seen[fn.FreeVars[j]] = true
-						address(fn.FreeVars[j], fn.FreeVars[j].Referrers())
+					if b == addr && j < len(fn.FreeVars) {
+						another(fn.FreeVars[j], fn.FreeVars[j].Referrers())
 					}
 				}
+			case ssa.CallInstruction:
+				cc := r.Common()
+				var body *ssa.Function
+				if !cc.IsInvoke() {
+					body = canonicalBodyFn(cc.StaticCallee())
+				}
+				if body == nil || len(body.Blocks) == 0 {
+					u.open = true // handed to something whose body is not in sight
+					continue
+				}
+				for i, a := range cc.Args {
+					if a != addr {
+						continue
+					}
+					if i >= len(body.Params) {
+						u.open = true
+						continue
+					}
+					another(body.Params[i], body.Params[i].Referrers())
+				}
 			default:
-				u.open = true // handed on: something else may write the cell
+				u.open = true // returned, converted, sent, compared: something else may write it
 			}
 		}
 	}
-	address(alloc, alloc.Referrers())
+	address(addr, addr.Referrers())
 	return u
 }
 
@@ -643,9 +691,10 @@ func usesOfCell(alloc *ssa.Alloc) cellUses {
 // through conversions, phi edges and the stores to a local cell, in this function and in the
 // closures that capture the cell. rest is what it could not resolve to a function: a value of
 // another kind on some path (a parameter, a field, a call's result), or the load of a cell that
-// can be written by something other than the stores seen (usesOfCell: its address goes anywhere
-// but into a load, a store to it or a closure's captures). The targets are all v may be when rest
-// is empty. The stores to a cell are taken together, whatever their order. A cell that is called
+// can be written by something other than the stores seen (usesOfCell: its address goes somewhere
+// that is not read). The targets are all v may be when rest is empty. The stores to a cell are
+// taken together, whatever their order, and they include the stores a closure that captures the
+// cell makes and the stores a function makes that is passed its address. A cell that is called
 // holds a function, so no address of a part of it is ever taken.
 //
 // What a caller takes from the list depends on what it asks. A fact that holds if any target does

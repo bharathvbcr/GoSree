@@ -27,6 +27,18 @@ type S struct {
 	mu sync.Mutex
 	fn func(*T)
 }
+
+func set(q *func(*T)) { *q = p.Store }
+
+func unset(q *func(*T)) { *q = noop }
+
+func arm(s *S) { s.fn = p.Store }
+
+func disarm(s *S) { s.fn = noop }
+
+func (s *S) armed() { s.fn = p.Store }
+
+func (s *S) disarmed() { s.fn = noop }
 `
 
 // cellWritesDiags gives the uses of x after it was published that are reported in use. Where a
@@ -65,6 +77,40 @@ func TestCellWrittenByAClosure(t *testing.T) {
 	} {
 		if got := cellWritesDiags(t, body); len(got) != 0 {
 			t.Errorf("%s: the variable never holds the publisher, and a publish of x was reported: %s", name, strings.Join(got, "; "))
+		}
+	}
+}
+
+// A variable whose address is passed to a function is written by that function. The trace took
+// the variable at what its own function stores to it, so a function variable or a struct field a
+// helper had set to a publisher was called as what it was first set to. The address is followed
+// into the function it is passed to (usesOfAddress), and the stores made there are read with the
+// rest. A helper that stores something else is read as that, and not as what another helper
+// stores to the same field.
+func TestCellWrittenThroughItsAddress(t *testing.T) {
+	for name, body := range map[string]string{
+		"a function variable, set by a helper":             "f := noop\n\tset(&f)\n\tf(x)",
+		"a function variable, a closure hands it on":       "f := noop\n\tw := func() { set(&f) }\n\tw()\n\tf(x)",
+		"a struct, its field set by a helper":              "s := S{fn: noop}\n\tarm(&s)\n\ts.fn(x)",
+		"a struct, its field set by its method":            "s := S{fn: noop}\n\ts.armed()\n\ts.fn(x)",
+		"a struct, the field's address given to a helper":  "s := S{fn: noop}\n\tset(&s.fn)\n\ts.fn(x)",
+		"a struct made with &, set by a helper":            "q := &S{fn: noop}\n\tarm(q)\n\tq.fn(x)",
+		"a struct made with &, set by its method":          "q := &S{fn: noop}\n\tq.armed()\n\tq.fn(x)",
+		"a struct made with &, set through a method value": "q := &S{fn: noop}\n\tg := q.armed\n\tg()\n\tq.fn(x)",
+	} {
+		if got := cellWritesDiags(t, body); len(got) == 0 {
+			t.Errorf("%s: the helper stores the publisher there, and the use of x after the call was not reported", name)
+		}
+	}
+	for name, body := range map[string]string{
+		"a function variable, set by a helper":    "f := noop\n\tunset(&f)\n\tf(x)",
+		"a struct, its field set by a helper":     "s := S{fn: noop}\n\tdisarm(&s)\n\ts.fn(x)",
+		"a struct, its field set by its method":   "s := S{fn: noop}\n\ts.disarmed()\n\ts.fn(x)",
+		"a struct made with &, set by a helper":   "q := &S{fn: noop}\n\tdisarm(q)\n\tq.fn(x)",
+		"a struct made with &, set by its method": "q := &S{fn: noop}\n\tq.disarmed()\n\tq.fn(x)",
+	} {
+		if got := cellWritesDiags(t, body); len(got) != 0 {
+			t.Errorf("%s: the helper does not store the publisher there, and a publish of x was reported: %s", name, strings.Join(got, "; "))
 		}
 	}
 }

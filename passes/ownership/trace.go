@@ -289,10 +289,10 @@ func (t *trace) arguments(bodyFn *ssa.Function, p *ssa.Parameter, a ask, depth i
 	return out, incomplete
 }
 
-// storedInCell walks every value stored to a local cell: the stores made through the variable and
-// through each closure that captures it (usesOfCell). They are all the cell may hold unless its
-// address goes somewhere else, and then the answer may not be all. fn stands in for a store with
-// no function.
+// storedInCell walks every value stored to a local cell: the stores made through the variable,
+// through each closure that captures it and through each function of this package its address is
+// passed to (usesOfCell). They are all the cell may hold unless its address goes somewhere that is
+// not read, and then the answer may not be all. fn stands in for a store with no function.
 func (t *trace) storedInCell(alloc *ssa.Alloc, fn *ssa.Function, a ask, depth int) ([]leafValue, bool) {
 	uses := usesOfCell(alloc)
 	var out []leafValue
@@ -419,10 +419,11 @@ func (t *trace) fieldBehind(fn *ssa.Function, ptr ssa.Value, field int, depth in
 // fieldOfBase walks what is stored to one field of an allocation or a package variable: the stores
 // to the field, and that field of each whole value stored.
 //
-// For an allocation these are the stores made through the variable and through each closure that
-// captures it (usesOfCell). They are all the field may hold unless an address of the whole struct
-// or of this field goes somewhere else. The address of another field going somewhere (s.mu.Lock())
-// says nothing about this one.
+// For an allocation these are the stores made through every address it has (usesOfAddress): the
+// variable, each closure that captures it, each function of this package it is passed to. They
+// are all the field may hold unless an address of the whole struct or of this field goes somewhere
+// that is not read. The address of another field going somewhere (s.mu.Lock()) says nothing about
+// this one.
 func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bool) {
 	switch base := lf.v.(type) {
 	case *ssa.Alloc:
@@ -447,22 +448,14 @@ func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bo
 			if fa.Field != field {
 				continue
 			}
-			if fa.Referrers() == nil {
-				incomplete = true
-				continue
+			// The field is memory of its own, with its own addresses: this one, and the parameter
+			// of a function it is passed to.
+			fu := usesOfAddress(fa)
+			if fu.open || len(fu.fields)+len(fu.elems)+len(fu.slices) > 0 {
+				incomplete = true // handed on, or a part of the field is written on its own
 			}
-			for _, ref := range *fa.Referrers() {
-				switch r := ref.(type) {
-				case *ssa.Store:
-					if r.Addr != fa {
-						incomplete = true // the field's address is stored somewhere
-						continue
-					}
-					walk(r, ask{kind: askValue})
-				case *ssa.UnOp, *ssa.DebugRef:
-				default:
-					incomplete = true // handed on, or the address of a part of the field
-				}
+			for _, stIns := range fu.stores {
+				walk(stIns, ask{kind: askValue})
 			}
 		}
 		for _, stIns := range uses.stores {

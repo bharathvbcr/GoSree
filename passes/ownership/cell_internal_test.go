@@ -1,6 +1,7 @@
 package ownership
 
 import (
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -14,7 +15,11 @@ import (
 
 const cellHead = `package p
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+)
 
 type T struct{ n int }
 
@@ -34,6 +39,27 @@ var keepS *S
 func set(q *func(*T)) { *q = pub }
 
 func setS(q *S) { q.fn = pub }
+
+func (s *S) arm() { s.fn = pub }
+
+func set2(q *func(*T)) { set(q) }
+
+func rec(q *func(*T), n int) {
+	if n > 0 {
+		rec(q, n-1)
+	}
+	*q = pub
+}
+
+func back(q *func(*T)) *func(*T) { return q }
+
+type setter interface{ set(q *func(*T)) }
+
+var other setter
+
+var _ = fmt.Sprint
+
+var held atomic.Pointer[func(*T)]
 `
 
 // calledValue is what the last call in fn calls that is not a function named where it is called.
@@ -59,7 +85,9 @@ func calledValue(t *testing.T, fn *ssa.Function) ssa.Value {
 //
 // The trace read the stores made through the variable in its own function and answered that
 // those were all. A store made by a closure that captures the variable was not read, and a
-// variable whose address had gone somewhere that could write it was still "all".
+// variable whose address had gone somewhere that could write it was still "all". The address is
+// now followed into a function of this package it is passed to, and where it goes out of sight
+// the answer says so.
 func TestWhatACellMayHold(t *testing.T) {
 	for name, c := range map[string]struct {
 		body    string
@@ -67,20 +95,30 @@ func TestWhatACellMayHold(t *testing.T) {
 		mayMiss bool
 	}{
 		"only its own function writes it, a closure reads it": {"f := noop\n\tpeek := func() bool { return f != nil }\n\t_ = peek()\n\tf(x)", "noop", false},
-		"a closure writes it":                                {"f := noop\n\tw := func() { f = pub }\n\tw()\n\tf(x)", "noop pub", false},
-		"a closure inside a closure writes it":               {"f := noop\n\tw := func() {\n\t\tin := func() { f = pub }\n\t\tin()\n\t}\n\tw()\n\tf(x)", "noop pub", false},
-		"two closures write it":                              {"f := noop\n\tw := func() { f = pub }\n\tv := func() { f = noop }\n\tw()\n\tv()\n\tf(x)", "noop pub", false},
-		"its address is passed to a call":                    {"f := noop\n\tset(&f)\n\tf(x)", "noop", true},
-		"its address is stored":                              {"f := noop\n\tkeep = &f\n\tf(x)", "noop", true},
-		"a closure passes its address to a call":             {"f := noop\n\tw := func() { set(&f) }\n\tw()\n\tf(x)", "noop", true},
-		"a struct: a closure writes the field":               {"s := S{fn: noop}\n\tw := func() { s.fn = pub }\n\tw()\n\ts.fn(x)", "noop pub", false},
-		"a struct: a closure writes it whole":                {"s := S{fn: noop}\n\tw := func() { s = S{fn: pub} }\n\tw()\n\ts.fn(x)", "noop pub", false},
-		"a struct: another field's address is passed on":     {"s := S{fn: noop}\n\ts.mu.Lock()\n\ts.fn(x)\n\ts.mu.Unlock()", "noop", false},
-		"a struct: a closure passes another field's address": {"s := S{fn: noop}\n\tw := func() { s.mu.Lock() }\n\tw()\n\ts.fn(x)", "noop", false},
-		"a struct: its address is passed to a call":          {"s := S{fn: noop}\n\tsetS(&s)\n\ts.fn(x)", "noop", true},
-		"a struct: its address is stored":                    {"s := S{fn: noop}\n\tkeepS = &s\n\ts.fn(x)", "noop", true},
-		"a struct: the field's address is passed to a call":  {"s := S{fn: noop}\n\tset(&s.fn)\n\ts.fn(x)", "noop", true},
-		"a struct: the field's address is stored":            {"s := S{fn: noop}\n\tkeep = &s.fn\n\ts.fn(x)", "noop", true},
+		"a closure writes it":                                    {"f := noop\n\tw := func() { f = pub }\n\tw()\n\tf(x)", "noop pub", false},
+		"a closure inside a closure writes it":                   {"f := noop\n\tw := func() {\n\t\tin := func() { f = pub }\n\t\tin()\n\t}\n\tw()\n\tf(x)", "noop pub", false},
+		"two closures write it":                                  {"f := noop\n\tw := func() { f = pub }\n\tv := func() { f = noop }\n\tw()\n\tv()\n\tf(x)", "noop pub", false},
+		"its address is passed to a function that writes it":     {"f := noop\n\tset(&f)\n\tf(x)", "noop pub", false},
+		"its address is passed on twice":                         {"f := noop\n\tset2(&f)\n\tf(x)", "noop pub", false},
+		"its address is passed to a function that calls itself":  {"f := noop\n\trec(&f, 3)\n\tf(x)", "noop pub", false},
+		"its address is passed to a function that returns it":    {"f := noop\n\t_ = back(&f)\n\tf(x)", "noop", true},
+		"its address is passed to another package":               {"f := noop\n\tfmt.Sscan(\"\", &f)\n\tf(x)", "noop", true},
+		"its address is passed to a method of an interface":      {"f := noop\n\tother.set(&f)\n\tf(x)", "noop", true},
+		"its address is passed to a function of another package": {"f := noop\n\theld.Store(&f)\n\tf(x)", "noop", true},
+		"its address is passed to a function held in a variable": {"f := noop\n\tg := set\n\tif x == nil {\n\t\tg = set2\n\t}\n\tg(&f)\n\tf(x)", "noop", true},
+		"its address is stored":                                  {"f := noop\n\tkeep = &f\n\tf(x)", "noop", true},
+		"a closure passes its address to a function":             {"f := noop\n\tw := func() { set(&f) }\n\tw()\n\tf(x)", "noop pub", false},
+		"a struct: a closure writes the field":                   {"s := S{fn: noop}\n\tw := func() { s.fn = pub }\n\tw()\n\ts.fn(x)", "noop pub", false},
+		"a struct: a closure writes it whole":                    {"s := S{fn: noop}\n\tw := func() { s = S{fn: pub} }\n\tw()\n\ts.fn(x)", "noop pub", false},
+		"a struct: another field's address is passed on":         {"s := S{fn: noop}\n\ts.mu.Lock()\n\ts.fn(x)\n\ts.mu.Unlock()", "noop", false},
+		"a struct: a closure passes another field's address":     {"s := S{fn: noop}\n\tw := func() { s.mu.Lock() }\n\tw()\n\ts.fn(x)", "noop", false},
+		"a struct: its address is passed to a function":          {"s := S{fn: noop}\n\tsetS(&s)\n\ts.fn(x)", "noop pub", false},
+		"a struct: a method with a pointer receiver writes it":   {"s := S{fn: noop}\n\ts.arm()\n\ts.fn(x)", "noop pub", false},
+		"a struct made with &: passed to a function":             {"q := &S{fn: noop}\n\tsetS(q)\n\tq.fn(x)", "noop pub", false},
+		"a struct made with &: a method writes it":               {"q := &S{fn: noop}\n\tq.arm()\n\tq.fn(x)", "noop pub", false},
+		"a struct: its address is stored":                        {"s := S{fn: noop}\n\tkeepS = &s\n\ts.fn(x)", "noop", true},
+		"a struct: the field's address is passed to a function":  {"s := S{fn: noop}\n\tset(&s.fn)\n\ts.fn(x)", "noop pub", false},
+		"a struct: the field's address is stored":                {"s := S{fn: noop}\n\tkeep = &s.fn\n\ts.fn(x)", "noop", true},
 		// The variable holds a pointer. Both structs it may point to are found. The address of each
 		// is stored in the variable, and what is written through a load of the variable is not read
 		// as a write to the struct (the last case: pub is not found), so the answer may not be all.
@@ -122,15 +160,16 @@ func TestUsesOfCell(t *testing.T) {
 		fields int
 		open   bool
 	}{
-		"written here and in a closure":                 {"f := noop\n\tw := func() { f = pub }\n\tw()\n\tf(x)", 2, 0, false},
-		"written in a closure inside a closure":         {"f := noop\n\tw := func() {\n\t\tin := func() { f = pub }\n\t\tin()\n\t}\n\tw()\n\tf(x)", 2, 0, false},
-		"captured by two closures, written by one":      {"f := noop\n\tw := func() { f = pub }\n\tr := func() { f(x) }\n\tw()\n\tr()", 2, 0, false},
-		"address passed to a call":                      {"f := noop\n\tset(&f)\n\tf(x)", 1, 0, true},
-		"address passed to a call by a closure":         {"f := noop\n\tw := func() { set(&f) }\n\tw()\n\tf(x)", 1, 0, true},
-		"address stored":                                {"f := noop\n\tkeep = &f\n\tf(x)", 1, 0, true},
+		"written here and in a closure":                {"f := noop\n\tw := func() { f = pub }\n\tw()\n\tf(x)", 2, 0, false},
+		"written in a closure inside a closure":        {"f := noop\n\tw := func() {\n\t\tin := func() { f = pub }\n\t\tin()\n\t}\n\tw()\n\tf(x)", 2, 0, false},
+		"captured by two closures, written by one":     {"f := noop\n\tw := func() { f = pub }\n\tr := func() { f(x) }\n\tw()\n\tr()", 2, 0, false},
+		"address passed to a function that writes it":  {"f := noop\n\tset(&f)\n\tf(x)", 2, 0, false},
+		"address passed to a function that returns it": {"f := noop\n\t_ = back(&f)\n\tf(x)", 1, 0, true},
+		"address passed to a function by a closure":    {"f := noop\n\tw := func() { set(&f) }\n\tw()\n\tf(x)", 2, 0, false},
+		"address stored": {"f := noop\n\tkeep = &f\n\tf(x)", 1, 0, true},
 		"a struct, a field written here and in closure": {"s := S{fn: noop}\n\tw := func() { s.fn = pub }\n\tw()\n\ts.fn(x)", 1, 2, false},
 		"a struct, another field's address passed on":   {"s := S{fn: noop}\n\ts.mu.Lock()\n\ts.fn(x)", 1, 2, false},
-		"a struct, its address passed to a call":        {"s := S{fn: noop}\n\tsetS(&s)\n\ts.fn(x)", 1, 1, true},
+		"a struct, its address passed to a function":    {"s := S{fn: noop}\n\tsetS(&s)\n\ts.fn(x)", 1, 2, false},
 	} {
 		pkg := buildWalk(t, cellHead+"\nfunc use(x *T) {\n\t"+c.body+"\n}\n")
 		var cell *ssa.Alloc
@@ -145,6 +184,41 @@ func TestUsesOfCell(t *testing.T) {
 		u := usesOfCell(cell)
 		if len(u.stores) != c.stores || len(u.fields) != c.fields || u.open != c.open {
 			t.Errorf("%s: got %d stores, %d field addresses, open %v; want %d, %d, %v", name, len(u.stores), len(u.fields), u.open, c.stores, c.fields, c.open)
+		}
+	}
+}
+
+// TestCellViewLimit: an address passed down a chain of functions is followed through each of
+// them, up to cellViewLimit addresses. Past that the memory is taken as open, so the answer may
+// not be all, and it says so. The store at the end of a chain shorter than the limit is found.
+func TestCellViewLimit(t *testing.T) {
+	chain := func(n int) string {
+		var b strings.Builder
+		b.WriteString("package p\n\ntype T struct{ n int }\n\nfunc noop(*T) {}\n\nfunc pub(*T) {}\n\n")
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, "func hop%d(q *func(*T)) { hop%d(q) }\n\n", i, i+1)
+		}
+		fmt.Fprintf(&b, "func hop%d(q *func(*T)) { *q = pub }\n\nfunc use(x *T) {\n\tf := noop\n\thop0(&f)\n\tf(x)\n}\n", n)
+		return b.String()
+	}
+	for _, c := range []struct {
+		hops    int
+		pub     bool
+		mayMiss bool
+	}{
+		{cellViewLimit - 8, true, false},
+		{cellViewLimit + 8, false, true},
+	} {
+		pkg := buildWalk(t, chain(c.hops))
+		fn := pkg.Func("use")
+		st := &state{ssa: &buildssa.SSA{Pkg: pkg}, ix: &annot.Index{}}
+		leaves, mayMiss := st.ask().origins(fn, calledValue(t, fn))
+		found := slices.ContainsFunc(leaves, func(lf leafValue) bool {
+			f, ok := lf.v.(*ssa.Function)
+			return ok && f.Name() == "pub"
+		})
+		if found != c.pub || mayMiss != c.mayMiss {
+			t.Errorf("an address passed down %d functions: the store at the end found %v, may not be all %v; want %v, %v", c.hops, found, mayMiss, c.pub, c.mayMiss)
 		}
 	}
 }
