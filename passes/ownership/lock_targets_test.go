@@ -189,3 +189,62 @@ func TestLockHoldsHelperUnlockingInAClosureIsAKnownMiss(t *testing.T) {
 		t.Fatalf("the known miss is reported now; make this a must-report case: %v", got)
 	}
 }
+
+const lockAddressExtra = `
+var keepF *func()
+
+func peek(p *func()) bool { return *p != nil }
+
+func (s *S) setLock(p *func()) { *p = s.lockIt }
+
+func (s *S) setUnlock(p *func()) { *p = s.unlockIt }
+
+func (s *S) setUnlockClosure(p *func()) { *p = func() { s.mu.Unlock() } }
+`
+
+func lockAddressDiags(t *testing.T, body string) []string {
+	t.Helper()
+	return advDiagLines(t, lockTargetsHead+lockAddressExtra+"\nfunc (s *S) m(c bool) {\n\t"+body+"\n}\n", "SAFE009")
+}
+
+// A function variable whose address is passed to a function of this package is read in that
+// function, so what it may hold is known there too, where it used to be "not known" as soon as
+// the address was taken. A lock is held after the call only if every function the variable may
+// hold takes it; a helper that only reads the variable leaves the one function it holds.
+func TestLockThroughAVariableWhoseAddressIsPassedOn(t *testing.T) {
+	for name, body := range map[string]string{
+		"the helper stores a function that does not lock":   "f := func() { s.mu.Lock() }\n\tset(&f)\n\tf()\n\ts.n++",
+		"the helper stores a method that locks its own s":   "f := func() { s.mu.Lock() }\n\ts.setLock(&f)\n\tf()\n\ts.n++",
+		"the address is kept where anything may write it":   "f := func() { s.mu.Lock() }\n\tkeepF = &f\n\tf()\n\ts.n++",
+		"nothing locks, the helper only reads the variable": "f := func() {}\n\t_ = peek(&f)\n\tf()\n\ts.n++",
+	} {
+		if got := lockAddressDiags(t, body); len(got) == 0 {
+			t.Errorf("%s: the lock is not known to be held when n is written, and that was not reported", name)
+		}
+	}
+	for name, body := range map[string]string{
+		"the helper only reads the variable":           "f := func() { s.mu.Lock() }\n\t_ = peek(&f)\n\tf()\n\ts.n++",
+		"held before, the helper only reads, unlocked": "s.mu.Lock()\n\tf := func() {}\n\t_ = peek(&f)\n\tf()\n\ts.n++\n\ts.mu.Unlock()",
+	} {
+		if got := lockAddressDiags(t, body); len(got) != 0 {
+			t.Errorf("%s: the lock is held when n is written, and a write without it was reported: %s", name, strings.Join(got, "; "))
+		}
+	}
+}
+
+// A helper that stores, through the variable's address, a function that unlocks: the function is
+// now among those the variable may hold, but it was made in the helper, and the mutex it unlocks
+// is named there by the helper's own receiver. The lock check keeps the locks of the function it
+// is checking as paths from that function's values, so the release is not matched and the write
+// after the call still counts as guarded. Pinned as what is known; it was missed before as well,
+// when the variable was "not known" and a call with no arguments released nothing.
+func TestLockReleasedByAFunctionAHelperStoresIsAKnownMiss(t *testing.T) {
+	for name, body := range map[string]string{
+		"a method value of the helper's receiver": "s.mu.Lock()\n\tf := func() {}\n\ts.setUnlock(&f)\n\tf()\n\ts.n++",
+		"a closure made in the helper":            "s.mu.Lock()\n\tf := func() {}\n\ts.setUnlockClosure(&f)\n\tf()\n\ts.n++",
+	} {
+		if got := lockAddressDiags(t, body); len(got) != 0 {
+			t.Errorf("%s: this is now reported (%s): move the case to the test above and take it off the list of known misses", name, strings.Join(got, "; "))
+		}
+	}
+}

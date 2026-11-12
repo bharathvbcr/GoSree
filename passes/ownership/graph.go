@@ -618,6 +618,7 @@ func usesOfAddress(addr ssa.Value) cellUses {
 		seen:     map[ssa.Value]bool{addr: true},
 		entered:  map[*ssa.Function][]*ssa.Call{},
 		captured: map[*ssa.Function]bool{},
+		reads:    map[*ssa.Function]bool{},
 		returns:  map[*ssa.Function][]int{},
 		kept:     map[*ssa.Alloc]bool{},
 		holding:  map[*ssa.Alloc]bool{},
@@ -632,11 +633,14 @@ func usesOfAddress(addr ssa.Value) cellUses {
 type addressWalk struct {
 	u    cellUses
 	seen map[ssa.Value]bool
-	// entered are the calls through which the address reached each function, and captured the
-	// closures that have it as a free variable. A function that returns the address returns it
-	// to the calls it was entered by; one that also captures it may be called by anything.
+	// entered are the calls through which the address reached each function. A function that
+	// returns the address returns it to the calls it was entered by, unless it has the address
+	// some other way as well: as a free variable (captured), or by reading a pointer variable
+	// that holds it (reads). Such a function can hand it to any call of it, and those are not
+	// all read.
 	entered  map[*ssa.Function][]*ssa.Call
 	captured map[*ssa.Function]bool
+	reads    map[*ssa.Function]bool
 	returns  map[*ssa.Function][]int
 	// kept are the pointer variables the address was found stored in, each read once. holding are
 	// the variables whose uses are being read, here and in the walks that asked for this one: a
@@ -742,10 +746,11 @@ func (w *addressWalk) passedTo(addr ssa.Value, ins ssa.CallInstruction) {
 }
 
 // handedBack takes an address a function returns back to the calls it was entered by. The function
-// that made the memory, and a closure that captures it, return it to callers that are not read.
+// that made the memory, a closure that captures it and a function that reads it out of a pointer
+// variable return it to callers that are not read.
 func (w *addressWalk) handedBack(addr ssa.Value, ret *ssa.Return) {
 	fn := canonicalBodyFn(ret.Parent())
-	if fn == nil || w.captured[fn] || len(w.entered[fn]) == 0 {
+	if fn == nil || w.captured[fn] || w.reads[fn] || len(w.entered[fn]) == 0 {
 		w.u.open = true
 		return
 	}
@@ -804,6 +809,7 @@ func (w *addressWalk) keptIn(holder ssa.Value) {
 		seen:     map[ssa.Value]bool{cell: true},
 		entered:  map[*ssa.Function][]*ssa.Call{},
 		captured: map[*ssa.Function]bool{},
+		reads:    map[*ssa.Function]bool{},
 		returns:  map[*ssa.Function][]int{},
 		kept:     map[*ssa.Alloc]bool{},
 		holding:  w.holding,
@@ -814,6 +820,9 @@ func (w *addressWalk) keptIn(holder ssa.Value) {
 	if hw.u.open || len(hw.u.fields)+len(hw.u.elems)+len(hw.u.slices) > 0 {
 		w.u.open = true // the variable is read by something that is not in sight
 		return
+	}
+	for _, load := range hw.u.loads {
+		w.reads[canonicalBodyFn(load.Parent())] = true
 	}
 	for _, load := range hw.u.loads {
 		w.anotherName(load, load.Referrers())

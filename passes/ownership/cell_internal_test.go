@@ -55,6 +55,8 @@ func back(q *func(*T)) *func(*T) { return q }
 
 func same(q *S) *S { return q }
 
+func pick(p *S, h **S) *S { return *h }
+
 func back2(q *func(*T)) (*func(*T), bool) { return q, true }
 
 type PS *S
@@ -143,6 +145,10 @@ func TestWhatACellMayHold(t *testing.T) {
 		"a pointer: compared with nil":                            {"q := &S{fn: noop}\n\tif q == nil {\n\t\treturn\n\t}\n\tq.fn(x)", "noop", false},
 		"a pointer: kept in a package variable":                   {"q := &S{fn: noop}\n\tkeepS = q\n\tq.fn(x)", "noop", true},
 		"a pointer: kept in a pointer variable that is handed on": {"q := &S{fn: noop}\n\tw := func() { q.fn = pub }\n\tw()\n\tkeepQ = &q\n\tq.fn(x)", "noop", true},
+		// A function that reads the pointer variable can hand the struct to any call of it, not only
+		// to the calls that passed the struct in.
+		"a pointer: a function handed the variable returns what it holds": {"q := &S{fn: noop}\n\t_ = pick(q, &q)\n\tr := pick(nil, &q)\n\tr.fn = pub\n\tq.fn(x)", "noop", true},
+		"a pointer: a closure that captures the variable returns it":      {"q := &S{fn: noop}\n\tget := func(p *S) *S { return q }\n\t_ = get(q)\n\tr := get(nil)\n\tr.fn = pub\n\tq.fn(x)", "noop", true},
 	} {
 		pkg := buildWalk(t, cellHead+"\nfunc use(x *T) {\n\t"+c.body+"\n}\n")
 		fn := pkg.Func("use")
