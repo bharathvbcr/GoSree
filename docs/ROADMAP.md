@@ -236,9 +236,13 @@ Done:
    - SAFE006 for `sync.Once`-published variables, and B9's five lockset false positives;
    - claims for initialisation-time and goroutine-confined state. Item 4 showed these are what a
      later pin would need.
-   - what a called function does to memory it is handed: the write check at a module function's
-     summary, an interface method and a function value. The reopened experiment showed that no
-     claim about sharing clears a hatch until this is answered.
+   - what a called function does to memory it is handed, through an interface or a function value.
+     The reopened experiment showed that no claim about sharing clears a hatch until this is
+     answered, and the measurement after it showed what the blocks are: once the write bit's
+     over-count and writes under a lock are both set aside, calls the checker cannot see into are
+     the only thing left in 65 of the 118 blocked claims (161 interface call sites, 39 dynamic
+     calls). Setting the over-count aside unblocks none of the 118 by itself
+     ([the triage log](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.md#why-the-write-check-blocks-those-claims-2026-11-12)).
 
 The project should be abandoned if a `net/http` reference service has a hatch ratio above 20% (see
 [Measuring the escape hatch](../README.md#measuring-the-escape-hatch-on-a-module)) once the type and function
