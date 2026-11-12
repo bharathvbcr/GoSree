@@ -423,7 +423,9 @@ func (t *trace) fieldBehind(fn *ssa.Function, ptr ssa.Value, field int, depth in
 // variable, each closure that captures it, each function of this package it is passed to. They
 // are all the field may hold unless an address of the whole struct or of this field goes somewhere
 // that is not read. The address of another field going somewhere (s.mu.Lock()) says nothing about
-// this one.
+// this one. Where the whole struct's address goes out of sight, the stores to the field of that
+// struct type anywhere in the package stand in for what is written through its other names, as
+// they do in fieldBehind where a pointer leads nowhere, and the answer may not be all.
 func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bool) {
 	switch base := lf.v.(type) {
 	case *ssa.Alloc:
@@ -460,6 +462,18 @@ func (t *trace) fieldOfBase(lf leafValue, field int, depth int) ([]leafValue, bo
 		}
 		for _, stIns := range uses.stores {
 			walk(stIns, ask{kind: askField, field: field})
+		}
+		if uses.open && t.q.contracts != nil {
+			// The struct's address goes somewhere that is not read: it is returned, stored, joined
+			// with another pointer. A store through that other name is a store to this struct, and
+			// which stores those are is not followed. Every store the package makes to this field
+			// of this struct type stands in for them.
+			if keyStr, ok := derefStructTypeKey(base.Type()); ok {
+				for _, iv := range t.q.contracts.fieldStores(keyStr, field) {
+					sub, _ := t.follow(iv.fn, iv.v, ask{kind: askValue}, depth+1)
+					out = append(out, sub...)
+				}
+			}
 		}
 		if len(out) == 0 {
 			incomplete = true

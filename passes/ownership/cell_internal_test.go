@@ -53,6 +53,16 @@ func rec(q *func(*T), n int) {
 
 func back(q *func(*T)) *func(*T) { return q }
 
+func same(q *S) *S { return q }
+
+func back2(q *func(*T)) (*func(*T), bool) { return q, true }
+
+type PS *S
+
+type P *P
+
+var keepQ **S
+
 type setter interface{ set(q *func(*T)) }
 
 var other setter
@@ -95,35 +105,44 @@ func TestWhatACellMayHold(t *testing.T) {
 		mayMiss bool
 	}{
 		"only its own function writes it, a closure reads it": {"f := noop\n\tpeek := func() bool { return f != nil }\n\t_ = peek()\n\tf(x)", "noop", false},
-		"a closure writes it":                                    {"f := noop\n\tw := func() { f = pub }\n\tw()\n\tf(x)", "noop pub", false},
-		"a closure inside a closure writes it":                   {"f := noop\n\tw := func() {\n\t\tin := func() { f = pub }\n\t\tin()\n\t}\n\tw()\n\tf(x)", "noop pub", false},
-		"two closures write it":                                  {"f := noop\n\tw := func() { f = pub }\n\tv := func() { f = noop }\n\tw()\n\tv()\n\tf(x)", "noop pub", false},
-		"its address is passed to a function that writes it":     {"f := noop\n\tset(&f)\n\tf(x)", "noop pub", false},
-		"its address is passed on twice":                         {"f := noop\n\tset2(&f)\n\tf(x)", "noop pub", false},
-		"its address is passed to a function that calls itself":  {"f := noop\n\trec(&f, 3)\n\tf(x)", "noop pub", false},
-		"its address is passed to a function that returns it":    {"f := noop\n\t_ = back(&f)\n\tf(x)", "noop", true},
-		"its address is passed to another package":               {"f := noop\n\tfmt.Sscan(\"\", &f)\n\tf(x)", "noop", true},
-		"its address is passed to a method of an interface":      {"f := noop\n\tother.set(&f)\n\tf(x)", "noop", true},
-		"its address is passed to a function of another package": {"f := noop\n\theld.Store(&f)\n\tf(x)", "noop", true},
-		"its address is passed to a function held in a variable": {"f := noop\n\tg := set\n\tif x == nil {\n\t\tg = set2\n\t}\n\tg(&f)\n\tf(x)", "noop", true},
-		"its address is stored":                                  {"f := noop\n\tkeep = &f\n\tf(x)", "noop", true},
-		"a closure passes its address to a function":             {"f := noop\n\tw := func() { set(&f) }\n\tw()\n\tf(x)", "noop pub", false},
-		"a struct: a closure writes the field":                   {"s := S{fn: noop}\n\tw := func() { s.fn = pub }\n\tw()\n\ts.fn(x)", "noop pub", false},
-		"a struct: a closure writes it whole":                    {"s := S{fn: noop}\n\tw := func() { s = S{fn: pub} }\n\tw()\n\ts.fn(x)", "noop pub", false},
-		"a struct: another field's address is passed on":         {"s := S{fn: noop}\n\ts.mu.Lock()\n\ts.fn(x)\n\ts.mu.Unlock()", "noop", false},
-		"a struct: a closure passes another field's address":     {"s := S{fn: noop}\n\tw := func() { s.mu.Lock() }\n\tw()\n\ts.fn(x)", "noop", false},
-		"a struct: its address is passed to a function":          {"s := S{fn: noop}\n\tsetS(&s)\n\ts.fn(x)", "noop pub", false},
-		"a struct: a method with a pointer receiver writes it":   {"s := S{fn: noop}\n\ts.arm()\n\ts.fn(x)", "noop pub", false},
-		"a struct made with &: passed to a function":             {"q := &S{fn: noop}\n\tsetS(q)\n\tq.fn(x)", "noop pub", false},
-		"a struct made with &: a method writes it":               {"q := &S{fn: noop}\n\tq.arm()\n\tq.fn(x)", "noop pub", false},
-		"a struct: its address is stored":                        {"s := S{fn: noop}\n\tkeepS = &s\n\ts.fn(x)", "noop", true},
-		"a struct: the field's address is passed to a function":  {"s := S{fn: noop}\n\tset(&s.fn)\n\ts.fn(x)", "noop pub", false},
-		"a struct: the field's address is stored":                {"s := S{fn: noop}\n\tkeep = &s.fn\n\ts.fn(x)", "noop", true},
-		// The variable holds a pointer. Both structs it may point to are found. The address of each
-		// is stored in the variable, and what is written through a load of the variable is not read
-		// as a write to the struct (the last case: pub is not found), so the answer may not be all.
-		"a pointer: a closure points it at another struct":            {"q := &S{fn: noop}\n\tw := func() { q = &S{fn: pub} }\n\tw()\n\tq.fn(x)", "noop pub", true},
-		"known: a pointer, the field is written through the variable": {"q := &S{fn: noop}\n\tw := func() { q.fn = pub }\n\tw()\n\tq.fn(x)", "noop", true},
+		"a closure writes it":                                              {"f := noop\n\tw := func() { f = pub }\n\tw()\n\tf(x)", "noop pub", false},
+		"a closure inside a closure writes it":                             {"f := noop\n\tw := func() {\n\t\tin := func() { f = pub }\n\t\tin()\n\t}\n\tw()\n\tf(x)", "noop pub", false},
+		"two closures write it":                                            {"f := noop\n\tw := func() { f = pub }\n\tv := func() { f = noop }\n\tw()\n\tv()\n\tf(x)", "noop pub", false},
+		"its address is passed to a function that writes it":               {"f := noop\n\tset(&f)\n\tf(x)", "noop pub", false},
+		"its address is passed on twice":                                   {"f := noop\n\tset2(&f)\n\tf(x)", "noop pub", false},
+		"its address is passed to a function that calls itself":            {"f := noop\n\trec(&f, 3)\n\tf(x)", "noop pub", false},
+		"its address is passed to a function that returns it, and dropped": {"f := noop\n\t_ = back(&f)\n\tf(x)", "noop", false},
+		"its address is passed to a function that returns it, and kept":    {"f := noop\n\tkeep = back(&f)\n\tf(x)", "noop", true},
+		"its address comes back and is written through":                    {"f := noop\n\tr := back(&f)\n\t*r = pub\n\tf(x)", "noop pub", false},
+		"its address comes back as one of two results":                     {"f := noop\n\tr, _ := back2(&f)\n\t*r = pub\n\tf(x)", "noop pub", false},
+		"its address comes back from the second of two calls":              {"f := noop\n\t_ = back(&f)\n\tr := back(&f)\n\t*r = pub\n\tf(x)", "noop pub", false},
+		"a closure that captures it hands its address to any caller":       {"f := noop\n\tw := func(q *func(*T)) *func(*T) { return &f }\n\t_ = w(&f)\n\tr := w(nil)\n\t*r = pub\n\tf(x)", "noop", true},
+		"its address is passed to another package":                         {"f := noop\n\tfmt.Sscan(\"\", &f)\n\tf(x)", "noop", true},
+		"its address is passed to a method of an interface":                {"f := noop\n\tother.set(&f)\n\tf(x)", "noop", true},
+		"its address is passed to a function of another package":           {"f := noop\n\theld.Store(&f)\n\tf(x)", "noop", true},
+		"its address is passed to a function held in a variable":           {"f := noop\n\tg := set\n\tif x == nil {\n\t\tg = set2\n\t}\n\tg(&f)\n\tf(x)", "noop", true},
+		"its address is stored":                                            {"f := noop\n\tkeep = &f\n\tf(x)", "noop", true},
+		"a closure passes its address to a function":                       {"f := noop\n\tw := func() { set(&f) }\n\tw()\n\tf(x)", "noop pub", false},
+		"a struct: a closure writes the field":                             {"s := S{fn: noop}\n\tw := func() { s.fn = pub }\n\tw()\n\ts.fn(x)", "noop pub", false},
+		"a struct: a closure writes it whole":                              {"s := S{fn: noop}\n\tw := func() { s = S{fn: pub} }\n\tw()\n\ts.fn(x)", "noop pub", false},
+		"a struct: another field's address is passed on":                   {"s := S{fn: noop}\n\ts.mu.Lock()\n\ts.fn(x)\n\ts.mu.Unlock()", "noop", false},
+		"a struct: a closure passes another field's address":               {"s := S{fn: noop}\n\tw := func() { s.mu.Lock() }\n\tw()\n\ts.fn(x)", "noop", false},
+		"a struct: its address is passed to a function":                    {"s := S{fn: noop}\n\tsetS(&s)\n\ts.fn(x)", "noop pub", false},
+		"a struct: a method with a pointer receiver writes it":             {"s := S{fn: noop}\n\ts.arm()\n\ts.fn(x)", "noop pub", false},
+		"a struct made with &: passed to a function":                       {"q := &S{fn: noop}\n\tsetS(q)\n\tq.fn(x)", "noop pub", false},
+		"a struct made with &: a method writes it":                         {"q := &S{fn: noop}\n\tq.arm()\n\tq.fn(x)", "noop pub", false},
+		"a struct: its address is stored":                                  {"s := S{fn: noop}\n\tkeepS = &s\n\ts.fn(x)", "noop", true},
+		"a struct: the field's address is passed to a function":            {"s := S{fn: noop}\n\tset(&s.fn)\n\ts.fn(x)", "noop pub", false},
+		"a struct: the field's address is stored":                          {"s := S{fn: noop}\n\tkeep = &s.fn\n\ts.fn(x)", "noop", true},
+		// The variable holds a pointer: each load of it is one more name of the struct it points to.
+		"a pointer: a closure points it at another struct":        {"q := &S{fn: noop}\n\tw := func() { q = &S{fn: pub} }\n\tw()\n\tq.fn(x)", "noop pub", false},
+		"a pointer: a closure writes the field through it":        {"q := &S{fn: noop}\n\tw := func() { q.fn = pub }\n\tw()\n\tq.fn(x)", "noop pub", false},
+		"a pointer: the field is written through a branch":        {"q := &S{fn: noop}\n\tu := &S{fn: noop}\n\tr := q\n\tif x == nil {\n\t\tr = u\n\t}\n\tr.fn = pub\n\tq.fn(x)", "noop pub", false},
+		"a pointer: handed back by the function it is passed to":  {"q := same(&S{fn: noop})\n\tq.fn = pub\n\tq.fn(x)", "noop pub", false},
+		"a pointer: converted to a named pointer type":            {"q := &S{fn: noop}\n\tr := PS(q)\n\tr.fn = pub\n\tq.fn(x)", "noop pub", false},
+		"a pointer: compared with nil":                            {"q := &S{fn: noop}\n\tif q == nil {\n\t\treturn\n\t}\n\tq.fn(x)", "noop", false},
+		"a pointer: kept in a package variable":                   {"q := &S{fn: noop}\n\tkeepS = q\n\tq.fn(x)", "noop", true},
+		"a pointer: kept in a pointer variable that is handed on": {"q := &S{fn: noop}\n\tw := func() { q.fn = pub }\n\tw()\n\tkeepQ = &q\n\tq.fn(x)", "noop", true},
 	} {
 		pkg := buildWalk(t, cellHead+"\nfunc use(x *T) {\n\t"+c.body+"\n}\n")
 		fn := pkg.Func("use")
@@ -164,7 +183,11 @@ func TestUsesOfCell(t *testing.T) {
 		"written in a closure inside a closure":        {"f := noop\n\tw := func() {\n\t\tin := func() { f = pub }\n\t\tin()\n\t}\n\tw()\n\tf(x)", 2, 0, false},
 		"captured by two closures, written by one":     {"f := noop\n\tw := func() { f = pub }\n\tr := func() { f(x) }\n\tw()\n\tr()", 2, 0, false},
 		"address passed to a function that writes it":  {"f := noop\n\tset(&f)\n\tf(x)", 2, 0, false},
-		"address passed to a function that returns it": {"f := noop\n\t_ = back(&f)\n\tf(x)", 1, 0, true},
+		"address passed to a function that returns it": {"f := noop\n\tkeep = back(&f)\n\tf(x)", 1, 0, true},
+		"address comes back and is written through":    {"f := noop\n\tr := back(&f)\n\t*r = pub\n\tf(x)", 2, 0, false},
+		// type P *P: each of two variables holds the other's address. Reading one reads the other,
+		// which comes back to the first, and the reading stops there with the variable open.
+		"two variables that hold each other's address": {"var s, o P\n\ts = &o\n\to = &s\n\t_ = x", 1, 0, true},
 		"address passed to a function by a closure":    {"f := noop\n\tw := func() { set(&f) }\n\tw()\n\tf(x)", 2, 0, false},
 		"address stored": {"f := noop\n\tkeep = &f\n\tf(x)", 1, 0, true},
 		"a struct, a field written here and in closure": {"s := S{fn: noop}\n\tw := func() { s.fn = pub }\n\tw()\n\ts.fn(x)", 1, 2, false},
