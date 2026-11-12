@@ -158,6 +158,35 @@ func scaleOne(body string) map[string]string {
 
 func scaleShapes() []scaleShape {
 	return []scaleShape{
+		// N layers of 4 pointer variables, each holding the address of every variable one layer
+		// down, over a called function variable. The walk of a pointer variable an address is kept
+		// in started afresh for each, so the work grew about threefold per layer (28 s at 10 layers,
+		// 92 s at 11, on a loaded machine) until the walks shared one budget (cellWalkBudget).
+		{name: "N layers of pointer variables over a called function variable", sizes: []int{6, 9, 12}, maxRatio: 6, gen: func(n int) map[string]string {
+			var b strings.Builder
+			b.WriteString("import \"sync\"\n\ntype S struct {\n\tmu sync.Mutex\n\t//gosree:guarded_by mu\n\tn int\n}\n\nfunc nop(*S) {}\n\nfunc (s *S) m() {\n\tf := nop\n")
+			prev := []string{"f"}
+			typ := "func(*S)"
+			for layer := range n {
+				typ = "*" + typ
+				var cur []string
+				for i := range 4 {
+					name := fmt.Sprintf("v%d_%d", layer, i)
+					cur = append(cur, name)
+					fmt.Fprintf(&b, "\tvar %s %s\n", name, typ)
+					for _, p := range prev {
+						fmt.Fprintf(&b, "\t%s = &%s\n", name, p)
+					}
+				}
+				prev = cur
+			}
+			b.WriteString("\tfunc() {\n")
+			for _, p := range prev {
+				fmt.Fprintf(&b, "\t\t_ = %s\n", p)
+			}
+			b.WriteString("\t}()\n\ts.mu.Lock()\n\tf(s)\n\ts.n++\n\ts.mu.Unlock()\n}\n")
+			return map[string]string{"p/p.go": "package p\n\n" + b.String()}
+		}},
 		{name: "send/use pairs in one function", sizes: []int{100, 200, 400}, maxRatio: 10, gen: func(n int) map[string]string {
 			var b strings.Builder
 			b.WriteString("func F(ch chan *Job) {\n")

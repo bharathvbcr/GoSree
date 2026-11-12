@@ -654,6 +654,12 @@ type cellUses struct {
 // is taken as open.
 const cellViewLimit = 64
 
+// cellWalkBudget is how many names usesOfAddress reads in all, in its own walk and in the walks of
+// the pointer variables the address is kept in (keptIn), each of which starts with sets of its own.
+// Layers of pointer variables that each hold the addresses of several below made those walks
+// exponential in the layers. Past it the memory is taken as open.
+const cellWalkBudget = 16 * cellViewLimit
+
 // usesOfCell reads every use of the local variable alloc.
 func usesOfCell(alloc *ssa.Alloc) cellUses {
 	return usesOfAddress(alloc)
@@ -666,6 +672,7 @@ func usesOfCell(alloc *ssa.Alloc) cellUses {
 // a method called by name, a closure called where it is made, a method value. Any other call
 // leaves the memory open.
 func usesOfAddress(addr ssa.Value) cellUses {
+	budget := cellWalkBudget
 	w := &addressWalk{
 		seen:     map[ssa.Value]bool{addr: true},
 		entered:  map[*ssa.Function][]*ssa.Call{},
@@ -674,6 +681,7 @@ func usesOfAddress(addr ssa.Value) cellUses {
 		returns:  map[*ssa.Function][]int{},
 		kept:     map[*ssa.Alloc]bool{},
 		holding:  map[*ssa.Alloc]bool{},
+		budget:   &budget,
 	}
 	if alloc, ok := addr.(*ssa.Alloc); ok {
 		w.holding[alloc] = true
@@ -700,6 +708,8 @@ type addressWalk struct {
 	// variable reached again while it is being read is a cycle, and the memory is open.
 	kept    map[*ssa.Alloc]bool
 	holding map[*ssa.Alloc]bool
+	// budget is the names left to read, shared with the walks this one asks for (cellWalkBudget).
+	budget *int
 }
 
 // anotherName reads one more name of the same memory, once.
@@ -707,12 +717,30 @@ func (w *addressWalk) anotherName(v ssa.Value, refs *[]ssa.Instruction) {
 	if w.seen[v] {
 		return
 	}
-	if len(w.seen) >= cellViewLimit {
+	if len(w.seen) >= cellViewLimit || !w.spend() {
 		w.u.open = true
 		return
 	}
 	w.seen[v] = true
 	w.readName(v, refs)
+}
+
+// spend takes one name from the budget, or says that it is used up.
+func (w *addressWalk) spend() bool {
+	if *w.budget <= 0 {
+		return false
+	}
+	*w.budget--
+	return true
+}
+
+// handsBack says that fn was taken to return the address only to the calls it was entered by
+// (handedBack), which holds only while fn has the address no other way. Learning later that it
+// has, by capturing it or by reading a pointer variable that holds it, gives the answer handedBack
+// would have given had that been known first: the memory is open. Without this the answer
+// depended on the order of the statements.
+func (w *addressWalk) handsBack(fn *ssa.Function) bool {
+	return len(w.returns[fn]) > 0
 }
 
 // readName reads the uses of one name of the memory.
@@ -752,6 +780,9 @@ func (w *addressWalk) readName(addr ssa.Value, refs *[]ssa.Instruction) {
 			for j, b := range r.Bindings {
 				if b == addr && j < len(fn.FreeVars) {
 					w.captured[fn] = true
+					if w.handsBack(fn) {
+						w.u.open = true
+					}
 					w.anotherName(fn.FreeVars[j], fn.FreeVars[j].Referrers())
 				}
 			}
@@ -858,6 +889,10 @@ func (w *addressWalk) keptIn(holder ssa.Value) {
 		w.u.open = true // a variable that is being read holds, through others, its own address
 		return
 	}
+	if !w.spend() {
+		w.u.open = true
+		return
+	}
 	hw := &addressWalk{
 		seen:     map[ssa.Value]bool{cell: true},
 		entered:  map[*ssa.Function][]*ssa.Call{},
@@ -866,6 +901,7 @@ func (w *addressWalk) keptIn(holder ssa.Value) {
 		returns:  map[*ssa.Function][]int{},
 		kept:     map[*ssa.Alloc]bool{},
 		holding:  w.holding,
+		budget:   w.budget,
 	}
 	w.holding[cell] = true
 	hw.readName(cell, cell.Referrers())
@@ -875,7 +911,11 @@ func (w *addressWalk) keptIn(holder ssa.Value) {
 		return
 	}
 	for _, load := range hw.u.loads {
-		w.reads[canonicalBodyFn(load.Parent())] = true
+		fn := canonicalBodyFn(load.Parent())
+		w.reads[fn] = true
+		if w.handsBack(fn) {
+			w.u.open = true
+		}
 	}
 	for _, load := range hw.u.loads {
 		w.anotherName(load, load.Referrers())
