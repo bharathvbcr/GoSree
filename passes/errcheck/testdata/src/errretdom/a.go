@@ -26,3 +26,19 @@ func F(c bool) (n int, e error) {
 	use(v)
 	return 2, nil
 }
+
+func cleanup() {}
+
+// G has a defer, and so a Recover block, but the closure call dominates every normal return: the
+// pair is tracked and use(v) is checked behind the nil test of err. Nothing is reported.
+func G() int {
+	defer cleanup()
+	var v *int
+	var err error
+	func() { v, err = work() }()
+	if err != nil {
+		return 0
+	}
+	use(v)
+	return 1
+}
