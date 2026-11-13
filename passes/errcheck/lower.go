@@ -1034,10 +1034,13 @@ func (fl *funcLowerer) bindClosurePair(call *ssa.Call, ops *[]gusseterr.OpIR) {
 		tflags |= gusseterr.TupleIORead
 	}
 	siteID := fl.pkg.addSite(plan.call.Call.Pos(), describeCallCommon(&plan.call.Call), "")
+	// The bind overwrites the error cell, so an unread earlier error is reported at this op: name the
+	// variable there, as the no-closure twin's OpBindErr does, and keep the call on the tuple's site.
+	bindSiteID := fl.pkg.addSite(plan.call.Call.Pos(), cellSiteName(plan.mc.Bindings[plan.errIdx]), "")
 	tid := uint32(len(fl.tuples))
 	fl.tuples = append(fl.tuples, gusseterr.TupleMeta{ErrSlot: errSlot, CallSiteID: siteID, Flags: tflags})
 	*ops = append(*ops,
-		gusseterr.OpIR{Kind: gusseterr.OpBindTuple, SiteID: siteID, TupleID: tid, SlotA: errSlot, Companions: comps},
+		gusseterr.OpIR{Kind: gusseterr.OpBindTuple, SiteID: bindSiteID, TupleID: tid, SlotA: errSlot, Companions: comps},
 		// The closure already handled the error cell as an escaping error value, so the bind must
 		// not leave it unread: without this, `err = nil` between the call and the check reports an
 		// overwritten unchecked error, which the same sequence without a closure does not.
@@ -1209,7 +1212,7 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 
 			case *ssa.Store:
 				if alloc, ok := x.Addr.(*ssa.Alloc); ok && fl.localCells[alloc] {
-					sid := fl.siteForVal(x.Pos(), describeSSAVal(alloc))
+					sid := fl.siteForVal(x.Pos(), cellSiteName(alloc))
 					ops = append(ops, gusseterr.OpIR{
 						Kind:    gusseterr.OpAssignSlot,
 						SiteID:  sid,
@@ -2689,20 +2692,35 @@ func describeCallCommon(cc *ssa.CallCommon) string {
 	return "call()"
 }
 
-func describeSSAVal(v ssa.Value) string {
+// ssaValName is the source name of a variable cell or parameter, bare. The formatters in
+// errcheck.go quote a name once; describeSSAVal quotes it for the messages that interpolate a
+// description unquoted.
+func ssaValName(v ssa.Value) (string, bool) {
 	switch x := v.(type) {
-	case *ssa.Extract:
+	case *ssa.Alloc:
+		return x.Comment, x.Comment != ""
+	case *ssa.Parameter:
+		return x.Name(), x.Name() != ""
+	}
+	return "", false
+}
+
+// cellSiteName is the detail of a site that stores into a variable cell: the bare variable name.
+func cellSiteName(v ssa.Value) string {
+	if name, ok := ssaValName(v); ok {
+		return name
+	}
+	return "companion value"
+}
+
+func describeSSAVal(v ssa.Value) string {
+	if x, ok := v.(*ssa.Extract); ok {
 		if call, ok := x.Tuple.(*ssa.Call); ok {
 			return "result of " + describeCallCommon(&call.Call)
 		}
-	case *ssa.Alloc:
-		if x.Comment != "" {
-			return "'" + x.Comment + "'"
-		}
-	case *ssa.Parameter:
-		if x.Name() != "" {
-			return "'" + x.Name() + "'"
-		}
+	}
+	if name, ok := ssaValName(v); ok {
+		return "'" + name + "'"
 	}
 	return "companion value"
 }
