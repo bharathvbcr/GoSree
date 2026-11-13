@@ -1,394 +1,270 @@
-# Build report: GitPulse backlog run, 2026-11-11
+# Build report: GitPulse backlog run, 2026-11-12 → 13 (session a76482b2)
 
-Repository `gocap` (module `github.com/bharathvbcr/gosree`).
+This is the second backlog run on gocap (GoSree). The first run's report, `BUILD_REPORT.md` on `main` (70ae4a8), is kept unchanged on this branch as `BUILD_REPORT-2026-11-11.md`.
 
-- **Starting point:** `main` at `9161d81`. Main moved to `7b739fc` during the run; that was another session's commit, not this run's.
-- **Where the work was:** branch `run/integ-1111`, at `e34e37c`. It was deleted on 2026-11-12, when it was already an ancestor of `main`; see section 11.
-- **Merged since:** another session merged `run/integ-1111`, every lane branch and both second-round adversary branches into local `main` (merge commits `afde37e` 18:37 to `c147b2a` 19:21). It also fixed two problems in this run's work; see section 10. The only merge this run made into `main` is this report's own merge.
-- **Pushed since, but not by this run:** `origin/main` is `08bb22f` ("Pin gusset by version…", 2026-11-12 08:45). Verified with `git ls-remote origin refs/heads/main`. That push came from outside this run; this run pushed nothing and touched no remote branch.
-- **This revision of the report** was written on branch `run/report-1111`, which started at `main` `78f0879`, took in `main` at `08bb22f`, and was merged into `main` on 2026-11-12. Section 10, section 11 and the corrections marked "Corrected" or "Update" were added after the first merge.
+- **Branches:** the work is on local, unpushed branches named `run2/*`. Nothing was merged to `main` and nothing was pushed; merging is the owner's call.
+- **Labels:** every claim below is labelled **verified** (with the command or evidence) or **inferred**.
+- **Run log:** the full chronological log is committed beside this report as [`build-run-2026-11-12/runlog.md`](build-run-2026-11-12/runlog.md). The ft-a0d4 exit-code table is [`build-run-2026-11-12/exitcodes-table.md`](build-run-2026-11-12/exitcodes-table.md), and its raw rows are in `exitcodes-results.tsv`.
 
-Labels used below: **verified** means a command was run and its output read. **Inferred** means read from code or from an agent's report without re-running it. **Unverified** means it could not be checked.
+## 0. Summary
 
-## 1. Outcome
+- **Cards moved to review (8):** ft-f2e5, ft-5e61, ft-420d, ft-c7dd, ft-8f3c, ft-fe6e, ft-c37e, and ft-6d5a *(see §1 for its gate)*.
+  - Done: none. `dev verify` cannot run here: `dev doctor` reports no DevCouncil task store and gate mode off (verified 2026-11-12). Review is the ceiling, as Fable ruled.
+- **New cards filed (7):**
+  - ft-32cd: census nondeterminism
+  - ft-eddc: Go 1.27.4 cgo break, p1
+  - ft-6d5a: ERR003 quoting, then fixed in this run
+  - ft-fe6e: ERR005 design, then worked in one bounded round
+  - ft-c37e: gosree_commit provenance, then fixed
+  - ft-79c7: replay depth redesign
+  - ft-e92e: path keying and the remaining ERR005 shapes
+- **Environment break found mid-run.** Homebrew moved `go` to 1.27.4 at 23:19 on 2026-11-12. On 1.27.4 every cgo build of gosree fails, unmodified `main` included. All cgo verification in this run used go1.27.3 by absolute path (Fable ruling). See §5.
+- **A brief-induced regression was caught and undone.** ft-c7dd's first ERR005 attempt added 10 false positives and 3 misses. The cause was the orchestrator's brief. It was attributed per commit, split out, and redone under the correct invariant. See §4.
 
-| Task | Status now | Branch |
-|---|---|---|
-| ft-d323b7dd0b328a61d6520b47bec24786: safeerr wrong diagnostics, unbounded solver memory | **review** (rev 5) | `run/d323-solver`, `run/d323-frontend` |
-| ft-8e7947bad32ad012d13f77fda5bf9181: gosree-corpus, gosree-erase, acceptance script | **review** (rev 4) | `run/8e79-cmd` |
-| ft-b6a2a427e41d1e84e41c83538e4919eb: ownership/borrow false positives, caps, nondeterminism | **review** (rev 6) | `run/b6a2-ownership` |
-| ft-3b3c483abe2170060cf568b8edc238a5: ERR005 for a closure closing a captured resource (filed this run) | **review** (rev 5) | `run/3b3c-errcheck` |
-| ft-f138c1b5ed039f7e77ec140fdaa3e667: census edges through generics, `[]*T`, `map[K]*T` (filed this run) | **review** (rev 3) | `run/f138-census` |
+## 1. Cards in review
 
-All five branches are now contained in local `main` (section 10). No task was moved to **done**. Done needs `dev verify`, and in this repository it returns "DevCouncil state is unavailable in this directory": there is no task store, and `dev doctor` finds no `state.sqlite`. A gate that could not run is not treated as one that passed.
+Every card here carries this label, which must be cleared before merge: **"cgo verified on go1.27.3; go1.27.4 cgo blocked by ft-eddc14e5"**.
 
-Every task followed the same steps:
-1. Opus wrote a brief.
-2. A Sonnet lane implemented it in its own worktree, writing tests that fail on the code before the fix.
-3. A separate Sonnet adversary attacked the result, and every break went back to the lane.
-4. Opus reviewed the diff.
-5. The work was merged into `run/integ-1111`.
-6. The full suite ran on the union of all merged work.
+| Card | Branch (tip) | Base | What changed |
+|---|---|---|---|
+| ft-f2e5: extractTar skips links | `run2/f2e5` (4215d6e) | f0dea98 | Symlink and hard-link entries are skipped and counted on stderr. Anything at or beneath a skipped link is refused, and so are non-directory entries naming the root. Names are bounded at 4096 bytes and 128 components. A nil diag writer is an error. |
+| ft-5e61: safeerr at 262,144 functions | `run2/5e61` (c2081c6) | f0dea98 | Phase 1 is callee-first by SCC (Tarjan), with rank order inside each SCC. A deterministic work budget (ops + blocks×slots, 64× package size) fails closed. Decoded memory is bounded at 2 GiB (Fable) with exact-capacity decoding. The encoder pre-sizes its output, the oracle response is capped, and refusals are typed sentinels. |
+| ft-c37e: gosree_commit provenance | `run2/c37e` (1e216e9) | main 8df1d77 | The commit is read from the binary's own vcs build stamp (validated hex, VCS prefix, fail-closed dirty flag), never from the working directory. |
+| ft-420d: ERR002 FP, closure-assigned (v, err) | `run2/420d` (db244aa) | main 8df1d77 | Tuple identity crosses the closure boundary under a per-closure plan, and untracked shapes keep the tip's report. Two later fixes: the Recover block is excluded from return dominance, and nil stays sticky (§4b). |
+| ft-c7dd: ERR003 FP on `_, _ = w.Write(nil)` in loops | `run2/c7dd` (e049a2c) | run2/420d | ERR003 only. The 14 ERR005 shapes are recorded as `MISS(ERR005)` stress markers that point to ft-fe6e. |
+| ft-8f3c: ERR005 FP before os.Exit / log.Fatal | `run2/8f3c` (290f3fc) | run2/c7dd | A deferred Close is dropped only when the block reaches a process exit and no return, panic or unwind. Pure infinite loops keep their report (a scope limit). |
+| ft-fe6e: ERR005 closure replay, one bounded round | `run2/fe6e` (24d21ac) | run2/8f3c | Writes and Closes are replayed at the single dominating call of a tracked closure, capped at 16 nesting levels. Path keying is parked. |
+| ft-6d5a: ERR003 double-quoted names | `run2/6d5a` (55b1e86) | run2/fe6e | One quoting owner. Closure pairs and loop twins name the error variable. Message text only. |
 
-### Verification at `main` `78f0879` after the merge (verified)
+**Merge order.**
+- Stack A is `run2/5e61` alone.
+- Stack B is 420d → c7dd → 8f3c → fe6e → 6d5a; merge it whole, since only the 6d5a tip records the correct fingerprint.
+- `run2/f2e5` and `run2/c37e` are independent. Their merge-tree with each other is clean.
+- **Stack A×B test merges (Fable's stack rule).** Each Stack B card's tip was test-merged with `run2/5e61` before its review, in both engines, and every merge was clean and green: 420d 865eada, c7dd 8c5c983, 8f3c 417b04b, fe6e 45fbc54, 6d5a ff3e20b. `errcheck.go` auto-merges.
+  - The *post-fix* 420d, c7dd and 8f3c tips (after the forward merges of the retDom fixes) were not separately test-merged.
+  - The 6d5a tip, which contains them, was.
+- **FINDINGS.md fingerprint cell:**
+  - Stack B: only the 6d5a tip records its own fingerprint (`1694ac132e12f19b`). Earlier tips are stale, and each card notes its computed value.
+  - **After both stacks merge, the fingerprint will be `c4888388dc458b33`** (verified: `git merge-tree --write-tree run2/6d5a run2/5e61`, then the tree archived and `fingerprint.sh` run). The cell must be set to that at merge time.
 
-Run in a scratch worktree at `78f0879` on 2026-11-11 from 23:05 to 2026-11-12 00:00, at load average 50–106.
+*ft-6d5a final gate (05:28–05:37): go1.27.3 vet ok, cgo test ./... 17/17 ok, CGO_ENABLED=0 errcheck+gusseterr+stress ok, 6d5a×5e61 merge (ff3e20b) ok in both engines. Its FINDINGS.md records the stack-tip fingerprint `1694ac132e12f19b` (55b1e86).*
 
-| Check | Result |
+### Evidence highlights (all verified)
+
+**Disciplines applied to every card**
+- Failing-before tests.
+- An Opus review.
+- A separate adversarial pass.
+- A full-suite gate: go1.27.3, `go test -timeout 60m -count=1 ./...` with cgo, 17/17 packages.
+  - Exception, ft-8f3c: 16/17. `tests/stress` failed only `TestWitnesses/lk_wit_maplookup` (a race the runtime did not convict). That witness passed 30/30 isolated on both base and the branch, and the full `tests/stress` rerun passed. It is the load flake tracked by ft-a0d4.
+- `CGO_ENABLED=0` runs of the touched packages.
+
+**Load-independent performance evidence**
+- ft-5e61, hub-and-chain phase-1 work per function: 4,101 and 16,389 at f0dea98 (quadratic), now 3.0 at 4k/16k/65k.
+- ft-420d: plan work is 21 per closure at 500/2,000/8,000 closures.
+- ft-8f3c: exit-path analysis costs 2.50 units per block at 1,401 and 21,001 blocks.
+- ft-fe6e: with the cap, `nestedClosedSrc` is linear (1,286 → 10,386 at depth 25 → 200).
+
+**Adversarial breaks found and fixed (23 in total, counting each regression class once)**
+
+| Card | Breaks |
 |---|---|
-| `cargo build --release && cargo test --release` (rust/) | ok, 21 tests |
-| `go vet ./...` | clean |
-| `go test ./... -count=1`, cgo | 15 of 17 packages with tests `ok`. `passes/ownership` hit `go test`'s default 10-minute timeout. `tests/stress` failed `TestScale/send/use_pairs_in_one_function`. |
-| `CGO_ENABLED=0 go test ./... -count=1` | 16 of 17 `ok`; `passes/ownership` hit the same timeout |
-| `go test ./passes/ownership -count=1 -timeout 60m` | ok in both engines (571 s cgo, 548 s without). Main's FINDINGS.md also runs with `-timeout 60m`. |
-| `TestScale` repeated | Passes alone in both engines with a growth exponent of about 2. It failed 1 of 3 further runs (12.4× from N=200 to N=400, bound 10×). Over 8 interleaved rounds against the base `9161d81`, N=400 took 85–119 ms on `main` and 88–104 ms on the base, and every round passed. In 4 further interleaved rounds of the whole `TestScale` at load 54–63, both passed every round, with N=400 at 80–108 ms on `main` and 80–120 ms on the base. **Inferred:** a wall-clock ratio that spikes under contention. The base was never seen to fail, but I could not reproduce the failing condition on demand, so a small regression is not ruled out. Noted on ft-a0d4. |
-| Checker fingerprint | `ea4d532b03a3c903`, the same as main's FINDINGS.md |
+| ft-f2e5 | 4, plus 1 found in review |
+| ft-5e61 | 4, plus 1 soft spot |
+| ft-420d | 2, including a false negative (named results) |
+| ft-c7dd | the regression class (§4) |
+| ft-8f3c | 1 class: a new miss in 10 infinite-loop shapes |
+| ft-fe6e | the nesting stop, plus the ft-420d retDom bug |
+| ft-c37e | 5 fail-open stamp cases, plus a doc overclaim |
+| ft-6d5a | 1: the loop twin |
 
-The acceptance tiers were not run at `78f0879`; their last run is the one below.
+**Stress ledger at the Stack B tip (run2/6d5a):** 644 hits, 183 known misses, 46 known FPs, fingerprint 1694ac132e12f19b.
+- Moves from 627/173/46: +14 MISS markers (ft-c7dd), −4 promoted HIT (ft-fe6e), +13 HIT (ft-8f3c unwind shapes), and FP markers added and then cleared (ft-8f3c).
 
-### Final verification of the integration branch (verified)
+## 2. Benchmark deltas
 
-Run on `run/integ-1111` at `25779ca`, with every lane merged, on 2026-11-11 from 16:12 to 16:18, at load average 55–84.
+**Wall-clock was not used as evidence (Fable veto).** Load averages ran at 13–160 during the run.
 
-| Check | Result |
+| Card | Measure | Before | After |
+|---|---|---|---|
+| ft-5e61, Go oracle | allocs/op, 200 funcs | 87,126 | 85,413 |
+| ft-5e61, Go oracle | allocs/op, 50 funcs | 18,977 | 17,954 |
+| ft-5e61, Go oracle | B/op, 200 funcs | 5.70 MB | 5.60 MB |
+| ft-5e61, Go oracle | B/op, 50 funcs | 1.24 MB | 1.18 MB |
+| ft-5e61, Rust engine | allocs/op, 200 / 50 funcs | 8 / 7 | 8 / 7 |
+
+- The benchmark is `SolvePackageAB`, interleaved, 6 runs per side.
+- **Lowering changes (ft-420d, ft-c7dd, ft-8f3c, ft-fe6e, ft-6d5a): cost is unmeasured.** No lowering benchmark exists. Their only cost evidence is the deterministic work counters in §1, which show linear growth. The checker self-run output is unchanged, but its wall-clock was not compared.
+- CPU-profile attribution: the new code is at most 0.4% of samples, and the indicative oracle wall-clock rise was noise.
+- No other card touched a benchmarked hot path. Their work counters are listed in §1.
+
+## 3. Deferred or blocked cards, and why
+
+| Card(s) | Reason |
 |---|---|
-| `go vet ./...` | clean |
-| `cargo test --release` (rust/) | ok, 21 tests |
-| `go test ./... -count=1`, cgo (Rust engine via gusset) | all 15 packages with tests `ok` |
-| `CGO_ENABLED=0 go test ./... -count=1` (pure-Go oracle) | all 15 packages with tests `ok` |
-| Stress ledger (`go test ./tests/stress -run '^TestStress$' -v`) | PASS: 602 hits locked, 187 known misses, 46 known false positives, 0 crashes, in 142 packages and 133 roots |
-| Checker fingerprint (`bash tests/stress/fingerprint.sh`) | `77f03b52f18b13af` |
-| `bash tests/run_acceptance_tests.sh` | PASSED, 12/12 tests, 64 `want` lines |
+| ft-6021, ft-a807, ft-e69e, ft-1f84, ft-4cd8, ft-697e, ft-8462 (imm half), ft-d71c | `passes/ownership/**` and `internal/kinds/**` are held by the antigravity lanes (`swarm/arch`, 5 unmerged commits; `swarm/integrate`), and gocap-55 commits ownership work to main. |
+| ft-e203, ft-32cd | `cmd/gosree-corpus/census.go` is held by `swarm/census`, and main changed it again during the run (9f4c592). |
+| ft-bc5b | **Deferred (Fable).** Criteria 1–2 triage ownership output that the pending merges will move, and gocap-55 is still rewriting the record. Resume once swarm/arch and swarm/integrate land and gocap-55 goes quiet.<br>Criterion 3 was checked read-only on `run2/5e61` (go1.27.3): ScholarLM bb60b53 with tests ran with rc 0. `internal/wisdev [wisdev.test]` was analysed (1,529 transfers, no refusal). Max RSS was 8.4 GB (footprint 14.4 GB) and runtime 39.7 s, both under load (verified). |
+| ft-a0d4 | Split (Fable). The exit-code table was done: 108 runs, no contradiction with the docs (verified). RB-JSONDUP is fixed and locked (TestVetParity runs and passes, verified).<br>ER-23 is deferred: its doc fix lands in files held uncommitted by session 45c62196. The timing items wait for an idle machine. The errflow items are obsolete.<br>The `lk_wit_maplookup` witness flaked twice in full-suite runs. It passed 30/30 when isolated, both on base and on run2/8f3c.<br>This card could not be logged, because `gitpulse_complete_task` accepts only in_progress/review/done. |
+| ft-7fe7, ft-11eb, ft-d120 | Owner decisions. |
+| ft-238f | Push: ask-first. |
+| ft-264e | Roadmap: needs build/bundle/leave decisions. |
+| ft-eddc (new) | gusset-level fix plus a pin bump: owner and gusset lane (Fable). |
+| ft-79c7, ft-e92e (new), ft-fe6e remainder | Design follow-ups. Path keying needs per-store versioning; the replay depth needs an Euler-interval redesign. |
 
-Earlier runs of the same suite:
-- `6b401b9` (three lanes merged): one failure, `passes/ownership` `TestReleaseSummariesRecursiveAndClosureDiamondFast` ("took 3.330249459s (want < 2s)"). That package was unchanged on the branch, and the test passed 3 of 3 times alone on both the branch and the base. It was a wall-clock assertion under load, and ft-b6a2 replaces it with step bounds.
-- `dfa778d` (five lanes merged): all ok.
+## 4. Two corrections the run made to its own work
 
-My card summaries for ft-d323, ft-8e79, ft-3b3c and ft-f138 say "16/16 packages". The correct figure is 15 packages with tests.
+**(a) The ft-c7dd regression.**
+- The first ERR005 attempt was built from a brief that required untracked shapes to "keep reporting where a write may have happened". Those shapes were silent on the tip, so the rule manufactured reports.
+- The adversarial pass found 10 new FPs, 3 new misses, duplicates and quadratic nesting.
+- The orchestrator attributed each break to a commit by running the Break tests on archives of each commit. ERR003 was clean; path keying and replay owned the breaks.
+- Fable ruled: no history rewrite. The attempt is parked as `run2/c7dd-err005-wip` (beb8a61), and ft-c7dd shipped its ERR003 half only.
+- The ERR005 work was redone in ft-fe6e under the invariant that an untracked shape stays identical to the tip in both directions, with hard stops. That round shipped clean.
 
-The stress ledger changed only in ERR005: 5/0/0 became 7/1/1, all from the new root `er_w_rangecapture`. No existing marker changed. `tests/stress/FINDINGS.md` was re-counted at this tip (`ab202f2`).
+**(b) A latent ft-420d bug found after review.**
+- The ft-fe6e lane suspected that `parentIndexFor` reset `retDom` after it climbed to nil. The orchestrator verified it with `ssadump`: go/ssa puts the Recover block (no idom, ends in `return`) before the other returns.
+- A first fix (sticky nil) disabled ft-420d's plan for every function containing a defer. It was refined to exclude the Recover block. Per go/ssa's `createRecoverBlock`, its Return only loads the result allocs, which the plan already excludes.
+- Tests: F is rejected, G is accepted, and G failed first.
+- The fix was merged forward through the stack with merge commits. No concrete false negative from the old bug was demonstrated.
 
-## 2. What each task changed
+## 5. Toolchain break: Go 1.27.4 (ft-eddc14e5, p1)
 
-### ft-d323: safeerr
+- **Upgrade:** `/opt/homebrew/bin/go` moved to go1.27.4 at 23:19 on 2026-11-12 (verified: Cellar timestamps).
+- **The check:** in 1.27.4, `cmd/go/internal/work/security.go` recursively scans every `#cgo -L` directory and refuses archives with LTO/bitcode sections (verified by reading the source).
+- **The archive:** `libgusset.a` carries `__LLVM,__bitcode` (otool, verified). Every cgo build of gosree fails, including on unmodified `main` (verified). The bitcode probably comes from the prebuilt std rlibs (inferred).
+- **CI:** it resolves the newest 1.27.x and is likely affected too (inferred, not run).
+- **Fable ruling:**
+  - verify with go1.27.3 by absolute path;
+  - never bypass the check;
+  - the fix belongs to gusset (another session is active there), and adopting it is a pin bump that needs owner approval.
 
-**Solver lane** (`run/d323-solver`: a6693fc, 3c9abd8, f208c7c, 3ca416b)
-- **C1, verified.** Reproduced. Each function now has a state budget, `MaxStateCells = 2^23` (blocks × slots). The encoder and both decoders enforce it. A Rust allocation failure becomes `SolveError::AllocationFailed` instead of an abort. At the budget, the Rust engine uses about 0.9 GiB and the oracle 1.3–1.6 GiB.
-- **H3.** Tuples that meet in one phi and are bound in mutually unreachable blocks share one identity, at most 64 per class.
-- **M2.** The no-cgo `Solve` runs encode → SolveFrame → decode, so the limits hold in both builds.
-- **L2.** The call-graph sweep cap is the function count + 1, with dirty-flag re-solving. The cap error is kept as an invariant.
-- **L3.** The generator is extended, `FuzzDecoders` is added, and Rust gets random frames.
-- **H1. Corrected:** not fixed by this run. H1 does not reproduce at the starting point `9161d81`, because the earlier commit `87e48f5` had already fixed it. I checked this with real runs on the base and on the integration branch in both engines. The lane's parity test passes on the base too, so it guards H1 but does not prove a fix.
+## 6. New cards filed
 
-**Front-end lane** (`run/d323-frontend`: fd69d9a … fb3fb14)
-- **H2.** Range-over-func bodies are scanned.
-- **H4.** An implicit return, including in yield functions, counts as a return for deferred closes.
-- **M1.** A concrete error pointer is observed at both its root slot and its own slot.
-- **M3.** The shadow scan and block lookup are linear: N=1000 visits dropped from quadratic, and a bounded-work test guards it.
-- **L1.** Same-line matching is deterministic and restricted to calls that can be the AST entry.
-
-**Docs.** `docs/ERROR_DISCIPLINE.md` states which limits hold without cgo.
-
-### ft-8e79: corpus, erase and acceptance tools (`run/8e79-cmd`, 11 commits)
-- **Census.** Type cycles resolve as one Tarjan component, so row order cannot change a class.
-- **`-annotate` and archive extraction.** Both go through `os.Root`. A path is refused if it is absolute, has backslashes, `.`/`..`/empty elements, is not local, passes through any symlink element, or is not a regular file.
-- **`gosree-erase`:**
-  - `-w`/`-o` combined with `-l`/`-d` exits 2. Stdin panics are recovered (exit 1).
-  - Erasing an inline directive never joins two tokens. CRLF block ends and lone-CR line directives are handled.
-  - `-verify` gets a 30 s deadline per directory, can be interrupted, names excluded and `_test.go` files as "not compile-verified", and keeps rc/devel language versions.
-- **`gosree`:**
-  - Unit-checker mode needs exactly one positional `.cfg` regular file.
-  - A wildcard that matches no package gets a stderr warning, from one bounded `go list` that honours `-tags`.
-- **Acceptance script.** A tier that ran nothing fails the run, `--json -v` keeps stdout pure, and `GOSREE_ACCEPTANCE_FILTER` is added.
-- **Docs.** The documented CLI behaviour was observed with real runs before it was written (`1a81492`).
-
-### ft-b6a2: ownership and borrow (`run/b6a2-ownership`, 12 commits)
-- **CAP003.** Bound closures are looked up by `*types.Var`, memoised. Shadowed variables, field selectors and sibling scopes stay silent, and SAFE002/003/004 are no longer hidden behind a false CAP003.
-- **Determinism.** Map-ordered first matches are sorted; 20 runs gave byte-identical output.
-- **imm and handlers.** The imm 16-type cap is removed, and `handlerRoots` follows every return. A 24-deep imm chain and a handler factory with 9 early returns are now found; the base missed both.
-- **Lockset caps.** A test seam (`ObserveRelease`) shows the 8-step and 32-release caps being reached. The wall-clock assertion is gone.
-- **Fact decoder.** Bounded, with a fuzz test. The adversary's 22 corrupt payloads cause no panic (the base panics on 2); fuzzing ran 2.3M executions.
-- **Borrow findings with no position** are reported at an enclosing position.
-- **Shared-load hatch use** no longer depends on call depth. Of 10 synthetic-function shapes tested, none lost a HIT.
-- **Init-only package variables whose memory escapes** are no longer exempt.
-  - The adversary found a false positive here: a table that is only logged or printed lost its init-only status. It is fixed in `b1c8585`.
-  - Printing calls now count as escapes only when a type they reach has `String`, `Error`, `Format`, `GoString` or `Write`, or is an interface.
-  - I checked four probes with real runs: a plain printed map is clean; an element type with `String` and a global used as an `Fprintf` writer still escape (fail closed); a locally built `[]any{g}...` is clean.
-  - **Second adversary (`404bb00`), one BREAK.** A table stored into a `[]any` through a slice of its array (`s := []any{1, 2}; s[0] = g; fmt.Println(s...)`) went unreported, though `aa6d62f` reported it. `formatOperands` read only stores made through the array's own element addresses. The other session fixed it after the merge (`9823ff0`, section 10). Its 50-case table of shapes that must still report or must stay clean passes.
-  - **Pinned as pre-existing, not fixed:** a direct `keep = g` to another package variable is never reported. Because the print no longer marks `g` as mutated, `fmt.Println(g); keep = g` went from reported to silent; the root miss predates this run. A helper that stores into the slice before the spread is also missed.
-  - **Speed fix, corrected.** `60968b7` skipped the escaped-variable scan in any package with no static call to a freezing publisher. I approved it as sound, and I was wrong: a freezing publish through an interface has no static callee, so in such a package the scan was skipped and SAFE002/SAFE004 were lost. The other session found this and replaced the gate with a scan built on first use (`16b0506`). I reproduced the failure: `TestEscapedTablePublishedByEveryRoute/interface` fails at `0cc9243` (the merge with `60968b7`).
-
-### ft-3b3c: ERR005 through captured resources (`run/3b3c-errcheck`)
-- **Fix.** Inside a closure, every load through a captured variable (a pointer `*ssa.FreeVar`) shares one written flag. Nilness stays per load, so captured `err` variables are unaffected: ERR001–ERR004 output is identical before and after, in both engines.
-- **Adversary break, fixed.** A false positive after reassigning a captured resource. A direct store now resets the flag (`9244bb2`).
-- **Second adversary (`95fa488`), one BREAK, fixed.** `9244bb2`'s reset lost a true positive: `w` written, `other` written, `w = other`, then `w.Close()` with a write after it. A store through a captured variable now carries the stored value's written state; error-typed values keep the plain reset (`dbef4bf`). The same change fixes four misses that predate this run, all now `want "ERR005"`: a written value stored into a never-written `w`, and an `os.Create`/`os.OpenFile` result stored into a captured variable and closed unwritten.
-- **Self-probe of `dbef4bf` (verified, both engines).** A captured read-only `os.Open` result with `defer Close`, a captured parameter that is closed, and a captured `get()` result with `defer Close` give no ERR005. The only finding is a pre-existing ERR002 on `f, _ = os.Open(p)`, which is correct.
-- **Range-over-func.** A `defer` in a range-over-func body runs at the enclosing function's return (Go spec; checked with a program). A write after the loop is therefore a real miss, recorded as `MISS(ERR005)`, not documented as intended.
-- **Equivalence.** The full-root stress dump is identical to `6b401b9` in both engines.
-
-### ft-f138: census edges (`run/f138-census`)
-- **Fix.** `reach` follows generic type arguments and the elements of arrays, slices, map keys and values, channels and pointers. Opus review sent it back twice, fixing a lost X class and type arguments lost through an interface store. The adversary found no break.
-- **Adversary checks:**
-  - Termination: recursive generics take under 1 ms, depth 200 under 0.5 s.
-  - Order: 59 row orders gave the same result.
-  - 37 of 42 ordinary shapes are identical to `6b401b9`; the 5 that differ are intended.
-- **ScholarLM re-measure (verified).** Re-measured at `bb60b53` from an archive of the repository, read-only. `docs/ROADMAP.md` got a dated paragraph (`dfa778d`), and the original figures stay as history.
-  - 264 of 324 hatches (81.5%) reach a post-construction write, up from 257 (79.3%).
-  - The frozen rule clears 1 of 324, down from 2.
-  - The failure condition still holds: 240 of 244 big closures.
-  - The refuter still does not fire: 18 of 261.
-  - The 53.2% and 11.6% bounds were not re-derived.
-
-## 3. Deferred or blocked
-
-| Task | Why it was not worked |
+| Card | Title |
 |---|---|
-| ft-a2b39db3dea40ab9a300da2dbac2d304: merge integ4 | Blocked: `build/lanes/integ4` no longer exists, and the card itself suggests closing. Owner decision. |
-| ft-9a580082245452952a2f830a337a678e: errcheck vs errflow | Owner decision. `passes/errflow` exists nowhere, so this run worked on errcheck (decision 2, section 6). |
-| ft-7fe7a91f9e20940d141ea2dc88673908: owner rulings | Owner decisions only. |
-| ft-264efe1b263705659db4699f0709d81a: new rule families | Needs scope decisions. |
-| ft-238fbb74c2baffa906e274420834bffa: publish the rename | Pushing main needs owner approval. |
-| ft-bc5b3fa7611d582daa70289cfe650758: ScholarLM re-triage | Held by another lane. It committed `9161d81` on main without moving the card, and has uncommitted edits to `refservice/scholarlm-bb60b53.md`. |
-| ft-a0d4836d4a0f3ee61362174f62d2b379: flaky and unverified results | Needs an idle machine; load stayed between 15 and 100 all day. Several of its checks name `passes/errflow` and `gocap`, which no longer exist. One flake it describes is removed by ft-b6a2. |
-| ft-d71ccd659d9277a9e1cc00c3b454cfb0: 57 misses and 24 false positives | Its ownership and borrow files carry uncommitted edits in the main checkout from another session, so they count as held by another lane. Its ERR misses share `lower.go` with ft-3b3c. Three subtasks were filed under it (below); ft-e203 belongs to ft-f138. |
+| ft-32cd98a3 (p3) | census witness text and reason order differ between runs of identical code |
+| ft-eddc14e5 (p1, high) | cgo builds fail under Go 1.27.4: libgusset.a carries `__LLVM,__bitcode` |
+| ft-6d5a784f (p3) | ERR003 message double-quotes a local variable name. **Fixed in this run (review).** |
+| ft-fe6eb6d8 (p2) | ERR005 written state across closures and field paths. **One bounded round in review; remainder open.** |
+| ft-c37ee4e9 (p3) | module-report gosree_commit names the working directory's checkout. **Fixed in this run (review).** |
+| ft-79c70141 (p3) | ERR005 closure replay: quadratic work in nesting depth below the 16-level cap |
+| ft-e92e722c (p2) | ERR005 path keying with per-store versioning, and the remaining MISS(ERR005) closure and field shapes. Its spec is `run2/c7dd-err005-wip`. |
 
-## 4. New tasks filed
+## 7. Fable's decisions
 
-| Task | Parent | What it covers |
-|---|---|---|
-| ft-f138c1b5ed039f7e77ec140fdaa3e667 | ft-8e79 | Census edges (worked this run) |
-| ft-3b3c483abe2170060cf568b8edc238a5 | none | ERR005 through captured resources (worked this run) |
-| ft-420d34acafa7bb07f8a719084e83a460 | ft-d71c | ERR002 false positive when a closure assigns a captured `(v, err)` and the caller checks `err` |
-| ft-c7dd9d94a3f958ad6ed0e0dee42804e4 | ft-d71c | Existing ERR005 misses across closures and captured pointers; ERR003 false positive on `_, _ = w.Write(nil)` in loops. (The captured `os.Create` shape it also listed is fixed by `dbef4bf`.) |
-| ft-e203e72763917672ec6ce037874fdbb7 | ft-f138 | Census: hatch roots that are not structs, and module interfaces inside containers |
-| ft-e69ea44b06cb32ef3b1cafe6a698e46e | ft-d71c | Existing ownership and borrow misses and false positives from the b6a2 adversary; validation when the consumer reads a decoded FuncFact |
-| ft-1f846b0057d8860989a544ac56143014 | none | Make the escaped-variable scan cheaper without losing interface publishes (the +6.2% in section 5) |
-| ft-8f3c2efdcc0d768594749f824c792580 | ft-d323 | ERR005 after `os.Exit` or `log.Fatal*` is a false positive: mark it `FP(ERR005)`, then fix (Fable ruling) |
-| ft-f2e5a81c4da817e8cab8476b2b70aaa5 | ft-8e79 | `extractTar` skips symlink entries and counts them on stderr (Fable ruling) |
-| ft-697e794bb0d8b1e1996f7e2558b24618 | ft-b6a2 | SAFE007 at the lockset release cap says the cap widened the release (Fable ruling) |
-| ft-4cd870d767714ea813e28d251686289d | ft-b6a2 | Unify `sourceFuncs` and `allPackageFuncs` (Fable ruling) |
+1. **Disk.** Do not wipe the shared GOCACHE: it reaches only 12.7% free and costs live sessions. Proceed on the 40 GB floor; halt below it. *(The run halted once, at 38 GiB, and resumed at 56 GiB.)*
+2. **Stacks.** Stack A is 5e61 → bc5b; Stack B is 420d → c7dd → 8f3c. Run one safeerr card at a time. Test a throwaway merge of the two tips before review. Reproduce inbox cards first.
+3. **ft-f2e5 criterion 2.** All three f138keep files are in scope, with census-after2 as the reference. *(Census verdicts reproduce; witness text does not: ft-32cd.)*
+4. **ft-a0d4.** Split it; the errflow items are obsolete.
+5. **Vetoes.**
+   - No wiping of caches the run doesn't own.
+   - No edits under held paths.
+   - No timing claims.
+   - No run records on main.
+   - No card marked done.
+6. **MaxDecodedBytes.** Keep 2 GiB, under four conditions, all met (wisdev modelled at 0.023 GiB).
+7. **Go 1.27.4.** Verify with 1.27.3 and label; do not fix it in this run.
+8. **ft-c7dd.** Split it with no rewrite. `MISS(ERR005)` stress markers are required (fixture comments do not count). It goes to review with its ERR005 half unfixed.
+9. **ft-8f3c.** Loop shapes whose only termination is a process exit are silenced (H4). Pure infinite loops keep their report, as a scope limit.
+10. **ft-bc5b.** Defer it, with a read-only criterion-3 check.
+11. **ft-fe6e.** Add a nesting cap (not a redesign, not a park) and file the redesign. Fix the ft-420d retDom bug with a failing test and merge it forward.
 
-Note added to ft-a0d4 (flaky tests): the `TestScale/send/use` wall-clock ratio, and `passes/ownership` exceeding the default 10-minute timeout under load.
+## 8. Owner decisions pending
 
-## 5. Benchmarks
+- **Merging the review branches** (order in §1). Each FINDINGS.md fingerprint cell is correct only on the Stack B tip. After both stacks land, set it to `c4888388dc458b33`.
+- **`go run` and gosree_commit (ft-c37e).** The documented `go run ./cmd/gosree-corpus …` invocation (6 places across README, docs and the refservice record) now records `gosree_commit: "unknown (no vcs stamp)"`, because `go run` does not stamp vcs by default.
+  - Verified on a temporary worktree of 1e216e9: `go run -buildvcs=true …` and `go build` record `1e216e9`.
+  - Choose one: change the documented command (add `-buildvcs=true`, or build then run), or accept no-stamp and cite commits by hand.
+  - Most of those docs are held by other sessions.
+- **The gusset Go 1.27.4 fix** (ft-eddc14e5) and the pin bump that adopts it. Until then, nothing can be verified with cgo on the default toolchain.
+- **Deleting `run2/c7dd-err005-wip`.** Keep it until ft-fe6e's remainder no longer needs it as a spec.
+- **Two sentences withheld from held or recently edited files:**
+  - extractTar, for README/TOOLING: the text is in commit a6827a5's message.
+  - The gosree_commit convention, for the refservice record header: the text is on ft-c37e.
+- **`go clean -cache`.** The shared Go build cache is about 45 GB.
+- **Existing owner-decision cards:** ft-7fe7, ft-11eb, ft-d120, ft-238f.
 
-Benchmark baseline: `wt/base` at `9161d81`, kept for this comparison.
+## 9. Storage
 
-| Change | Measurement | Verdict |
-|---|---|---|
-| d323 solver (state budget, tuple merge, dirty flags) | The lane's `BenchmarkSolvePackageAB` arms spread up to 8× under load, so they are unreadable. The adversary re-ran both versions on identical frames, alternating runs, and got **+2% on the fastest run**, inside the **12–20% noise between repeated runs of the same build**. | No regression over 5% shown. A +2% figure inside 12–20% noise is a justification, not a measured pass. |
-| d323 shadow scan (M3) | `BenchmarkShadowScan`, fastest of 6 pairs: N=100 2.0 → 0.11 ms, N=1000 231 → 0.57 ms, N=5000 8938 → 4.5 ms. The spread was 51–482% under load 90–180. | Faster by orders of magnitude. The per-run timings are unverified; the deterministic visit-count test is the evidence. |
-| ft-3b3c | Not benchmarked: one type assertion at write and close sites only, nothing per load. | Inferred no regression. |
-| ft-8e79, ft-f138 | No benchmark covers these paths (CLI and corpus tools). | Not claimed. |
-| Waves 1 and 2 before b6a2 (`6b401b9`, `dfa778d`) | CPU of the stress ledger (method below), 8 rounds: −1.8% and +0.6%; A/A −0.1% | No regression |
-| ft-b6a2 as reviewed (`b1c8585`) | 10 rounds at load 60–90: +5.8% paired median, slower in 10/10, A/A 2.5%. Bisect, 8 rounds: `e32af00` −0.4%, `cb22145` +1.0%, `d9d8f3a` +9.6%, `b1c8585` +8.0%. The lane profile puts the cost in the escaped-variable scan, which builds about 352 package graphs, about 0.38 s per run. A re-measure at load about 14 gave +2.5%. | Over 5% at high load; the cause was found |
-| `60968b7` (lane speed fix) | −2% against the base at load about 14 | **Withdrawn:** unsound, removed on `main` by `16b0506` (section 10) |
-| `9823ff0`: the merge with both review fixes. It also contains the main checkout's checkpoint `2fd93f0`, about 7,400 lines of another session's ownership and borrow work. | First series, 10 rounds, 2026-11-12 00:05, load 50–100: +6.2% paired median (range −0.4 to +8.9%, slower in 9/10); A/A −0.5% (range −6.4 to +5.5%). Second series (below): +5.1%, slower in 10/10. | Not this run's alone; see the next two rows |
-| **This run only (`e34e37c`, `run/integ-1111`, no gate)** | Second series, 10 rounds, 00:16–00:27, load 40–60, five arms per round (base, `e34e37c`, `2fd93f0`, `9823ff0`, base): **+6.2% paired median** (range +1.7 to +11.6%, slower in 10/10). Medians: base 5.88 s and 5.77 s, `e34e37c` 6.30 s. A/A −2.0% (range −5.7 to +1.5%). | **Regression over 5%.** Justification and follow-up below. |
-| The other session's checkpoint alone (`2fd93f0`) | Same series: +3.5% (range −3.2 to +6.4%, slower in 8/10) | Not this run's work; recorded so the merged figure can be read |
+**Free space on the data volume (926 GiB):**
 
-**Method.** CPU time (user + sys) of `go test -c ./tests/stress` binaries running `-test.run '^TestStress$'`. Every arm runs from `wt/base/tests/stress`, so the input is identical; the newer binaries report FAIL there because their markers differ, but they analyse the same packages. Wall-clock time was unusable at this load. Arms are interleaved round by round, with a second base arm (A/A) in each round. Logs: `logs/bench-*-cpu.txt` in this run's scratchpad.
-
-**Justification for the +6.2%.** The measured part is that this run's own work (`e34e37c`) costs +6.2% on the stress ledger. That the cost is the escaped-variable scan is **inferred**, not measured at these commits. The evidence is the 2026-11-11 bisect (`d9d8f3a`, which adds the scan, +9.6%; the commits before it within ±1%), the lane profile (about 352 package graph builds, about 0.38 s of a 5.8 s run, about 6.5%), and `60968b7` measuring −2% when it skipped the scan. The scan is what makes ft-b6a2's init-only fix sound: a package table whose memory escapes is no longer exempt. The one cheaper version measured, `60968b7`, lost findings for publishes through an interface. Speeding the scan up without losing findings is filed as ft-1f846b0057d8860989a544ac56143014. Whether the regression may stand until then is listed in section 7.
-
-## 6. Fable (advisor) decisions
-
-1. **Wave 1 layout.** ft-d323 split into solver and front-end lanes, plus ft-b6a2 and ft-8e79, on branches with no shared files. The integrator owns `FINDINGS.md`, `RULES.md` and `README.md`. The full suite runs on one integration branch before anything moves to review.
-2. **ft-9a58.** Work on errcheck anyway, because `passes/errflow` does not exist.
-3. **ft-bc5b.** Deferred, because another lane holds it. `MaxFuncs` was left untouched.
-4. **ft-8e79 exit codes.** Changes made as its acceptance criteria prescribe. The `-json` exit status was left alone (ft-7fe7 ruling).
-5. **b6a2 overlap.** b6a2 continued to review on its branch, even though the main checkout has uncommitted edits to the same files. Merge order is the owner's call.
-6. **Wave 2 scope.** Two lanes: ft-3b3c (only `lower.go`, because `errcheck.go` is dirty on main) and ft-f138. Wave 1 was closed on the verified integration tip first. ft-a0d4 and ft-d71c were deferred for the reasons in section 3.
-7. **Range-over-func after-loop write.** Check the Go spec first. Because the defer runs at the enclosing function's return, the miss is recorded as a MISS, not documented as intended.
-8. **After the merge.** Do not rewrite `main` or `run/integ-1111`. The corrected report goes on its own branch, `run/report-1111`, starting at `main`. The 5% check is re-measured on the merged work, and the commits that are not this run's are measured separately. A regression over 5% is written up with its cause and a follow-up task; it is not reverted here, because reverting would bring back the escaped-table soundness bug.
-9. **Before declaring done.** No card summary claims a suite result I did not see. The `TestScale` comparison runs the full test, not one subtest. The benchmark separates this run's commits from the main checkout's checkpoint (`2fd93f0`) that the merge also brought in.
-10. **Owner decisions delegated (2026-11-12).** You asked Fable to make the decisions listed in section 7. The rulings: hold the push behind stated conditions; accept the +6.2%; merge this report's branch; rule on d323, 8e79, 3b3c, f138 and b6a2 as in section 7; close ft-a2b3 and ft-9a58 with evidence; sort ft-7fe7's items by three rules. Cleanup: delete adversary branches with `git branch -d` only; keep lane branches and `run/integ-1111` until their cards leave review; one literal `rm -r` each for `bin/` and `scratch/`. Force-push, history rewrite and remote-branch deletion still need you.
-
-## 7. Owner decisions
-
-1. **b6a2 overlap with uncommitted work in the main checkout. Settled by the merge:** the other session committed that work as `2fd93f0` before merging this run's branches. The original note follows.
-   - Another session (likely Claude Desktop pid 20696) has about 2,000 lines of uncommitted edits to the files b6a2 changes: `passes/ownership/{contracts,globals,graph,ownership,summary,check,handlerwrite,imm,lockset,spawn}.go`, `passes/borrow/{check,storage}.go`, and new `*_caps_*`, `*_nopos_*` and `locate_*` tests.
-   - These look like fixes for the same card items. Which version lands is your decision, item by item, and `globals.go` will conflict.
-   - Another session has also created `/Users/bharath/Code/devtools/gocap-worktree` (branch `harden/gosree-gates`) at this run's integration commit `6b401b9`, with b6a2-named test files staged. It was not touched.
-On 2026-11-12 you asked Fable (the advisor) to rule on items 2–10. Each ruling is recorded here and in section 6, item 10. Rulings that need code became cards; no checker file was edited.
-
-2. **b6a2. Ruled.**
-   - **Lockset wording:** the message must say the cap widened the release, not name an unlock site. Carded.
-   - **Hatch span:** stands as merged and documented.
-   - **`sourceFuncs` and `allPackageFuncs`:** unify them, as their own card.
-   - Both cards wait until the live session in `passes/ownership` releases those files.
-3. **d323. Ruled.**
-   - **H4:** ERR005 on a function ending in `os.Exit` or `log.Fatal*` is a false positive, because deferred calls do not run after them. They do run after `panic` and `runtime.Goexit`. Carded: mark the shape `FP(ERR005)` first, then fix. The marker is not added in this report's branch, because it changes the ledger.
-   - **M1:** stands as merged.
-4. **8e79. Ruled.**
-   - **Exit code:** keep exit 2. It is a usage error, and the card and the docs say 2.
-   - **`extractTar`:** skip symlink entries and count them on stderr. Carded, with byte-identical `f138keep` census files as the acceptance test.
-5. **3b3c. Ruled:** `replacedByCall` stays a known false positive.
-6. **f138. Ruled.**
-   - **Accepted:** the `chan B` and `*atomic.Pointer[B]` reach.
-   - **`Box[int]` overcount:** folded into ft-e203.
-   - **Still open:** the `refservice` note, which belongs to the ScholarLM lane.
-7. **Merging. Corrected:** another session has since merged `run/integ-1111` into local `main`. It first checkpointed the main checkout's uncommitted work (`2fd93f0`), so item 1's overlap was settled there.
-   - **Pushing `main`: ruled hold.** Push only under ft-238f, as a plain fast-forward, once all of these are true:
-     - `main` is at a verified tip, and no session holds files in the main checkout.
-     - One run at that tip is green in both engines with `-timeout 60m`, including `tests/stress` under cgo and the acceptance script.
-     - ft-238f's own checks pass.
-   - On 2026-11-12 none of those conditions held. Session `45c62196` was holding `passes/ownership`, `tests/stress` was not green under cgo in a full run, and the acceptance script was not run at `78f0879`.
-   - **Update (2026-11-12, verified with `git ls-remote`):** `origin/main` has since been fast-forwarded to `08bb22f` from outside this run. This run did not run the conditions above at `08bb22f`, so it can't say whether they held. They now apply to the next push. This run still pushes nothing.
-8. **Backlog cards. Ruled.**
-   - **ft-a2b3:** ruled closed. `build/lanes/integ4` does not exist anywhere `rg -uu`, `git branch` or `git worktree` can see.
-   - **ft-9a58:** ruled closed. errcheck is the implementation, and `passes/errflow` does not exist.
-   - The board did not accept a direct move to done for either card; it held both in **review**. The ruling and its evidence are on each card.
-   - **ft-264e:** stays in the backlog, after ft-d71c.
-   - **ft-238f:** carries the push conditions above.
-   - **ft-7fe7:** each item was sorted by three rules: ratify behaviour that is merged and ledger-locked, prefer a false positive to a miss, and keep exit codes and JSON as they are. The item-by-item result is on the card. The items that fit none of the rules come back to you:
-     - The iso-escape form of SAFE002.
-     - Borrow pointer-receiver strictness.
-     - Disjoint-field borrow conflicts.
-     - `//gocap:imm` rejecting interface and func carrier fields.
-     - The scope of the ownerless repeated-callback treatment.
-     - The remaining escape-hatch items.
-     - Write-side-only race accounting.
-9. **The +6.2% CPU regression. Ruled accepted.** It pays for a soundness fix, and the only cheaper version lost findings. It does not gate a push. ft-1f84 goes into the next wave, starting with a profile at `e34e37c`.
-10. **This report's branch. Ruled merge,** after this commit. Before merging, the main checkout must have no staged or modified tracked file, and the collision check for BUILD_REPORT.md must be clear. The merge is fast-forward only, or an ordinary merge if `main` has moved, and it is aborted if any file other than BUILD_REPORT.md would change. **Not merged (2026-11-12, about 00:50):** the main checkout had modified tracked files (`.github/workflows/ci.yml`, `.gitignore`, `PROJECT.md`, `README.md`, `docs/ERROR_DISCIPLINE.md`, `docs/TOOLING_AND_ERASURE.md`, `go.mod`, `go.sum`; another session at work), and `main` had moved to `ae6f578`, so the first condition failed. Merge `run/report-1111` once the main checkout is clean; `git diff main run/report-1111 -- BUILD_REPORT.md` is the whole change.
-    - **Update (2026-11-12): merged on your later instruction** to merge everything cleanly into `main`. The main checkout still had other sessions' uncommitted edits to `PROJECT.md`, `README.md`, `docs/ARCHITECTURE.md` and `docs/TOOLING_AND_ERASURE.md`, plus an untracked `.agents/`, so Fable's first condition still failed. Your instruction overrides it. None of those files is BUILD_REPORT.md, and the merge was a fast-forward that changes BUILD_REPORT.md only. Section 11 has the commands.
-
-## 8. Storage
-
-Free space on `/` (926 GB) through the day:
-
-| Time | Free |
+| When | Free |
 |---|---|
-| 07:04 | 179 GB |
-| 07:22 | crossed 139 GB (the 15% line) |
-| 08:57 | 58 GB |
-| ~14:55 | 49 GB (lowest) |
-| 15:03 | 92 GB |
-| end | 92–101 GB (about 10–11%) |
+| Start, 20:15 | 76 GiB |
+| 20:25 | 67 GiB |
+| ~20:50 | 47 GiB (cleanup trigger) |
+| Before 21:00 | 38 GiB (**run halted**) |
+| 21:02 | 56 GiB (resumed) |
+| 00:03 | 101 GiB |
+| ~03:15 | 71 GiB |
+| ~04:00 | 86–88 GiB |
+| ~05:15 | 191 GiB (other sessions freed space) |
 
-Free space was below 15% from about 07:22 onward and never below 40 GB.
-- **What drove the drop:** other sessions. The largest consumer is `/private/tmp/claude-501/-Users-bharath-Code-devtools-GitPulse` at 67 GB (08:57), which belongs to another project's sessions and was not touched.
-- **This run's peak footprint:** about 1.5 GB (worktrees of about 70 MB each, Rust targets of 66–71 MB each, scratch).
-- **What I can't get back:** nothing this run can delete restores 15%. I proceeded while free space stayed above 40 GB and re-checked before each suite run.
+- **The 15% line (139 GiB):** free space was below it until about 05:15. Nothing the run owned could restore it. The drop came from other sessions: the Go build cache grew from 42 to 45 GiB, other projects' scratchpads held up to 8.5 GiB, and the user's 30 GiB HuggingFace cache was left untouched.
+- **This run's peak footprint:** under 1 GB:
+  - base worktree, about 210 MB;
+  - one implementation worktree at a time with its own Rust target, up to 282 MB;
+  - throwaway merge worktrees with Rust targets, cleaned after each use;
+  - the scratchpad, under 1 GB.
+- **Reclaimed:**
+  - exit-code scratch (~70 MB);
+  - `cargo clean` of w-5e61 (337.6 MiB);
+  - `cargo clean` of five throwaway merge worktrees and of the bc5b-check archive build (≈280 MB each; per-run sizes not captured);
+  - attribution archives;
+  - ScholarLM extracts.
+- **Removed worktrees:** w-f2e5, w-5e61, w-420d, w-c7dd, w-8f3c, w-fe6e, w-c37e and w-6d5a. Each was checked clean except for its untracked `rust/target` symlink. The baseline target was confirmed intact after every symlink removal.
+- **Kept:** the base worktree (benchmark baseline) and every `run2/*` branch (in review, or a spec).
+- **Final cleanup (05:40):** 54 scratch test binaries and the archive copies were deleted, taking the scratchpad from 827 MB to 69 MB (758 MiB reclaimed). The shared Go build cache was not cleaned (Fable). Free space at the end: 191 GiB.
+- **Run total reclaimed:** about 1.2 GiB measured (758 MiB scratch + 337.6 MiB cargo + ~70 MB), plus unmeasured cargo cleans of six throwaway trees.
 
-Removed by this run:
-- Rust `target/` of each finished adversary worktree.
-- The adversary's baseline copy `d323-base`, and the `d323s` scratch (169 MB).
-- The `f138out` ScholarLM extracts (about 150 MB in total, removed by the lane).
-- Doc-check scratch.
-- After the run, these worktrees: `8e79-adv`, `d323-frontend-adv`, `d323-solver-adv`, `b6a2-adv`, `b6a2-base2`, `3b3c-adv`, `f138-adv`. Each was checked clean before removal.
+## 10. Process notes
 
-`df` moved by well under 1 GB, because other sessions write at the same time. The scratchpad now holds 728 MB.
+- **GitPulse.**
+  - The collision facet came back `ok:false` at the start (deadline expired), and later in the run it scanned every worktree. Collision risk was checked per path before every wave.
+  - A blanket hold on `tests/stress/testdata/**` turned out broader than the evidence and was narrowed to a per-file check.
+- **DevMap.** The `lower.go` and `wire.go` impact walks were truncated, so the safeerr blast radius was treated as unknown and those cards were serialised. The index predates code written in the run, so new symbols are not searchable (a recorded gap).
+- **Write gate.** The GitPulse/MANVI write gate flags the worktree directory `/Users/bharath/Code/devtools/.gocap-run2` and the memory directory as outside the project root. Those writes went through only because the session was in bypass mode.
+- **Lane slips, all corrected and recorded:**
+  - an edit to held docs (reverted);
+  - a brief that over-scoped the stress-testdata hold;
+  - a stray symlink created in the gusset repo (removed and verified absent);
+  - Python used once for a mechanical edit (it does not ship);
+  - an intermediate commit (69eb7b6, parked on the wip branch) whose own tests do not compile.
+- **Platforms.** Every test run was on darwin/arm64.
+  - The only cross-platform check: `CGO_ENABLED=0 go vet ./...` with `GOOS=linux` and `GOOS=windows` (amd64) on the f2e5, c37e, 5e61 and 6d5a tips. All were clean (verified). That excludes cgo-only files.
+  - **No Linux or Windows test run was attempted.** CI runs on Linux.
+  - `extract_links_adv_unix_test.go` carries `//go:build !windows` (verified).
+- **ft-420d acceptance after the Recover-block fix.** The exact change against the adversarially tested 90fa6e9 is on the card. Acceptance narrows for functions with two or more normal returns, and widens for single-return functions with a defer. The widening rests on go/ssa's `createRecoverBlock` reading only the result allocs; it got no adversarial pass of its own.
+- **Corrected timestamps.** Early run-log timestamps that were estimates turned out wrong and were corrected to "not recorded".
 
-After the merge into `main` (2026-11-11 23:10), free space was 55 GB (about 6%), still above 40 GB. These worktrees were removed; each was clean, and its branch is contained in `main`: `3b3c-adv2`, `base-b6a2`, `base-3b3c`, `8e79-cmd`, `b6a2-ownership`, `d323-frontend`, `d323-solver`, `3b3c-errcheck`, `f138-census` and `integ`. Stale test binaries were also deleted. The scratchpad went from 1.1 GB to 321 MB. `bin/` and `scratch/` (about 165 MB of benchmark binaries and profiles) are still there, because the storage hook asks before any `rm -r`.
+## 11. Wave 7 (2026-11-13, 09:55–11:15, on the owner's "Next wave")
 
-After Fable's rulings (2026-11-12, about 00:45):
-- **Directories removed:** `bin/` and `scratch/`, one literal `rm -r` each. The scratchpad is now 156 MB.
-- **Free space:** 214 GB on the data volume (`/System/Volumes/Data`, about 24%). Other sessions freed most of that; this run's deletions were under 1 GB.
-- **Correction:** an earlier message read the system volume `/` and called it "129 GB (10%)". The 10% was that volume's used column.
-- **Branches deleted** with `git branch -d`: `run/3b3c-adv2` (was `95fa488`) and `run/b6a2-adv2` (was `404bb00`), both ancestors of `main`.
-- **Branches kept:** `git branch -d` refused the six round-1 branches `run/{3b3c,8e79,b6a2,d323-frontend,d323-solver,f138}-adv` as not fully merged. Their commits are patch-equivalent (`git cherry`) to commits on their lane branches, but they are not ancestors of `main`. Deleting them needs `-D` and your word. **Update:** they were deleted on 2026-11-12 on your instruction to prune stale branches; see section 11.
+**Pre-wave state (verified).**
+- Nothing had moved: main at `8df1d77`, the antigravity branches unmerged (5/9/2), session 45c62196's docs uncommitted.
+- Load was 77 and rose to 140–170 during the wave. `dev verify` still had no task store.
+- Collisions: 7 of 7 worktrees scanned, none overlapping.
 
-Kept:
-- The lane branches and `run/integ-1111`, until their cards leave review (Fable ruling). They are local and unpushed, and all are contained in `main`.
-- `wt/base` (the benchmark baseline) and `wt/b6a2-adv2` (checked out at `run/report-1111`). The benchmark worktrees `bench-9823`, `bench-e34e` and `bench-2fd9`, along with their test binaries, were removed after the measurements.
-- The two ScholarLM `census.json` files in `f138keep/` (3.8 MB).
-- The shared Go build cache. It is 7.4 GB now; it was 8.6 → 11 GB earlier. It is shared with other sessions, so this run's share cannot be told apart, and it was not cleaned.
+**Fable's wave composition.**
+- ft-8462: the preflight half only.
+- ft-e92e: design-first, with a hard stop before any code.
+- Not ft-79c7.
+- Vetoes: no ft-e92e code, no timing claims, keep the go1.27.3 label, no `imm.go`.
 
-The round-1 adversary branches are merged by content only: `git cherry` shows each commit already on its lane branch.
+| Card | Result |
+|---|---|
+| ft-8462: preflight half | **Review** (rev 4), `run2/8462` (0aafc95) off main. `isMetaCommand` lets the last `-flags` decide. A repeated `-test`/`-NAME` with different values warns. One adversary break (a value-flag argument read as a flag) was fixed at the root: a single `scanFlags` walk now serves seven callers, and the code got smaller. Two exit-status corrections align preflight with the driver; documented codes are unchanged. **Item 1 (`GOSREE_JSON_CHILD` env bypass) is an owner decision:** the variable is documented (README.md:180, TOOLING:79). A contract-preserving fix is proposed on the card. The imm items are still held. |
+| ft-e92e: path keying | **Design approved (Fable), code paused** (in_progress, rev 3), `run2/e92e` (91fad0b). The change set is only tests, testdata and `DESIGN_ERR005_PATHS.md` (verified). Per-store versions of access paths, lowering only: no wire or solver change, and a hand-built IR test agrees in both engines. UNKNOWN is keyed as on the tip. 77 fixtures are pinned. Fable answered six questions: three milestones, K=32 to be measured, the receiver-only Write/Close exemption, maps and slices in the next card. Two hard stops were added. **Resume** when Stack B leaves review, or when the owner says proceed. |
 
-## 9. Gaps and caveats
+**Gate note (ft-8462).**
+- `tests/stress` `TestScale/N_live_//gosree:mut_borrows` failed on a wall-clock ratio: 10.3× against a bound of 10× at load 140–170.
+- Isolated, it passed on base and on the branch, with identical `alloc MB` (7.7/29.2/112.8). The branch does not touch the borrow pass.
+- This is a third occurrence of the ft-a0d4 load-flake class. The first two were `lk_wit_maplookup`.
 
-- **DevMap.**
-  - Every impact and affected-test walk was `walk_incomplete`, because calls through `analysis.Analyzer` dispatch cannot be bound. They give a lower bound only.
-  - After wave 2, the index reported "source tree differs from the indexed generation" (gen 405), because the main checkout is being edited. Graph answers after that point are unknown.
-  - Several lanes did not consult DevMap for their edits; each lane report says so.
-- **Collision checks.** `gitpulse_collision_risk` was run on each lane's files before the lane started. The hooks' own collision scans were sometimes incomplete ("1 worktree(s) were not scanned").
-- **One stalled agent.** The first b6a2 adversary stopped making progress for 53 minutes with no running child process and no commits. It was stopped and replaced, and its unfinished tests were reused.
-- **Clock times.** The working notes give estimated times for some wave-2 steps. This report uses only times read from command output.
-- **Unprobed by an adversary:** `16b0506` and `9823ff0` were written by another session after the merge. I checked them with the full suite at `78f0879` and five extra slice shapes (below), not with a separate adversary pass.
-- **Post-wave checks (2026-11-12 00:30).** `devmap_status`: fresh, generation 511, 220 files, 2,244 symbols, 8,074 edges. `gitpulse_insights`: every facet `ok`, 13 worktrees scanned, none truncated. Session `45c62196` (the one that merged) is still editing `passes/ownership`, so nothing here touches `main`.
+**New owner decisions.**
+- `GOSREE_JSON_CHILD` bypass: change the documented marker contract, or accept it.
+- A sentence for README §4 / TOOLING §1.3.2 documenting the repeated-flag warning. The text is on ft-8462.
 
-## 10. After the merge into `main`
-
-The other session's commits on `main` that change this run's work:
-
-| Commit | What it does | My check |
-|---|---|---|
-| `16b0506` | Removes `60968b7`'s `hasFreezeSite` gate. The escaped-variable set is built the first time `isInitOnlyImmutableGlobal` reads it. Adds `globals_escape_routes_test.go` (direct call, method value, interface, method expression). | **Verified:** the interface route fails at `0cc9243`, the merge commit that still has the gate, so my approval of `60968b7` was wrong. All routes pass at `78f0879`. |
-| `9823ff0` | A slice of a spread array counts as built in place only when it is the printing call's argument and that call is its only use; otherwise it is judged by its type, and `[]any` fails closed. Fixes the b6a2 second adversary's BREAK. | **Verified:** `TestAdv2SliceStoreThenSpreadBreak` passes. Five further shapes are all reported: `copy` into the spread slice, `append` into a shared backing array, a map holding `[]any`, a `make` slice store, and a store through a sub-slice. A plain map handled the same way is also reported. That is a cautious false positive, which predates b6a2 because `aa6d62f` reported every print. |
-
-The later `main` commits (`d754bb7`, `6ca7e09`, `9e5db27`, `b5e77e1`, `78f0879`) come from the other session's own work. They are not part of this run and were not reviewed here, beyond passing the suite above.
-
-## 11. Wind-down, merge and pruning (2026-11-12)
-
-You asked for these steps: let the running agents finish, fix critical bugs, review and verify every branch with Opus, merge into `main`, prune stale and regressed branches, and file what remains as tasks.
-
-**Agents.**
-- This session had no subagents running.
-- Live Claude sessions in this repository (GitPulse insights):
-  - `45c62196`: Desktop, busy, on `rework/not-covered`. It can't be messaged from here.
-  - `b3738d58`: CLI, named gocap-55, busy.
-  - Two idle Desktop sessions.
-- No antigravity, codex, DevCouncil or MANVI session was live.
-- Nothing was killed.
-
-**The split.** gocap-55 was given the same request, so the work was divided so that neither session merges or prunes over the other.
-- **This run:**
-  - merges this report;
-  - prunes the branches and worktrees this run made;
-  - updates this run's cards.
-- **gocap-55:**
-  - reviews, verifies and merges `swarm/errscale` (`80a766b`, safeerr `MaxFuncs` raised to 262,144);
-  - reviews the ownership work after `c147b2a`;
-  - reviews `rework/not-covered` once `45c62196` stops;
-  - fixes anything critical it finds;
-  - prunes `harden/*`, `integrate/2026-11-11*`, `rework/one-tracer` and `swarm/*`;
-  - files the GitPulse tasks for what it finds.
-- Its results are not part of this report.
-
-**Branch census against `main` `08bb22f`** (verified: `git rev-list --count` and `git cherry`):
-- Unique work on only three branches:
-  - `run/report-1111` (this report);
-  - `swarm/errscale` (1 commit);
-  - `rework/not-covered` (7 commits, still being committed to at 10:43).
-- Patch-equivalent only (every `git cherry` line is `-`): the six round-1 `run/*-adv` branches.
-- Everything else is an ancestor of `main`.
-
-**Deleted by this run.**
-- With `git branch -d` (each was an ancestor of `main`):
-
-  | Branch | Tip |
-  |---|---|
-  | `run/3b3c-errcheck` | `dbef4bf` |
-  | `run/8e79-cmd` | `6144167` |
-  | `run/b6a2-ownership` | `60968b7` |
-  | `run/d323-frontend` | `fb3fb14` |
-  | `run/d323-solver` | `3ca416b` |
-  | `run/f138-census` | `dd28df1` |
-  | `run/integ-1111` | `e34e37c` |
-
-- `run/b6a2-ownership` is the regressed branch: its `60968b7` gate lost SAFE002/SAFE004 for a publish through an interface (section 10). The gate is already replaced on `main` by `16b0506`, so deleting the branch loses nothing.
-- With `git branch -D`, after `git cherry main <branch>` printed only `-` lines:
-
-  | Branch | Tip |
-  |---|---|
-  | `run/3b3c-adv` | `7e29113` |
-  | `run/8e79-adv` | `6a8ac00` |
-  | `run/b6a2-adv` | `e4c48f2` |
-  | `run/d323-frontend-adv` | `667c44e` |
-  | `run/d323-solver-adv` | `1dda5ef` |
-  | `run/f138-adv` | `ff8ffec` |
-
-- **Worktrees:**
-  - `wt/base` (the baseline at `9161d81`): the 5% check is finished, and it held only an ignored `rust/target/`.
-  - Two worktrees made for this pass, `wt/base12` and `wt/cand`.
-  - The branch `integrate/2026-11-12` (was `9d3ddd3`): main plus errscale plus this report. It was thrown away, not merged, because errscale is gocap-55's to merge.
-- **Left for after this commit reaches `main`:** `run/report-1111` and its worktree `wt/b6a2-adv2`.
-
-**Not touched, and why.**
-- **Another session's branch or worktree:** `rework/not-covered`, `integrate/2026-11-11-merge`, `harden/merge-main-1111` (`/Users/bharath/Code/devtools/gocap-worktree`), and `45c62196`'s scratch worktrees. `wt/final` has live processes.
-- **Antigravity worktrees `wt/arch` (`swarm/arch`) and `wt/scholarlm` (detached):** they hold uncommitted changes to `passes/ownership` and `cmd/gosree-corpus`. No antigravity session is live, so nobody can say whether that work is wanted. That is your decision.
-- **Remote branches:** `origin` has only `main`.
-
-**Caveat for every cgo build:** the gusset sibling is at the pinned `0ab48ca` but has uncommitted edits, including `crates/gusset/build.rs` and `tools/ci/versions.env`. A cgo build here is not a build of the pinned gusset alone.
+**Storage.**
+- Removed: w-8462 and w-e92e (branches kept), plus 5 scratch binaries (about 72 MB).
+- Free space at the end of the wave: 160 GiB.
+- **Cards in review now: 9.** The 8 from §1, plus ft-8462.
