@@ -749,6 +749,12 @@ func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
 		if _, isRet := blk.Instrs[len(blk.Instrs)-1].(*ssa.Return); !isRet {
 			continue
 		}
+		// The Recover block is entered only by a recovered panic and returns the result cells
+		// (go/ssa createRecoverBlock), which no plan tracks (namedResults). It has no dominator, so
+		// counting it would make every function with a defer lack a return dominator.
+		if blk == parent.Recover {
+			continue
+		}
 		if !seenRet {
 			seenRet, retDom = true, blk
 			continue
