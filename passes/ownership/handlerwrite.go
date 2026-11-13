@@ -3,6 +3,7 @@ package ownership
 import (
 	"fmt"
 	"go/token"
+	"go/types"
 	"slices"
 	"strings"
 
@@ -74,9 +75,12 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 	flagged := false
 	raise := func(pos token.Pos, cat, msg string) {
 		flagged = true
-		st.report(pos, cat, msg)
+		if !st.dryRun {
+			st.report(pos, cat, msg)
+		}
 	}
 	walk := newRootWalk(st.summary)
+	ctorFieldSpec := st.specializeHandlerCtorFields(sp)
 	shared := map[frame]map[ssa.Value]string{}
 	// A frame waits in the queue once however many values are added to it meanwhile: queueing it
 	// per value scanned a function with a hundred shared parameters a hundred times.
@@ -132,6 +136,9 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 				for _, mc := range closureCandidates(a) {
 					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
 						for j, b := range mc.Bindings {
+							if _, isDirectRoot := r[b]; !isDirectRoot && st.isSafeHandlerValue(b) {
+								continue
+							}
 							if root, ok := walk.root(b, r); ok && j < len(argFn.FreeVars) {
 								add(into(argFn, ins), argFn.FreeVars[j], r[root])
 							}
@@ -158,7 +165,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 				if _, guarded := st.slotOf(w.addr); guarded {
 					return // SAFE009 checks guarded memory at every access
 				}
-				if root, ok := walk.root(w.addr, r); ok && once(at(ins)) {
+				if root, ok := walk.root(w.addr, r); ok && !st.isSafeHandlerValue(root) && once(at(ins)) {
 					raise(at(ins), HandlerWrite, fmt.Sprintf(
 						"%s is written here by a handler registered with %s%s, which shares it with every concurrent request",
 						r[root], sp.via, st.at(regPos)))
@@ -171,13 +178,13 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 			}
 			cc := c.Common()
 			if cc.IsInvoke() {
-				if methodSums, resolved := st.resolveInvokeMethodSummaries(fn, cc); resolved {
+				if methodSums, resolved := st.resolveInvokeMethodSummariesWithSpec(fn, cc, ctorFieldSpec); resolved {
 					followArgClosures(ins, cc.Args)
 					fullArgs := append([]ssa.Value{cc.Value}, cc.Args...)
 					for _, sum := range methodSums {
 						for i, v := range fullArgs {
 							root, ok := walk.root(v, r)
-							if !ok || !sum.writes(i) || st.isHandlerCallGuarded(v) || st.isSafeHandlerValue(v) {
+							if !ok || !sum.writes(i) || st.isHandlerCallGuarded(v) || st.isSafeHandlerValue(v) || st.isSafeHandlerValue(root) {
 								continue
 							}
 							if once(at(ins)) {
@@ -192,7 +199,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 				}
 				for _, v := range append([]ssa.Value{cc.Value}, cc.Args...) {
 					root, ok := walk.root(v, r)
-					if !ok || st.isHandlerCallGuarded(v) || st.isSafeHandlerValue(v) {
+					if !ok || st.isHandlerCallGuarded(v) || st.isSafeHandlerValue(v) || st.isSafeHandlerValue(root) {
 						continue
 					}
 					if once(at(ins)) {
@@ -226,7 +233,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 					rest = nil
 					for i, a := range cc.Args {
 						root, hasRoot := walk.root(a, r)
-						if !hasRoot || st.isHandlerCallGuarded(a) || st.isSafeHandlerValue(a) {
+						if !hasRoot || st.isHandlerCallGuarded(a) || st.isSafeHandlerValue(a) || st.isSafeHandlerValue(root) {
 							continue
 						}
 						mayWriteArg := false
@@ -253,7 +260,8 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 						sum := st.summary(ft.fn)
 						needsFollow := false
 						for j, b := range ft.mc.Bindings {
-							if !st.isHandlerCallGuarded(b) && !st.isSafeHandlerValue(b) && sum.writesFree(j) {
+							_, isDirectRoot := r[b]
+							if !st.isHandlerCallGuarded(b) && (isDirectRoot || !st.isSafeHandlerValue(b)) && sum.writesFree(j) {
 								needsFollow = true
 								break
 							}
@@ -270,7 +278,8 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 							return
 						}
 						for j, b := range ft.mc.Bindings {
-							if j >= len(ft.fn.FreeVars) || st.isHandlerCallGuarded(b) || st.isSafeHandlerValue(b) || !sum.writesFree(j) {
+							_, isDirectRoot := r[b]
+							if j >= len(ft.fn.FreeVars) || st.isHandlerCallGuarded(b) || (!isDirectRoot && st.isSafeHandlerValue(b)) || !sum.writesFree(j) {
 								continue
 							}
 							desc := describe(b)
@@ -287,7 +296,7 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 				handed := append(append([]ssa.Value(nil), cc.Args...), rest...)
 				for _, v := range handed {
 					root, ok := walk.root(v, r)
-					if !ok || st.isHandlerCallGuarded(v) || st.isSafeHandlerValue(v) {
+					if !ok || st.isHandlerCallGuarded(v) || st.isSafeHandlerValue(v) || st.isSafeHandlerValue(root) {
 						continue
 					}
 					if once(at(ins)) {
@@ -316,6 +325,9 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 					if i >= len(callee.Params) {
 						break
 					}
+					if _, isDirectRoot := r[a]; !isDirectRoot && st.isSafeHandlerValue(a) {
+						continue
+					}
 					if root, ok := walk.root(a, r); ok {
 						add(into(callee, ins), callee.Params[i], r[root])
 					}
@@ -324,6 +336,9 @@ func (st *state) checkHandlerWrites(sp spawnSite, regPos token.Pos) bool {
 					continue
 				}
 				for j, b := range t.mc.Bindings {
+					if _, isDirectRoot := r[b]; !isDirectRoot && st.isSafeHandlerValue(b) {
+						continue
+					}
 					if root, ok := walk.root(b, r); ok && j < len(callee.FreeVars) {
 						add(into(callee, ins), callee.FreeVars[j], r[root])
 					}
@@ -343,7 +358,250 @@ func (st *state) isSafeHandlerValue(v ssa.Value) bool {
 	if v == nil {
 		return true
 	}
-	return st.cls.Shareable(v.Type()) || st.isAutoSyncType(v.Type())
+	return st.cls.Shareable(v.Type()) || st.isAutoSyncType(v.Type()) || st.isAutoSyncCallResultValue(v)
+}
+
+// specializeHandlerCtorFields resolves concrete interface types injected at same-package
+// constructor calls (`h := NewHandler(dep)`) in the function registering sp for unexported
+// read-only-post-construction (`roLocalFields`) interface fields of `h`.
+func (st *state) specializeHandlerCtorFields(sp spawnSite) map[*types.Var][]types.Type {
+	if sp.ins == nil || sp.ins.Parent() == nil || sp.fn == nil || st.pass == nil {
+		return nil
+	}
+	callerFn := sp.ins.Parent()
+	mc, isMC := unwrapClosureValue(sp.fn)
+	if !isMC || len(mc.Bindings) == 0 {
+		return nil
+	}
+	spec := map[*types.Var][]types.Type{}
+	hasSpec := map[*types.Var]bool{}
+	poisoned := map[*types.Var]bool{}
+	visited := map[ssa.Value]bool{}
+
+	addConcrete := func(f *types.Var, ct types.Type) {
+		if ct == nil || poisoned[f] {
+			return
+		}
+		hasSpec[f] = true
+		for _, ex := range spec[f] {
+			if types.Identical(ex, ct) {
+				return
+			}
+		}
+		spec[f] = append(spec[f], ct)
+	}
+	poisonStructFields := func(t types.Type) {
+		_, s := derefNamedStruct(t)
+		if s == nil {
+			return
+		}
+		for i := range s.NumFields() {
+			poisoned[s.Field(i).Origin()] = true
+		}
+	}
+	singleStoredVal := func(alloc *ssa.Alloc) (ssa.Value, bool) {
+		uses := usesOfCell(alloc)
+		if uses.open || len(uses.fields) > 0 || len(uses.elems) > 0 || len(uses.slices) > 0 || len(uses.stores) != 1 {
+			return nil, false
+		}
+		return uses.stores[0].Val, true
+	}
+	unwrapLocalVal := func(v ssa.Value) ssa.Value {
+		seen := map[ssa.Value]bool{}
+		for v != nil && !seen[v] {
+			seen[v] = true
+			switch x := v.(type) {
+			case *ssa.ChangeType:
+				v = x.X
+			case *ssa.UnOp:
+				if x.Op == token.MUL {
+					if alloc, isAlloc := x.X.(*ssa.Alloc); isAlloc && alloc.Parent() == callerFn {
+						if sv, ok := singleStoredVal(alloc); ok {
+							v = sv
+							continue
+						}
+					}
+				}
+				return v
+			case *ssa.Alloc:
+				if x.Parent() == callerFn {
+					if sv, ok := singleStoredVal(x); ok {
+						v = sv
+						continue
+					}
+				}
+				return v
+			default:
+				return v
+			}
+		}
+		return v
+	}
+
+	var inspectVal func(v ssa.Value)
+	inspectVal = func(v ssa.Value) {
+		v = unwrapLocalVal(v)
+		if v == nil || visited[v] {
+			return
+		}
+		visited[v] = true
+		named, s := derefNamedStruct(v.Type())
+		if named == nil || s == nil || named.Origin().Obj() == nil || named.Origin().Obj().Pkg() != st.pass.Pkg {
+			return
+		}
+		ctorCall, isCall := v.(*ssa.Call)
+		if !isCall || ctorCall.Parent() != callerFn || ctorCall.Call.IsInvoke() {
+			poisonStructFields(v.Type())
+			return
+		}
+		ctor := ctorCall.Call.StaticCallee()
+		if ctor == nil || ctor.Pkg != st.ssa.Pkg || len(ctor.Blocks) == 0 {
+			poisonStructFields(v.Type())
+			return
+		}
+		// Verify ctor returns only nil or a fresh *ssa.Alloc of this struct constructed inside ctor.
+		var ctorAllocs []*ssa.Alloc
+		for _, b := range ctor.Blocks {
+			if len(b.Instrs) == 0 {
+				continue
+			}
+			ret, isRet := b.Instrs[len(b.Instrs)-1].(*ssa.Return)
+			if !isRet {
+				continue
+			}
+			if len(ret.Results) != 1 {
+				poisonStructFields(v.Type())
+				return
+			}
+			rv := ret.Results[0]
+			if c, isConst := rv.(*ssa.Const); isConst && c.IsNil() {
+				continue
+			}
+			alloc, isAlloc := rv.(*ssa.Alloc)
+			if !isAlloc || alloc.Parent() != ctor {
+				poisonStructFields(v.Type())
+				return
+			}
+			if !slices.Contains(ctorAllocs, alloc) {
+				ctorAllocs = append(ctorAllocs, alloc)
+			}
+		}
+		if len(ctorAllocs) == 0 {
+			poisonStructFields(v.Type())
+			return
+		}
+
+		// Recursively inspect same-package struct arguments passed into ctor (e.g. SynthesizeHandler(llmHandler)).
+		for _, arg := range ctorCall.Call.Args {
+			inspectVal(arg)
+		}
+
+		for fi := range s.NumFields() {
+			sf := s.Field(fi)
+			fOrigin := sf.Origin()
+			if poisoned[fOrigin] || sf.Exported() || sf.Embedded() || !st.roLocalFields[fOrigin] {
+				continue
+			}
+			if _, isIface := sf.Type().Underlying().(*types.Interface); !isIface {
+				continue
+			}
+			hasSpec[fOrigin] = true
+			var evalStoreVal func(sv ssa.Value, seen map[ssa.Value]bool) bool
+			evalStoreVal = func(sv ssa.Value, seen map[ssa.Value]bool) bool {
+				if sv == nil {
+					return false
+				}
+				if seen[sv] {
+					return true
+				}
+				seen[sv] = true
+				if c, isConst := sv.(*ssa.Const); isConst && c.IsNil() {
+					return true
+				}
+				if st.isAutoSyncCallResultValue(sv) {
+					return true
+				}
+				switch x := sv.(type) {
+				case *ssa.Parameter:
+					pIdx := slices.Index(ctor.Params, x)
+					if pIdx < 0 || pIdx >= len(ctorCall.Call.Args) {
+						return false
+					}
+					arg := ctorCall.Call.Args[pIdx]
+					if c, isConst := arg.(*ssa.Const); isConst && c.IsNil() {
+						return true
+					}
+					if st.isAutoSyncCallResultValue(arg) {
+						return true
+					}
+					q := st.ask()
+					ts, incomplete := q.resolveInterfaceTypes(callerFn, arg)
+					if incomplete || q.cut {
+						return false
+					}
+					for _, ct := range ts {
+						addConcrete(fOrigin, ct)
+					}
+					return true
+				case *ssa.ChangeInterface:
+					return evalStoreVal(x.X, seen)
+				case *ssa.Phi:
+					if len(x.Edges) == 0 {
+						return false
+					}
+					for _, edge := range x.Edges {
+						if !evalStoreVal(edge, seen) {
+							return false
+						}
+					}
+					return true
+				default:
+					q := st.ask()
+					ts, incomplete := q.resolveInterfaceTypes(ctor, sv)
+					if incomplete || q.cut {
+						return false
+					}
+					for _, ct := range ts {
+						addConcrete(fOrigin, ct)
+					}
+					return true
+				}
+			}
+
+			for _, alloc := range ctorAllocs {
+				if alloc.Referrers() == nil {
+					continue
+				}
+				for _, r := range *alloc.Referrers() {
+					fa, isFA := r.(*ssa.FieldAddr)
+					if !isFA || fa.X != alloc || fa.Field != fi || fa.Referrers() == nil {
+						continue
+					}
+					for _, fr := range *fa.Referrers() {
+						stIns, isStore := fr.(*ssa.Store)
+						if !isStore || stIns.Addr != fa {
+							continue
+						}
+						if !evalStoreVal(stIns.Val, map[ssa.Value]bool{}) {
+							poisoned[fOrigin] = true
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for _, b := range mc.Bindings {
+		inspectVal(b)
+	}
+	out := map[*types.Var][]types.Type{}
+	for f := range hasSpec {
+		if !poisoned[f] {
+			out[f] = spec[f]
+		}
+	}
+	return out
 }
 
 func (st *state) isHandlerCallGuarded(v ssa.Value) bool {
@@ -366,10 +624,10 @@ func (st *state) checkCalleeWrites(pos token.Pos, cc *ssa.CallCommon, callee *ss
 	sum := st.summary(callee)
 	for i, a := range cc.Args {
 		root, ok := walk.root(a, r)
-		if !ok || !sum.writes(i) || st.isSafeHandlerValue(a) {
+		if !ok || !sum.writes(i) || st.isSafeHandlerValue(a) || st.isSafeHandlerValue(root) {
 			continue
 		}
-		if once(pos) {
+		if !st.dryRun && once(pos) {
 			st.report(pos, HandlerWrite, fmt.Sprintf(
 				"%s is passed to %s, which may write it%s, by a handler registered with %s%s, which shares it with every concurrent request",
 				r[root], calleeName(callee), sum.unavailable(), sp.via, st.at(regPos)))
@@ -692,6 +950,7 @@ type rootWalk struct {
 	// one of them later sets cut again.
 	cut        bool
 	cutResults map[resultKey]bool
+	isSafe     func(ssa.Value) bool
 }
 
 type resultKey struct {
@@ -703,6 +962,12 @@ type resultKey struct {
 // result of a call into another package ends the walk.
 func newRootWalk(sums func(*ssa.Function) *summary) *rootWalk {
 	return &rootWalk{sums: sums, derive: map[resultKey][]int{}, busy: map[resultKey][]int{}, met: map[resultKey]bool{}, cutResults: map[resultKey]bool{}}
+}
+
+func newRootWalkWithSafe(sums func(*ssa.Function) *summary, isSafe func(ssa.Value) bool) *rootWalk {
+	rw := newRootWalk(sums)
+	rw.isSafe = isSafe
+	return rw
 }
 
 // root follows v back through derivations, loads and call results to one of roots.
@@ -844,6 +1109,7 @@ func callResultRoot(call *ssa.Call, k int, roots map[ssa.Value]string, seen map[
 // value not visited before, so the walk ends; rootWalkBudget bounds what one walk costs, and a walk
 // that reaches it sets w.cut instead of answering no in silence.
 func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]bool, w *rootWalk) (ssa.Value, bool) {
+	first := len(seen) == 0
 	for {
 		if _, ok := roots[v]; ok {
 			return v, true
@@ -851,6 +1117,10 @@ func sharedRootSeen(v ssa.Value, roots map[ssa.Value]string, seen map[ssa.Value]
 		if v == nil || seen[v] {
 			return nil, false
 		}
+		if !first && w.isSafe != nil && w.isSafe(v) {
+			return nil, false
+		}
+		first = false
 		if len(seen) >= rootWalkBudget {
 			w.cut = true
 			return nil, false

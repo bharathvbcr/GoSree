@@ -197,6 +197,11 @@ type state struct {
 	genericAutoSyncTypes map[*types.TypeName]bool
 	roLocalFields        map[*types.Var]bool
 	exposedLocalTypes    map[*types.TypeName]bool
+	firewallFields       map[*types.Var]bool
+	frozenFields         map[*types.Var]bool
+	firstClassFuncs      map[*ssa.Function]bool
+	autoGuardsVerified   bool
+	dryRun               bool
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the
@@ -251,12 +256,34 @@ func run(pass *analysis.Pass) (any, error) {
 	st.contracts = st.buildContractIndex(fns)
 	st.inferAutoGuards(fns)
 	st.computeSummaries(fns)
-	if st.refineAutoGuardsPostSummaries(fns) {
-		st.computeSummaries(fns)
-	}
+	st.refineAutoGuardsPostSummaries(fns)
+	st.autoGuardsVerified = true
+	clear(st.graphs)
+	st.computeSummaries(fns)
 	st.inferAutoSyncTypes(fns)
-	st.exportFacts(fns)
+	for {
+		prevCount := len(st.autoSyncTypes) + len(st.valueAutoSyncTypes) + len(st.genericAutoSyncTypes)
+		if prevCount == 0 {
+			break
+		}
+		st.refineAutoGuardsPostSummaries(fns)
+		clear(st.graphs)
+		st.computeSummaries(fns)
+		st.inferAutoSyncTypes(fns)
+		newCount := len(st.autoSyncTypes) + len(st.valueAutoSyncTypes) + len(st.genericAutoSyncTypes)
+		if newCount == prevCount {
+			break
+		}
+	}
+	clear(st.graphs)
+	if len(st.autoSyncTypes)+len(st.valueAutoSyncTypes)+len(st.genericAutoSyncTypes) > 0 {
+		st.computeSummaries(fns)
+		clear(st.graphs)
+	}
+	st.computeLocalFieldSyncFacts(fns)
 	st.collectGlobalMutations(fns)
+	st.inferSharedReadSummaries(fns)
+	st.exportFacts(fns)
 
 	for _, fn := range fns {
 		if len(fn.Blocks) == 0 {
@@ -264,6 +291,8 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 		g := st.graphOf(fn)
 		st.checkTransfers(g)
+		st.checkSharedReadCalls(g)
+		st.checkAutoSyncInterfaceConversions(fn)
 		st.checkImmStores(fn)
 	}
 	st.checkSharedLoadWrites(fns)
@@ -386,12 +415,41 @@ func (st *state) exportFacts(fns []*ssa.Function) {
 				ra := make([]bool, fn.Signature.Results().Len())
 				for k := range ra {
 					rt := fn.Signature.Results().At(k).Type()
-					if !st.cls.Shareable(rt) && st.isExportableAutoSyncSigType(rt) {
+					if !st.cls.Shareable(rt) && (st.isExportableAutoSyncSigType(rt) || st.isAutoSyncInterfaceReturn(fn, k, rt)) {
 						ra[k] = true
 					}
 				}
 				if anyTrue(ra) {
 					f.ResAutoSync = ra
+				}
+			}
+			if anyTrue(s.sharedRead) {
+				f.SharedRead = append([]bool(nil), s.sharedRead...)
+			}
+			if anyTrue(s.projSync) {
+				f.ProjSync = append([]bool(nil), s.projSync...)
+			}
+			if fn.Signature != nil && fn.Signature.Recv() != nil {
+				recvType := types.Unalias(fn.Signature.Recv().Type())
+				if p, isPtr := recvType.(*types.Pointer); isPtr {
+					recvType = types.Unalias(p.Elem())
+				}
+				if rn, isNamed := recvType.(*types.Named); isNamed && rn.Origin().TypeParams() == nil {
+					if stStruct, isStruct := rn.Origin().Underlying().(*types.Struct); isStruct && stStruct.NumFields() > 0 {
+						fw := make([]bool, stStruct.NumFields())
+						fr := make([]bool, stStruct.NumFields())
+						for fi := range stStruct.NumFields() {
+							fv := stStruct.Field(fi).Origin()
+							fw[fi] = st.firewallFields[fv]
+							fr[fi] = st.frozenFields[fv]
+						}
+						if anyTrue(fw) {
+							f.RecvFirewall = fw
+						}
+						if anyTrue(fr) {
+							f.RecvFrozen = fr
+						}
+					}
 				}
 			}
 		}

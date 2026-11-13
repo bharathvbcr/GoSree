@@ -332,7 +332,24 @@ func (g *graph) instr(ins ssa.Instruction) {
 	case *ssa.FieldAddr:
 		g.deriveOrForeign(ins, ins.X, "a field of shared value "+ins.X.Type().String())
 	case *ssa.Field:
-		g.deriveOrForeign(ins, ins.X, "a field of shared value "+ins.X.Type().String())
+		if g.st.isAutoSyncType(ins.Type()) {
+			if vn := g.val(ins); vn != nil {
+				if xn := g.val(ins.X); xn != nil {
+					for c := range g.region(xn) {
+						for _, e := range c.events {
+							if e.kind == evForeign {
+								g.add(vn, e)
+								break
+							}
+						}
+					}
+				} else {
+					g.add(vn, ev(evForeign, ins, "a field of shared value "+ins.X.Type().String()))
+				}
+			}
+		} else {
+			g.deriveOrForeign(ins, ins.X, "a field of shared value "+ins.X.Type().String())
+		}
 	case *ssa.IndexAddr:
 		g.deriveOrForeign(ins, ins.X, "an element of shared value "+ins.X.Type().String())
 	case *ssa.Index:
@@ -370,7 +387,20 @@ func (g *graph) instr(ins ssa.Instruction) {
 			if vn == nil {
 				return
 			}
-			if xn := g.val(ins.X); xn != nil {
+			if _, isFA := ins.X.(*ssa.FieldAddr); isFA && g.st.isAutoSyncType(ins.Type()) {
+				if xn := g.val(ins.X); xn != nil {
+					for c := range g.region(xn) {
+						for _, e := range c.events {
+							if e.kind == evForeign {
+								g.add(vn, e)
+								break
+							}
+						}
+					}
+				} else {
+					g.add(vn, ev(evForeign, ins, "load through a shared pointer of type "+ins.X.Type().String()))
+				}
+			} else if xn := g.val(ins.X); xn != nil {
 				g.union(vn, g.pointee(xn))
 			} else {
 				g.add(vn, ev(evForeign, ins, "load through a shared pointer of type "+ins.X.Type().String()))
@@ -1295,8 +1325,10 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		published, rc, hasContract := g.applyCallContract(ins, cc)
 		desc := "passed to interface method " + cc.Method.Name() + " (dynamic dispatch may retain it)"
 		wdesc := "passed to interface method " + cc.Method.Name() + ", which may write it"
-		g.add(g.val(cc.Value), ev(evEscape, ins, desc))
-		g.written(ins, cc.Value, wdesc)
+		if !g.st.isAutoSyncType(cc.Value.Type()) {
+			g.add(g.val(cc.Value), ev(evEscape, ins, desc))
+			g.written(ins, cc.Value, wdesc)
+		}
 		for i, a := range cc.Args {
 			switch {
 			case !published[i]:
@@ -1362,6 +1394,12 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 	if isCapBorrowHelper(fn) && len(cc.Args) > 0 {
 		if result != nil {
 			g.join(result, cc.Args[0])
+		}
+		return
+	}
+	if isShareableStdlibCloneCall(g.st, fn, cc) {
+		if result != nil {
+			g.val(result)
 		}
 		return
 	}
@@ -1549,11 +1587,15 @@ func (g *graph) meetDepth(a, b *node) (int, int, bool) {
 func (g *graph) builtin(ins ssa.Instruction, b *ssa.Builtin, args []ssa.Value, result ssa.Value) {
 	switch b.Name() {
 	case "append":
-		if result == nil {
+		if result == nil || len(args) == 0 {
 			return
 		}
-		for _, a := range args {
-			g.join(result, a)
+		g.join(result, args[0])
+		if len(args) == 2 && !g.st.cls.Shareable(elemType(args[0].Type())) && !g.st.isAutoSyncType(elemType(args[0].Type())) {
+			rn, sn := g.val(result), g.val(args[1])
+			if rn != nil && sn != nil {
+				g.union(g.pointee(rn), g.pointee(sn))
+			}
 		}
 	case "copy":
 		// copy moves elements; it only creates aliasing when the elements themselves hold pointers.
@@ -1718,4 +1760,32 @@ func isCapBorrowHelper(fn *ssa.Function) bool {
 	}
 	s := fn.String()
 	return strings.Contains(s, "/cap.Borrow") || strings.HasPrefix(s, "cap.Borrow")
+}
+
+// isShareableStdlibCloneCall reports whether cc is a direct call to slices.Clone or maps.Clone
+// whose element (and key) types are Shareable or AutoSync, producing a fresh backing array/map
+// whose shallow-copied elements need no alias link back to the input container.
+func isShareableStdlibCloneCall(st *state, fn *ssa.Function, cc *ssa.CallCommon) bool {
+	if st == nil || fn == nil || cc == nil || cc.IsInvoke() || len(cc.Args) != 1 {
+		return false
+	}
+	if calleeOriginName(fn) != "Clone" {
+		return false
+	}
+	switch calleeOriginPkgPath(fn) {
+	case "slices":
+		sl, ok := cc.Args[0].Type().Underlying().(*types.Slice)
+		if !ok {
+			return false
+		}
+		return st.cls.Shareable(sl.Elem()) || st.isAutoSyncType(sl.Elem())
+	case "maps":
+		mp, ok := cc.Args[0].Type().Underlying().(*types.Map)
+		if !ok {
+			return false
+		}
+		return (st.cls.Shareable(mp.Key()) || st.isAutoSyncType(mp.Key())) &&
+			(st.cls.Shareable(mp.Elem()) || st.isAutoSyncType(mp.Elem()))
+	}
+	return false
 }

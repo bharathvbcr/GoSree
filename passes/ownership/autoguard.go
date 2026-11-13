@@ -1,6 +1,7 @@
 package ownership
 
 import (
+	"go/ast"
 	"go/token"
 	"go/types"
 	"slices"
@@ -889,24 +890,25 @@ func (st *state) isOwnedInteriorVal(v ssa.Value, selfField *types.Var, selfGloba
 			return srcOK, dstCancel && srcCancel
 		}
 		if callee := x.Call.StaticCallee(); callee != nil && !x.Call.IsInvoke() {
-			if callee.Pkg != nil && callee.Pkg.Pkg != nil {
-				switch callee.Pkg.Pkg.Path() {
-				case "slices":
-					if callee.Name() == "Clone" && len(x.Call.Args) == 1 {
-						if slice, ok := x.Call.Args[0].Type().Underlying().(*types.Slice); ok && (st.cls.Shareable(slice.Elem()) || (allowTypeParam && isTypeParamType(slice.Elem()))) {
-							return true, true
-						}
+			switch calleeOriginPkgPath(callee) {
+			case "slices":
+				if calleeOriginName(callee) == "Clone" && len(x.Call.Args) == 1 {
+					if slice, ok := x.Call.Args[0].Type().Underlying().(*types.Slice); ok && (st.cls.Shareable(slice.Elem()) || st.isAutoSyncType(slice.Elem()) || (allowTypeParam && isTypeParamType(slice.Elem())) || st.slotAllInterfaceElemsShareable(selfField, selfGlobal)) {
+						return true, true
 					}
-				case "maps":
-					if callee.Name() == "Clone" && len(x.Call.Args) == 1 {
-						if mp, ok := x.Call.Args[0].Type().Underlying().(*types.Map); ok && st.cls.Shareable(mp.Key()) && (st.cls.Shareable(mp.Elem()) || (allowTypeParam && isTypeParamType(mp.Elem()))) {
-							return true, true
-						}
+				}
+			case "maps":
+				if calleeOriginName(callee) == "Clone" && len(x.Call.Args) == 1 {
+					if mp, ok := x.Call.Args[0].Type().Underlying().(*types.Map); ok && st.cls.Shareable(mp.Key()) && (st.cls.Shareable(mp.Elem()) || st.isAutoSyncType(mp.Elem()) || (allowTypeParam && isTypeParamType(mp.Elem())) || st.slotAllInterfaceElemsShareable(selfField, selfGlobal)) {
+						return true, true
 					}
 				}
 			}
 			if sum := st.summary(callee); !sum.pessimistic && sum.isFreshResult(0) && !hasLinkTouchingResult(sum, len(x.Call.Args), 0) {
 				return true, true
+			}
+			if st.isDefensiveCloneCall(x, selfField, selfGlobal, allowTypeParam) {
+				return true, false
 			}
 		}
 		return false, false
@@ -1605,6 +1607,16 @@ func (st *state) verifyLoadedValueUses(
 			if !st.verifyLoadedValueUses(fn, x, isPrePub, requireLock, selfField, selfGlobal, allowArbitraryFunc, allowTypeParam, allCancelFuncs, usedCancelEscape, seen) {
 				return false
 			}
+		case *ssa.TypeAssert:
+			if x.X != val {
+				return false
+			}
+			if !isPrePub(x) && !requireLock(x, lockRead) {
+				return false
+			}
+			if !st.verifyLoadedValueUses(fn, x, isPrePub, requireLock, selfField, selfGlobal, allowArbitraryFunc, allowTypeParam, allCancelFuncs, usedCancelEscape, seen) {
+				return false
+			}
 		case *ssa.ChangeType, *ssa.MakeInterface, *ssa.ChangeInterface:
 			if cv, ok := r.(ssa.Value); ok {
 				if !st.verifyLoadedValueUses(fn, cv, isPrePub, requireLock, selfField, selfGlobal, allowArbitraryFunc, allowTypeParam, allCancelFuncs, usedCancelEscape, seen) {
@@ -1642,37 +1654,35 @@ func (st *state) verifyLoadedValueUses(
 			b, isBuiltin := x.Call.Value.(*ssa.Builtin)
 			if !isBuiltin {
 				if callee := x.Call.StaticCallee(); callee != nil && !x.Call.IsInvoke() && x.Call.Value != val {
-					if callee.Pkg != nil && callee.Pkg.Pkg != nil {
-						switch callee.Pkg.Pkg.Path() {
-						case "slices":
-							if callee.Name() == "Clone" && len(x.Call.Args) == 1 && x.Call.Args[0] == val {
-								if slice, ok := val.Type().Underlying().(*types.Slice); ok && (st.cls.Shareable(slice.Elem()) || st.isAutoSyncType(slice.Elem()) || (allowTypeParam && isTypeParamType(slice.Elem()))) {
-									if isPrePub(x) || requireLock(x, lockRead) {
-										continue
-									}
+					switch calleeOriginPkgPath(callee) {
+					case "slices":
+						if calleeOriginName(callee) == "Clone" && len(x.Call.Args) == 1 && x.Call.Args[0] == val {
+							if slice, ok := val.Type().Underlying().(*types.Slice); ok && (st.cls.Shareable(slice.Elem()) || st.isAutoSyncType(slice.Elem()) || (allowTypeParam && isTypeParamType(slice.Elem())) || st.slotAllInterfaceElemsShareable(selfField, selfGlobal)) {
+								if isPrePub(x) || requireLock(x, lockRead) {
+									continue
 								}
 							}
-							if (callee.Name() == "Contains" || callee.Name() == "Index") && len(x.Call.Args) == 2 && x.Call.Args[0] == val && x.Call.Args[1] != val {
-								if slice, ok := val.Type().Underlying().(*types.Slice); ok && (st.cls.Shareable(slice.Elem()) || st.isAutoSyncType(slice.Elem()) || (allowTypeParam && isTypeParamType(slice.Elem()))) {
-									if isPrePub(x) || requireLock(x, lockRead) {
-										continue
-									}
+						}
+						if (calleeOriginName(callee) == "Contains" || calleeOriginName(callee) == "Index") && len(x.Call.Args) == 2 && x.Call.Args[0] == val && x.Call.Args[1] != val {
+							if slice, ok := val.Type().Underlying().(*types.Slice); ok && (st.cls.Shareable(slice.Elem()) || st.isAutoSyncType(slice.Elem()) || (allowTypeParam && isTypeParamType(slice.Elem()))) {
+								if isPrePub(x) || requireLock(x, lockRead) {
+									continue
 								}
 							}
-						case "maps":
-							if callee.Name() == "Clone" && len(x.Call.Args) == 1 && x.Call.Args[0] == val {
+						}
+					case "maps":
+						if calleeOriginName(callee) == "Clone" && len(x.Call.Args) == 1 && x.Call.Args[0] == val {
+							if mp, ok := val.Type().Underlying().(*types.Map); ok && st.cls.Shareable(mp.Key()) && (st.cls.Shareable(mp.Elem()) || st.isAutoSyncType(mp.Elem()) || (allowTypeParam && isTypeParamType(mp.Elem())) || st.slotAllInterfaceElemsShareable(selfField, selfGlobal)) {
+								if isPrePub(x) || requireLock(x, lockRead) {
+									continue
+								}
+							}
+						}
+						if calleeOriginName(callee) == "Copy" && len(x.Call.Args) == 2 && x.Call.Args[1] == val && x.Call.Args[0] != val {
+							if _, isMake := x.Call.Args[0].(*ssa.MakeMap); isMake {
 								if mp, ok := val.Type().Underlying().(*types.Map); ok && st.cls.Shareable(mp.Key()) && (st.cls.Shareable(mp.Elem()) || st.isAutoSyncType(mp.Elem()) || (allowTypeParam && isTypeParamType(mp.Elem()))) {
 									if isPrePub(x) || requireLock(x, lockRead) {
 										continue
-									}
-								}
-							}
-							if callee.Name() == "Copy" && len(x.Call.Args) == 2 && x.Call.Args[1] == val && x.Call.Args[0] != val {
-								if _, isMake := x.Call.Args[0].(*ssa.MakeMap); isMake {
-									if mp, ok := val.Type().Underlying().(*types.Map); ok && st.cls.Shareable(mp.Key()) && (st.cls.Shareable(mp.Elem()) || st.isAutoSyncType(mp.Elem()) || (allowTypeParam && isTypeParamType(mp.Elem()))) {
-										if isPrePub(x) || requireLock(x, lockRead) {
-											continue
-										}
 									}
 								}
 							}
@@ -1703,6 +1713,9 @@ func (st *state) verifyLoadedValueUses(
 							}
 						}
 						if safe && (isPrePub(x) || requireLock(x, need)) {
+							continue
+						}
+						if len(x.Call.Args) == 1 && x.Call.Args[0] == val && (isPrePub(x) || requireLock(x, lockRead)) && st.isDefensiveCloneCall(x, selfField, selfGlobal, allowTypeParam) {
 							continue
 						}
 					}
@@ -1950,6 +1963,10 @@ func (st *state) isAutoSyncTypeSeen(t types.Type, allowTP bool, seen map[types.T
 		return true
 	case *types.Array:
 		return u.Len() == 0 || st.isAutoSyncTypeSeen(u.Elem(), allowTP, seen)
+	case *types.Interface:
+		if named, ok := t.(*types.Named); ok && named.Obj() != nil && u.NumMethods() > 0 {
+			return st.isAutoSyncNamed(named, false, allowTP, seen)
+		}
 	}
 	return false
 }
@@ -2042,25 +2059,47 @@ func (st *state) isAutoSyncNamed(named *types.Named, wantPtr bool, allowTP bool,
 				continue
 			}
 			sig, ok := fnObj.Type().(*types.Signature)
-			if !ok || sig.Recv() != nil || sig.Results() == nil {
+			if !ok || sig.Recv() != nil {
 				continue
 			}
-			for k := range sig.Results().Len() {
-				rt := types.Unalias(sig.Results().At(k).Type())
-				p, isPtr := rt.(*types.Pointer)
-				if isPtr != wantPtr {
-					continue
+			if sig.Params() != nil {
+				for k := range sig.Params().Len() {
+					pt := types.Unalias(sig.Params().At(k).Type())
+					p, isPtr := pt.(*types.Pointer)
+					if isPtr != wantPtr {
+						continue
+					}
+					if isPtr {
+						pt = types.Unalias(p.Elem())
+					}
+					pn, isNamed := pt.(*types.Named)
+					if !isNamed || pn.Origin().Obj() != tn {
+						continue
+					}
+					var f FuncFact
+					if st.pass.ImportObjectFact(fnObj.Origin(), &f) && !f.Unknown {
+						return k < len(f.ParamAutoSync) && f.ParamAutoSync[k]
+					}
 				}
-				if isPtr {
-					rt = types.Unalias(p.Elem())
-				}
-				rn, isNamed := rt.(*types.Named)
-				if !isNamed || rn.Origin().Obj() != tn {
-					continue
-				}
-				var f FuncFact
-				if st.pass.ImportObjectFact(fnObj.Origin(), &f) && !f.Unknown {
-					return k < len(f.ResAutoSync) && f.ResAutoSync[k]
+			}
+			if sig.Results() != nil {
+				for k := range sig.Results().Len() {
+					rt := types.Unalias(sig.Results().At(k).Type())
+					p, isPtr := rt.(*types.Pointer)
+					if isPtr != wantPtr {
+						continue
+					}
+					if isPtr {
+						rt = types.Unalias(p.Elem())
+					}
+					rn, isNamed := rt.(*types.Named)
+					if !isNamed || rn.Origin().Obj() != tn {
+						continue
+					}
+					var f FuncFact
+					if st.pass.ImportObjectFact(fnObj.Origin(), &f) && !f.Unknown {
+						return k < len(f.ResAutoSync) && f.ResAutoSync[k]
+					}
 				}
 			}
 		}
@@ -2281,6 +2320,7 @@ func (st *state) inferAutoSyncTypes(fns []*ssa.Function) {
 			}
 		}
 	}
+	st.inferAutoSyncInterfaces(scanFns)
 }
 
 type fvalSite struct {
@@ -2321,6 +2361,10 @@ func (st *state) checkValueAutoSyncStructFields(named *types.Named, faByField ma
 				!st.isAutoSyncTypeSeen(u.Elem(), false, map[types.Type]bool{}) {
 				return false
 			}
+			if !st.readOnlyContainerField(sites, fvalByField[f], f, false) {
+				return false
+			}
+		case *types.Pointer:
 			if !st.readOnlyContainerField(sites, fvalByField[f], f, false) {
 				return false
 			}
@@ -2388,6 +2432,10 @@ func (st *state) checkAutoSyncStructFields(named *types.Named, faByField map[*ty
 				!st.isAutoSyncTypeSeen(u.Elem(), allowTP, map[types.Type]bool{}) {
 				return false
 			}
+			if !st.readOnlyContainerField(sites, fvalByField[f], f, allowTP) {
+				return false
+			}
+		case *types.Pointer:
 			if !st.readOnlyContainerField(sites, fvalByField[f], f, allowTP) {
 				return false
 			}
@@ -2642,36 +2690,60 @@ func (st *state) containerValueStrictlyReadOnly(fn *ssa.Function, val ssa.Value,
 		case *ssa.Call:
 			b, isBuiltin := x.Call.Value.(*ssa.Builtin)
 			if !isBuiltin {
-				if callee := x.Call.StaticCallee(); callee != nil && !x.Call.IsInvoke() && x.Call.Value != val && callee.Pkg != nil && callee.Pkg.Pkg != nil {
-					switch callee.Pkg.Pkg.Path() {
+				if callee := x.Call.StaticCallee(); callee != nil && !x.Call.IsInvoke() && x.Call.Value != val {
+					switch calleeOriginPkgPath(callee) {
 					case "slices":
-						if callee.Name() == "Clone" && len(x.Call.Args) == 1 && x.Call.Args[0] == val {
+						if calleeOriginName(callee) == "Clone" && len(x.Call.Args) == 1 && x.Call.Args[0] == val {
 							if slice, ok := val.Type().Underlying().(*types.Slice); ok && (st.cls.Shareable(slice.Elem()) || st.isAutoSyncType(slice.Elem())) {
 								continue
 							}
 						}
-						if (callee.Name() == "Contains" || callee.Name() == "Index") && len(x.Call.Args) == 2 && x.Call.Args[0] == val && x.Call.Args[1] != val {
+						if (calleeOriginName(callee) == "Contains" || calleeOriginName(callee) == "Index") && len(x.Call.Args) == 2 && x.Call.Args[0] == val && x.Call.Args[1] != val {
 							if slice, ok := val.Type().Underlying().(*types.Slice); ok && (st.cls.Shareable(slice.Elem()) || st.isAutoSyncType(slice.Elem())) {
 								continue
 							}
 						}
-						if callee.Name() == "Equal" && len(x.Call.Args) == 2 && (x.Call.Args[0] == val || x.Call.Args[1] == val) {
+						if calleeOriginName(callee) == "Equal" && len(x.Call.Args) == 2 && (x.Call.Args[0] == val || x.Call.Args[1] == val) {
 							if slice, ok := val.Type().Underlying().(*types.Slice); ok && (st.cls.Shareable(slice.Elem()) || st.isAutoSyncType(slice.Elem())) {
 								continue
 							}
 						}
 					case "maps":
-						if callee.Name() == "Clone" && len(x.Call.Args) == 1 && x.Call.Args[0] == val {
+						if calleeOriginName(callee) == "Clone" && len(x.Call.Args) == 1 && x.Call.Args[0] == val {
 							if mp, ok := val.Type().Underlying().(*types.Map); ok && st.cls.Shareable(mp.Key()) && (st.cls.Shareable(mp.Elem()) || st.isAutoSyncType(mp.Elem())) {
 								continue
 							}
 						}
-						if callee.Name() == "Copy" && len(x.Call.Args) == 2 && x.Call.Args[1] == val && x.Call.Args[0] != val {
+						if calleeOriginName(callee) == "Copy" && len(x.Call.Args) == 2 && x.Call.Args[1] == val && x.Call.Args[0] != val {
 							if _, isMake := x.Call.Args[0].(*ssa.MakeMap); isMake {
 								if mp, ok := val.Type().Underlying().(*types.Map); ok && st.cls.Shareable(mp.Key()) && (st.cls.Shareable(mp.Elem()) || st.isAutoSyncType(mp.Elem())) {
 									continue
 								}
 							}
+						}
+					}
+					if sum := st.summary(callee); !sum.pessimistic {
+						safe := true
+						for ai, arg := range x.Call.Args {
+							if arg != val {
+								continue
+							}
+							if sum.leaks(ai) || sum.spawns(ai) || sum.isIso(ai) || sum.writes(ai) {
+								safe = false
+								break
+							}
+							for _, l := range sum.links {
+								if l.A == ai || l.B == ai {
+									safe = false
+									break
+								}
+							}
+							if !safe {
+								break
+							}
+						}
+						if safe && (sum.fresh || st.containerValueStrictlyReadOnly(fn, x, seen)) {
+							continue
 						}
 					}
 				}
@@ -2812,6 +2884,9 @@ func (st *state) resolveClosedFieldInterfaceTypes(typeKey string, fieldIdx int) 
 		if c, isConst := iv.v.(*ssa.Const); isConst && c.IsNil() {
 			continue
 		}
+		if st.isAutoSyncCallResultValue(iv.v) {
+			continue
+		}
 		q := st.ask()
 		ts, incomplete := q.resolveInterfaceTypes(iv.fn, iv.v)
 		if incomplete || q.cut {
@@ -2830,7 +2905,7 @@ func (st *state) resolveClosedFieldInterfaceTypes(typeKey string, fieldIdx int) 
 			}
 		}
 	}
-	return concretes, len(concretes) > 0
+	return concretes, true
 }
 
 func (st *state) closedReadOnlyInterfaceField(typeKey string, fieldIdx int, iface *types.Interface) bool {
@@ -2887,7 +2962,14 @@ func (st *state) resolveLoadedFieldCallables(callVal ssa.Value) ([]*ssa.Function
 // implementations that cc (an interface method call in fn) can dispatch to when the receiver's
 // concrete types are closed, including cross-package types whose methods live in FuncFact.
 func (st *state) resolveInvokeMethodSummaries(fn *ssa.Function, cc *ssa.CallCommon) ([]*summary, bool) {
+	return st.resolveInvokeMethodSummariesWithSpec(fn, cc, nil)
+}
+
+func (st *state) resolveInvokeMethodSummariesWithSpec(fn *ssa.Function, cc *ssa.CallCommon, spec map[*types.Var][]types.Type) ([]*summary, bool) {
 	if !cc.IsInvoke() || cc.Method == nil || st.ssa == nil || st.ssa.Pkg == nil || st.ssa.Pkg.Prog == nil {
+		return nil, false
+	}
+	if st.isAutoSyncCallResultValue(cc.Value) {
 		return nil, false
 	}
 	q := st.ask()
@@ -2899,9 +2981,19 @@ func (st *state) resolveInvokeMethodSummaries(fn *ssa.Function, cc *ssa.CallComm
 				named, s := derefNamedStruct(fa.X.Type())
 				if named != nil && named.Origin().Obj() != nil && st.pass != nil && named.Origin().Obj().Pkg() == st.pass.Pkg && fa.Field < s.NumFields() {
 					sf := s.Field(fa.Field)
-					if st.roLocalFields[sf.Origin()] || (!sf.Exported() && !sf.Embedded()) {
+					fOrigin := sf.Origin()
+					if st.roLocalFields[fOrigin] || (!sf.Exported() && !sf.Embedded()) {
 						if closed, ok := st.resolveClosedFieldInterfaceTypes(types.TypeString(named.Origin(), nil), fa.Field); ok {
 							concretes = closed
+							if len(concretes) == 0 {
+								// Every non-nil store into this field was already proven AutoSync.
+								return []*summary{&summary{waitParam: -1}}, true
+							}
+						} else if specTypes, hasSpec := spec[fOrigin]; hasSpec {
+							if len(specTypes) == 0 {
+								return []*summary{&summary{waitParam: -1}}, true
+							}
+							concretes = specTypes
 						}
 					}
 				}
@@ -2914,6 +3006,9 @@ func (st *state) resolveInvokeMethodSummaries(fn *ssa.Function, cc *ssa.CallComm
 	prog := st.ssa.Pkg.Prog
 	var sums []*summary
 	for _, ct := range concretes {
+		if st.cls.Shareable(ct) || st.isAutoSyncType(ct) {
+			continue
+		}
 		sel := prog.MethodSets.MethodSet(ct).Lookup(cc.Method.Pkg(), cc.Method.Name())
 		if sel == nil {
 			return nil, false
@@ -2929,7 +3024,10 @@ func (st *state) resolveInvokeMethodSummaries(fn *ssa.Function, cc *ssa.CallComm
 		}
 		sums = append(sums, ms)
 	}
-	return sums, len(sums) > 0
+	if len(sums) == 0 {
+		return []*summary{&summary{waitParam: -1}}, true
+	}
+	return sums, true
 }
 
 // resolveFreeVarCallables resolves concrete functions and closures that callVal (a closure
@@ -3030,4 +3128,721 @@ func (st *state) resolveFreeVarCallables(callVal ssa.Value) ([]callTarget, bool)
 		return nil, false
 	}
 	return out, true
+}
+
+// isDefensiveCloneCall verifies a 1-arg same-package defensive-cloning helper `fn(v any) any`
+// (such as `cloneConfigValue`) called on an interface value loaded from `selfField` / `selfGlobal`:
+// every non-Shareable concrete type ever boxed into `selfField` / `selfGlobal` across the package
+// must be guarded by a `*ssa.TypeAssert` in `callee` that clones it into a fresh owned value before
+// any `default: return v` fallthrough can execute.
+func (st *state) isDefensiveCloneCall(call *ssa.Call, selfField *types.Var, selfGlobal *ssa.Global, allowTypeParam bool) bool {
+	if call == nil || call.Call.IsInvoke() || len(call.Call.Args) != 1 || st.ssa == nil || st.ssa.Pkg == nil {
+		return false
+	}
+	callee := call.Call.StaticCallee()
+	if callee == nil || callee.Pkg != st.ssa.Pkg || len(callee.Blocks) == 0 || len(callee.Params) != 1 {
+		return false
+	}
+	if callee.Signature == nil || callee.Signature.Results() == nil || callee.Signature.Results().Len() != 1 {
+		return false
+	}
+	if _, isIface := callee.Params[0].Type().Underlying().(*types.Interface); !isIface {
+		return false
+	}
+	sum := st.summary(callee)
+	if sum.pessimistic || sum.writes(0) || sum.spawns(0) || sum.leaks(0) || sum.isIso(0) {
+		return false
+	}
+	needClone, ok := st.nonShareableInterfaceTypesInSlot(selfField, selfGlobal, callee)
+	if !ok {
+		return false
+	}
+	param := callee.Params[0]
+	for _, b := range callee.Blocks {
+		if len(b.Instrs) == 0 {
+			continue
+		}
+		ret, isRet := b.Instrs[len(b.Instrs)-1].(*ssa.Return)
+		if !isRet {
+			continue
+		}
+		if len(ret.Results) != 1 {
+			return false
+		}
+		rv := ret.Results[0]
+		if rv == param {
+			for _, ct := range needClone {
+				if blockReachableWithoutFailedTypeAssert(callee, b, param, ct) {
+					return false
+				}
+			}
+			continue
+		}
+		owned, _ := st.isOwnedInteriorVal(rv, selfField, selfGlobal, false, allowTypeParam, nil)
+		if !owned {
+			return false
+		}
+	}
+	return true
+}
+
+func (st *state) nonShareableInterfaceTypesInSlot(selfField *types.Var, selfGlobal *ssa.Global, cloneCallee *ssa.Function) ([]types.Type, bool) {
+	if selfField == nil && selfGlobal == nil {
+		return nil, false
+	}
+	scanFns := st.allFns
+	if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil && !slices.Contains(scanFns, pkgInit) {
+		scanFns = append(append([]*ssa.Function(nil), scanFns...), pkgInit)
+	}
+	var needClone []types.Type
+	failed := false
+	addConcreteType := func(ct types.Type) {
+		if ct == nil || st.cls.Shareable(ct) || st.isAutoSyncType(ct) {
+			return
+		}
+		for _, ex := range needClone {
+			if types.Identical(ex, ct) {
+				return
+			}
+		}
+		needClone = append(needClone, ct)
+	}
+	seenIfaceVals := map[ssa.Value]bool{}
+	var addIfaceVal func(fn *ssa.Function, v ssa.Value)
+	addIfaceVal = func(fn *ssa.Function, v ssa.Value) {
+		if failed || v == nil || seenIfaceVals[v] {
+			return
+		}
+		seenIfaceVals[v] = true
+		if _, isIface := v.Type().Underlying().(*types.Interface); !isIface {
+			return
+		}
+		if c, isConst := v.(*ssa.Const); isConst && c.IsNil() {
+			return
+		}
+		if st.isAutoSyncCallResultValue(v) {
+			return
+		}
+		if call, isCall := v.(*ssa.Call); isCall && !call.Call.IsInvoke() && cloneCallee != nil && call.Call.StaticCallee() == cloneCallee && len(call.Call.Args) == 1 {
+			addIfaceVal(fn, call.Call.Args[0])
+			return
+		}
+		if fv, isFV := v.(*ssa.Field); isFV {
+			if named, ok := types.Unalias(fv.X.Type()).(*types.Named); ok && named.Origin().Obj() != nil && st.pass != nil && named.Origin().Obj().Pkg() == st.pass.Pkg {
+				if closed, ok := st.resolveClosedFieldInterfaceTypes(types.TypeString(named.Origin(), nil), fv.Field); ok {
+					for _, ct := range closed {
+						addConcreteType(ct)
+					}
+					return
+				}
+			}
+		}
+		if load, isLoad := v.(*ssa.UnOp); isLoad && load.Op == token.MUL {
+			if fa, isFA := load.X.(*ssa.FieldAddr); isFA {
+				if named, s := derefNamedStruct(fa.X.Type()); named != nil && s != nil && named.Origin().Obj() != nil && st.pass != nil && named.Origin().Obj().Pkg() == st.pass.Pkg && fa.Field < s.NumFields() {
+					sf := s.Field(fa.Field)
+					if st.roLocalFields[sf.Origin()] || (!sf.Exported() && !sf.Embedded()) {
+						if closed, ok := st.resolveClosedFieldInterfaceTypes(types.TypeString(named.Origin(), nil), fa.Field); ok {
+							for _, ct := range closed {
+								addConcreteType(ct)
+							}
+							return
+						}
+					}
+				}
+			}
+		}
+		q := st.ask()
+		ts, incomplete := q.resolveInterfaceTypes(fn, v)
+		if incomplete || q.cut {
+			failed = true
+			return
+		}
+		for _, ct := range ts {
+			addConcreteType(ct)
+		}
+	}
+	var collectContainer func(fn *ssa.Function, c ssa.Value, seen map[ssa.Value]bool)
+	collectContainer = func(fn *ssa.Function, c ssa.Value, seen map[ssa.Value]bool) {
+		if failed || c == nil || seen[c] {
+			return
+		}
+		seen[c] = true
+		addIfaceVal(fn, c)
+		if c.Referrers() == nil {
+			return
+		}
+		for _, r := range *c.Referrers() {
+			switch x := r.(type) {
+			case *ssa.MapUpdate:
+				if x.Map == c {
+					addIfaceVal(fn, x.Key)
+					addIfaceVal(fn, x.Value)
+					collectContainer(fn, x.Value, seen)
+				}
+			case *ssa.Store:
+				if x.Addr == c {
+					addIfaceVal(fn, x.Val)
+					collectContainer(fn, x.Val, seen)
+				}
+			case *ssa.UnOp:
+				if x.Op == token.MUL && x.X == c {
+					collectContainer(fn, x, seen)
+				}
+			}
+		}
+	}
+	for _, fn := range scanFns {
+		if failed || len(fn.Blocks) == 0 {
+			continue
+		}
+		forEachInstr(fn, func(ins ssa.Instruction) {
+			if failed {
+				return
+			}
+			if selfField != nil {
+				if fa, ok := ins.(*ssa.FieldAddr); ok {
+					if _, s := derefNamedStruct(fa.X.Type()); s != nil && fa.Field < s.NumFields() && s.Field(fa.Field).Origin() == selfField {
+						collectContainer(fn, fa, map[ssa.Value]bool{})
+					}
+				}
+			}
+			if selfGlobal != nil {
+				var opBuf [8]*ssa.Value
+				for _, op := range ins.Operands(opBuf[:0]) {
+					if op != nil && *op == selfGlobal {
+						collectContainer(fn, selfGlobal, map[ssa.Value]bool{})
+					}
+				}
+			}
+		})
+	}
+	if failed {
+		return nil, false
+	}
+	return needClone, true
+}
+
+func blockReachableWithoutFailedTypeAssert(fn *ssa.Function, target *ssa.BasicBlock, param ssa.Value, ct types.Type) bool {
+	visited := make([]bool, len(fn.Blocks))
+	var dfs func(b *ssa.BasicBlock) bool
+	dfs = func(b *ssa.BasicBlock) bool {
+		if b == target {
+			return true
+		}
+		if visited[b.Index] {
+			return false
+		}
+		visited[b.Index] = true
+		if len(b.Instrs) > 0 && len(b.Succs) == 2 {
+			if br, ok := b.Instrs[len(b.Instrs)-1].(*ssa.If); ok {
+				if okSucc := typeAssertOkSuccIdx(br.Cond, param, ct); okSucc >= 0 {
+					// On a runtime value of concrete type ct, execution MUST take b.Succs[okSucc],
+					// so b.Succs[1-okSucc] cannot be traversed!
+					return dfs(b.Succs[okSucc])
+				}
+			}
+		}
+		for _, succ := range b.Succs {
+			if dfs(succ) {
+				return true
+			}
+		}
+		return false
+	}
+	return dfs(fn.Blocks[0])
+}
+
+func typeAssertOkSuccIdx(cond ssa.Value, param ssa.Value, ct types.Type) int {
+	base, neg := unwrapBoolCond(cond)
+	ext, ok := base.(*ssa.Extract)
+	if !ok || ext.Index != 1 {
+		return -1
+	}
+	ta, ok := ext.Tuple.(*ssa.TypeAssert)
+	if !ok || !ta.CommaOk || ta.X != param || !types.Identical(ta.AssertedType, ct) {
+		return -1
+	}
+	if neg {
+		return 1
+	}
+	return 0
+}
+
+// computeLocalFieldSyncFacts records per-field Firewall and Frozen properties for structs declared
+// in this package after AutoSync and summary fixpoints have settled.
+func (st *state) computeLocalFieldSyncFacts(fns []*ssa.Function) {
+	st.firewallFields = map[*types.Var]bool{}
+	st.frozenFields = map[*types.Var]bool{}
+	if st.contracts == nil || st.ssa == nil || st.ssa.Pkg == nil {
+		return
+	}
+	ci := st.contracts
+	isMain := st.pass != nil && st.pass.Pkg != nil && st.pass.Pkg.Name() == "main"
+	scanFns := fns
+	if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil && !slices.Contains(scanFns, pkgInit) {
+		scanFns = append(append([]*ssa.Function(nil), fns...), pkgInit)
+	}
+	overwrittenTypes := map[*types.TypeName]bool{}
+	copiedPtrTypes := map[*types.TypeName]bool{}
+	faByField := map[*types.Var][]faSite{}
+	fvalByField := map[*types.Var][]fvalSite{}
+	for _, fn := range scanFns {
+		if len(fn.Blocks) == 0 {
+			continue
+		}
+		forEachInstr(fn, func(ins ssa.Instruction) {
+			switch x := ins.(type) {
+			case *ssa.UnOp:
+				if x.Op == token.MUL {
+					if named, ok := types.Unalias(x.Type()).(*types.Named); ok && named.Obj() != nil {
+						if _, isStruct := named.Underlying().(*types.Struct); isStruct && !st.isFreshValueCtorLoad(fn, x) {
+							copiedPtrTypes[named.Origin().Obj()] = true
+						}
+					}
+				}
+			case *ssa.Field:
+				if named, ok := types.Unalias(x.X.Type()).(*types.Named); ok && named.Origin().Obj() != nil && named.Origin().Obj().Pkg() == st.pass.Pkg {
+					if s, isStruct := named.Underlying().(*types.Struct); isStruct && x.Field < s.NumFields() {
+						f := s.Field(x.Field).Origin()
+						fvalByField[f] = append(fvalByField[f], fvalSite{fn: fn, fv: x})
+					}
+				}
+			case *ssa.Store:
+				if named, ok := types.Unalias(x.Val.Type()).(*types.Named); ok && named.Obj() != nil {
+					if _, isStruct := named.Underlying().(*types.Struct); isStruct && !st.autoPrePub(fn, x, x.Addr) {
+						if a, isAlloc := x.Addr.(*ssa.Alloc); !isAlloc || a.Parent() != fn || !allocValueOnly(a) {
+							overwrittenTypes[named.Origin().Obj()] = true
+						}
+					}
+				}
+			case *ssa.FieldAddr:
+				named, s := derefNamedStruct(x.X.Type())
+				if named != nil && named.Origin().Obj().Pkg() == st.pass.Pkg && x.Field < s.NumFields() {
+					f := s.Field(x.Field).Origin()
+					faByField[f] = append(faByField[f], faSite{fn: fn, fa: x})
+				}
+			}
+		})
+	}
+	for _, named := range ci.localAllNamedTypes {
+		tn := named.Origin().Obj()
+		s, ok := named.Underlying().(*types.Struct)
+		if !ok || s.NumFields() == 0 || overwrittenTypes[tn] {
+			continue
+		}
+		typeKey := types.TypeString(named.Origin(), nil)
+		if len(ci.structConv[typeKey]) > 0 {
+			continue
+		}
+		unexposedType := !tn.Exported() && !st.typeExposedOutsidePkg(named)
+		for i := range s.NumFields() {
+			sf := s.Field(i)
+			f := sf.Origin()
+			ft := sf.Type()
+			sites := faByField[f]
+			if !copiedPtrTypes[tn] && st.autoGuarded[f] != nil {
+				st.firewallFields[f] = true
+				continue
+			}
+			if !copiedPtrTypes[tn] && isSyncPrimitiveValueType(ft) && st.syncFieldNeverOverwrittenOrCopied(sites) {
+				st.firewallFields[f] = true
+				continue
+			}
+			if !st.fieldReadOnlyPostConstruction(sites) {
+				continue
+			}
+			if st.cls.Shareable(ft) || st.isAutoSyncType(ft) {
+				if _, isValStruct := ft.Underlying().(*types.Struct); isValStruct && !st.cls.Shareable(ft) {
+					if copiedPtrTypes[tn] || !st.embeddedAutoSyncStructNeverCopied(sites) {
+						continue
+					}
+				}
+				st.firewallFields[f] = true
+				st.frozenFields[f] = true
+				continue
+			}
+			switch u := ft.Underlying().(type) {
+			case *types.Slice:
+				if st.isAutoSyncType(u.Elem()) && st.readOnlyContainerField(sites, fvalByField[f], f, false) {
+					st.frozenFields[f] = true
+				}
+			case *types.Map:
+				if st.isAutoSyncType(u.Key()) && st.isAutoSyncType(u.Elem()) && st.readOnlyContainerField(sites, fvalByField[f], f, false) {
+					st.frozenFields[f] = true
+				}
+			case *types.Pointer:
+				if (isMain || unexposedType || (!sf.Exported() && !sf.Embedded())) && st.readOnlyContainerField(sites, fvalByField[f], f, false) {
+					st.frozenFields[f] = true
+				}
+			case *types.Signature:
+				if (isMain || unexposedType || (!sf.Exported() && !sf.Embedded())) && st.closedReadOnlyCallableField(typeKey, i) {
+					st.frozenFields[f] = true
+				}
+			case *types.Interface:
+				if (isMain || unexposedType || (!sf.Exported() && !sf.Embedded())) && st.closedReadOnlyInterfaceField(typeKey, i, u) {
+					st.frozenFields[f] = true
+				}
+			}
+		}
+	}
+}
+
+func calleeOriginName(callee *ssa.Function) string {
+	if callee == nil {
+		return ""
+	}
+	if orig := callee.Origin(); orig != nil {
+		return orig.Name()
+	}
+	return callee.Name()
+}
+
+func (st *state) concreteTypeReadOnlyForInterface(ct types.Type, iface *types.Interface) bool {
+	if ct == nil || iface == nil {
+		return false
+	}
+	if st.cls.Shareable(ct) || st.isAutoSyncType(ct) {
+		return true
+	}
+	if st.ssa == nil || st.ssa.Pkg == nil || st.ssa.Pkg.Prog == nil {
+		return false
+	}
+	mset := st.ssa.Pkg.Prog.MethodSets.MethodSet(ct)
+	for m := range iface.NumMethods() {
+		sel := mset.Lookup(iface.Method(m).Pkg(), iface.Method(m).Name())
+		if sel == nil {
+			return false
+		}
+		var ms *summary
+		if mfn := st.ssa.Pkg.Prog.MethodValue(sel); mfn != nil {
+			ms = st.summary(mfn)
+		} else if obj, isFunc := sel.Obj().(*types.Func); isFunc {
+			ms = st.summaryOfFuncObj(obj)
+		}
+		if ms == nil || ms.pessimistic || ms.writes(0) || ms.spawns(0) {
+			return false
+		}
+	}
+	return true
+}
+
+// isAutoSyncInterfaceReturn reports whether result resIdx of fn has a non-empty interface type rt
+// and every return path in fn boxes either nil, an already-proven AutoSync call result, or a
+// concrete value whose type is Shareable or AutoSync.
+func (st *state) isAutoSyncInterfaceReturn(fn *ssa.Function, resIdx int, rt types.Type) bool {
+	if fn == nil || len(fn.Blocks) == 0 || rt == nil {
+		return false
+	}
+	iface, ok := rt.Underlying().(*types.Interface)
+	if !ok || iface.NumMethods() == 0 {
+		return false
+	}
+	sawReturn := false
+	for _, b := range fn.Blocks {
+		if len(b.Instrs) == 0 {
+			continue
+		}
+		ret, isRet := b.Instrs[len(b.Instrs)-1].(*ssa.Return)
+		if !isRet {
+			continue
+		}
+		if resIdx < 0 || resIdx >= len(ret.Results) {
+			return false
+		}
+		sawReturn = true
+		rv := ret.Results[resIdx]
+		if c, isConst := rv.(*ssa.Const); isConst && c.IsNil() {
+			continue
+		}
+		if st.isAutoSyncCallResultValue(rv) {
+			continue
+		}
+		q := st.ask()
+		ts, incomplete := q.resolveInterfaceTypes(fn, rv)
+		if incomplete || q.cut || len(ts) == 0 {
+			return false
+		}
+		for _, ct := range ts {
+			if !st.concreteTypeReadOnlyForInterface(ct, iface) {
+				return false
+			}
+		}
+	}
+	return sawReturn
+}
+
+// inferAutoSyncInterfaces identifies named non-empty interfaces declared in this package whose
+// in-package witnesses/implementations (`*ssa.MakeInterface`) are non-empty and 100% Shareable or
+// AutoSync, with zero unsafe ChangeInterface/TypeAssert conversions in the package.
+// Every conversion into such an interface across this package and all importers is verified by
+// checkAutoSyncInterfaceConversions, making the interface a sound checked Sync boundary.
+func (st *state) inferAutoSyncInterfaces(scanFns []*ssa.Function) {
+	if st.pass == nil || st.pass.Pkg == nil || st.pass.Pkg.Scope() == nil {
+		return
+	}
+	scope := st.pass.Pkg.Scope()
+	var ifaceCands []*types.Named
+	candSet := map[*types.TypeName]*types.Interface{}
+	for _, name := range scope.Names() {
+		tn, ok := scope.Lookup(name).(*types.TypeName)
+		if !ok || tn == nil || tn.IsAlias() {
+			continue
+		}
+		named, ok := tn.Type().(*types.Named)
+		if !ok || named.Origin().TypeParams() != nil {
+			continue
+		}
+		iface, ok := named.Underlying().(*types.Interface)
+		if !ok || iface.NumMethods() == 0 {
+			continue
+		}
+		// Reject interfaces with callback-spawning method signatures (`Go(func())`).
+		hasFuncParam := false
+		for m := range iface.NumMethods() {
+			sig, ok := iface.Method(m).Type().(*types.Signature)
+			if !ok || sig.Params() == nil {
+				continue
+			}
+			for p := range sig.Params().Len() {
+				if isSignatureType(sig.Params().At(p).Type()) {
+					hasFuncParam = true
+					break
+				}
+			}
+			if hasFuncParam {
+				break
+			}
+		}
+		if hasFuncParam {
+			continue
+		}
+		ifaceCands = append(ifaceCands, named)
+		candSet[tn] = iface
+	}
+	if len(ifaceCands) == 0 {
+		return
+	}
+
+	sawSafeWitness := map[*types.TypeName]bool{}
+	rejected := map[*types.TypeName]bool{}
+	targetTypeName := func(t types.Type) *types.TypeName {
+		named, ok := types.Unalias(t).(*types.Named)
+		if !ok || named.Obj() == nil {
+			return nil
+		}
+		if _, isCand := candSet[named.Origin().Obj()]; !isCand {
+			return nil
+		}
+		return named.Origin().Obj()
+	}
+
+	for _, fn := range scanFns {
+		if len(fn.Blocks) == 0 {
+			continue
+		}
+		forEachInstr(fn, func(ins ssa.Instruction) {
+			switch x := ins.(type) {
+			case *ssa.MakeInterface:
+				tn := targetTypeName(x.Type())
+				if tn == nil || rejected[tn] {
+					return
+				}
+				if x.X == nil || (!st.cls.Shareable(x.X.Type()) && !st.isAutoSyncType(x.X.Type())) {
+					rejected[tn] = true
+					return
+				}
+				sawSafeWitness[tn] = true
+			case *ssa.ChangeInterface:
+				tn := targetTypeName(x.Type())
+				if tn == nil || rejected[tn] {
+					return
+				}
+				if x.X == nil || (!st.cls.Shareable(x.X.Type()) && !st.isAutoSyncType(x.X.Type()) && !st.isAutoSyncCallResultValue(x.X)) {
+					rejected[tn] = true
+				}
+			case *ssa.TypeAssert:
+				tn := targetTypeName(x.AssertedType)
+				if tn == nil || rejected[tn] {
+					return
+				}
+				if x.X == nil || (!st.cls.Shareable(x.X.Type()) && !st.isAutoSyncType(x.X.Type()) && !st.isAutoSyncCallResultValue(x.X)) {
+					rejected[tn] = true
+				}
+			}
+		})
+	}
+
+	// Also inspect AST blank-identifier compile-time interface witnesses (`var _ I = (*T)(nil)`),
+	// which go/ssa elides from `init()` because `_` has no storage.
+	if st.pass != nil && st.pass.TypesInfo != nil {
+		for _, file := range st.pass.Files {
+			for _, decl := range file.Decls {
+				gd, ok := decl.(*ast.GenDecl)
+				if !ok || gd.Tok != token.VAR {
+					continue
+				}
+				for _, spec := range gd.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok || vs.Type == nil || len(vs.Values) == 0 {
+						continue
+					}
+					tn := targetTypeName(st.pass.TypesInfo.TypeOf(vs.Type))
+					if tn == nil || rejected[tn] {
+						continue
+					}
+					for _, valExpr := range vs.Values {
+						vt := st.pass.TypesInfo.TypeOf(valExpr)
+						if vt == nil || types.Identical(vt, types.Typ[types.UntypedNil]) {
+							continue
+						}
+						if _, isIface := vt.Underlying().(*types.Interface); isIface {
+							if !st.cls.Shareable(vt) && !st.isAutoSyncType(vt) {
+								rejected[tn] = true
+								break
+							}
+							continue
+						}
+						if !st.cls.Shareable(vt) && !st.isAutoSyncType(vt) {
+							rejected[tn] = true
+							break
+						}
+						sawSafeWitness[tn] = true
+					}
+				}
+			}
+		}
+	}
+
+	for _, named := range ifaceCands {
+		tn := named.Origin().Obj()
+		if sawSafeWitness[tn] && !rejected[tn] {
+			st.valueAutoSyncTypes[tn] = true
+		}
+	}
+}
+
+func (st *state) slotAllInterfaceElemsShareable(selfField *types.Var, selfGlobal *ssa.Global) bool {
+	if selfField == nil && selfGlobal == nil {
+		return false
+	}
+	needClone, ok := st.nonShareableInterfaceTypesInSlot(selfField, selfGlobal, nil)
+	return ok && len(needClone) == 0
+}
+
+func (st *state) isAutoSyncInterfaceType(t types.Type) (*types.Named, bool) {
+	if t == nil {
+		return nil, false
+	}
+	named, ok := types.Unalias(t).(*types.Named)
+	if !ok || named.Obj() == nil {
+		return nil, false
+	}
+	iface, ok := named.Underlying().(*types.Interface)
+	if !ok || iface.NumMethods() == 0 {
+		return nil, false
+	}
+	if st.cls.Shareable(named) {
+		return nil, false
+	}
+	if !st.isAutoSyncNamed(named, false, false, map[types.Type]bool{}) {
+		return nil, false
+	}
+	return named, true
+}
+
+// checkAutoSyncInterfaceConversions enforces at every MakeInterface, ChangeInterface, and
+// TypeAssert into a checked AutoSync interface that the underlying concrete value is Shareable or
+// AutoSync, closing the cross-package open-world interface boundary soundly.
+func (st *state) checkAutoSyncInterfaceConversions(fn *ssa.Function) {
+	if fn == nil || len(fn.Blocks) == 0 {
+		return
+	}
+	checkIfaceSource := func(ins ssa.Instruction, targetNamed *types.Named, src ssa.Value) {
+		if src == nil {
+			return
+		}
+		if c, isConst := src.(*ssa.Const); isConst && c.IsNil() {
+			return
+		}
+		if st.cls.Shareable(src.Type()) || st.isAutoSyncType(src.Type()) || st.isAutoSyncCallResultValue(src) {
+			return
+		}
+		q := st.ask()
+		ts, incomplete := q.resolveInterfaceTypes(fn, src)
+		if !incomplete && !q.cut {
+			allSafe := true
+			for _, ct := range ts {
+				if !st.cls.Shareable(ct) && !st.isAutoSyncType(ct) {
+					allSafe = false
+					break
+				}
+			}
+			if allSafe {
+				return
+			}
+		}
+		pos := posOf(ins, ins)
+		st.report(pos, NotOwned, describe(src)+" converted to concurrency-safe interface "+targetNamed.Obj().Name()+" is not proven concurrency-safe")
+	}
+	for _, b := range fn.Blocks {
+		for _, ins := range b.Instrs {
+			switch x := ins.(type) {
+			case *ssa.MakeInterface:
+				if targetNamed, ok := st.isAutoSyncInterfaceType(x.Type()); ok && x.X != nil {
+					if !st.cls.Shareable(x.X.Type()) && !st.isAutoSyncType(x.X.Type()) {
+						pos := posOf(ins, ins)
+						st.report(pos, NotOwned, describe(x.X)+" ("+x.X.Type().String()+") boxed into concurrency-safe interface "+targetNamed.Obj().Name()+" is not concurrency-safe")
+					}
+				}
+			case *ssa.ChangeInterface:
+				if targetNamed, ok := st.isAutoSyncInterfaceType(x.Type()); ok {
+					checkIfaceSource(ins, targetNamed, x.X)
+				}
+			case *ssa.TypeAssert:
+				if targetNamed, ok := st.isAutoSyncInterfaceType(x.AssertedType); ok {
+					checkIfaceSource(ins, targetNamed, x.X)
+				}
+			}
+		}
+	}
+}
+
+// isAutoSyncCallResultValue reports whether v is the direct result of a static call (or tuple
+// extract) whose exported summary marks that result slot ResAutoSync.
+func (st *state) isAutoSyncCallResultValue(v ssa.Value) bool {
+	seen := map[ssa.Value]bool{}
+	for v != nil && !seen[v] {
+		seen[v] = true
+		switch x := v.(type) {
+		case *ssa.ChangeInterface:
+			v = x.X
+		case *ssa.ChangeType:
+			v = x.X
+		case *ssa.Call:
+			if x.Call.IsInvoke() {
+				return false
+			}
+			callee := x.Call.StaticCallee()
+			if callee == nil {
+				return false
+			}
+			s := st.summary(callee)
+			return !s.pessimistic && len(s.resAutoSync) > 0 && s.resAutoSync[0]
+		case *ssa.Extract:
+			call, ok := x.Tuple.(*ssa.Call)
+			if !ok || call.Call.IsInvoke() {
+				return false
+			}
+			callee := call.Call.StaticCallee()
+			if callee == nil {
+				return false
+			}
+			s := st.summary(callee)
+			return !s.pessimistic && x.Index >= 0 && x.Index < len(s.resAutoSync) && s.resAutoSync[x.Index]
+		default:
+			return false
+		}
+	}
+	return false
 }

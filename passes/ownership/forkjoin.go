@@ -254,7 +254,7 @@ func (st *state) joinsForValue(g *graph, t transfer, w ssa.Value) map[ssa.Instru
 		if idx >= len(f.FreeVars) {
 			return nil
 		}
-		if st.cls.Shareable(b.Type()) || g.isAutoSyncCapture(t.instr, b) {
+		if st.cls.Shareable(b.Type()) || g.isAutoSyncCapture(t.instr, b) || st.isShareableCellBinding(b, f.FreeVars[idx]) {
 			continue
 		}
 		if bn := g.val(b); bn != nil && wReg[bn.find()] {
@@ -467,6 +467,9 @@ func (st *state) helperClosureJoins(g *graph, sp spawnSite, f *ssa.Function, mc 
 // waitCalls returns the non-deferred calls to the wait method on recv in fn. The receiver must be
 // the very value the spawner was called on, so both calls reach the same object.
 func waitCalls(fn *ssa.Function, recv ssa.Value, wait string) []ssa.Instruction {
+	if recv == nil || recv.Referrers() == nil {
+		return nil
+	}
 	var out []ssa.Instruction
 	for _, r := range *recv.Referrers() {
 		c, ok := r.(*ssa.Call)

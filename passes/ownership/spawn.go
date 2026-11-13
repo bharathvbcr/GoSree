@@ -110,8 +110,8 @@ func (st *state) spawnSiteAt(ins ssa.Instruction, argHint int) (spawnSite, bool)
 	} else if argHint < 0 {
 		for i := range call.Call.Args {
 			if sum.spawns(i) {
-				if cbIdx >= 0 {
-					return spawnSite{}, false
+				if c, isConst := call.Call.Args[i].(*ssa.Const); isConst && c.IsNil() {
+					continue
 				}
 				cbIdx = i
 			}
@@ -201,7 +201,16 @@ func soleSpawnWithState(st *state, mc *ssa.MakeClosure, once bool) ssa.Instructi
 		if _, dbg := r.(*ssa.DebugRef); dbg {
 			continue
 		}
-		sp, ok := st.spawnSiteOf(r)
+		argHint := -1
+		if callIns, isCall := r.(*ssa.Call); isCall {
+			for i, a := range callIns.Call.Args {
+				if a == mc {
+					argHint = i
+					break
+				}
+			}
+		}
+		sp, ok := st.spawnSiteAt(r, argHint)
 		if !ok || start != nil || sp.fn != mc || usedAsArg(r, mc, sp.arg) {
 			return nil
 		}

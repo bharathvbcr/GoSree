@@ -69,6 +69,9 @@ func (st *state) checkTransfer(g *graph, t transfer) {
 	if !borrowEscaped && st.isVerifiedScopedForkJoin(g, t, after, reachMask) {
 		return
 	}
+	if !borrowEscaped && st.isSpawnTransfer(t) && !handlerFlagged && st.isProjectedSyncTransfer(g, t, after) {
+		return
+	}
 
 	var foreign, escape []event
 	for c := range reg {
@@ -385,7 +388,7 @@ func (st *state) handlerHasUnguardedHiddenWrite(hb handlerBody) bool {
 					}
 				}
 				if mc, isMC := ins.(*ssa.MakeClosure); isMC {
-					if anon, ok := mc.Fn.(*ssa.Function); ok && len(anon.Blocks) > 0 && anon.Pkg == st.ssa.Pkg {
+					if anon, ok := mc.Fn.(*ssa.Function); ok && st.isAnalyzableClosureFn(anon) && !st.isProjectedSyncClosureInFn(fn, mc) {
 						hasSharedBind := false
 						for _, bnd := range mc.Bindings {
 							if !st.cls.Shareable(bnd.Type()) && !st.isAutoSyncType(bnd.Type()) && !isFreshInFn(fn, bnd) {
@@ -403,11 +406,19 @@ func (st *state) handlerHasUnguardedHiddenWrite(hb handlerBody) bool {
 						if visit(callee, isAnonInHandler) {
 							return true
 						}
-					} else if isAnonInHandler && callee != nil {
+					} else if callee != nil {
 						cs := st.summary(callee)
-						for ai, arg := range call.Common().Args {
-							if !st.cls.Shareable(arg.Type()) && !st.isAutoSyncType(arg.Type()) && !isFreshInFn(fn, arg) && cs.writes(ai) {
-								return true
+						if isAnonInHandler {
+							for ai, arg := range call.Common().Args {
+								if !st.cls.Shareable(arg.Type()) && !st.isAutoSyncType(arg.Type()) && !isFreshInFn(fn, arg) && cs.writes(ai) {
+									return true
+								}
+							}
+						} else if callee.Pkg != st.ssa.Pkg {
+							for ai, arg := range call.Common().Args {
+								if !st.cls.Shareable(arg.Type()) && !st.isAutoSyncType(arg.Type()) && !isFreshInFn(fn, arg) && (cs.pessimistic || cs.spawns(ai)) {
+									return true
+								}
 							}
 						}
 					}
@@ -465,7 +476,7 @@ func (st *state) handlerForeignCallersClean(g *graph, reg map[*node]bool, target
 			if e.global != nil && (st.isInitOnlyImmutableGlobal(e.global) || st.isGuardedGlobal(e.global)) {
 				continue
 			}
-			if e.kind == evReturn && pointsToIntersects(g, c, targetPts) {
+			if e.kind == evReturn && pointsToIntersects(g, c, targetPts) && !st.isSafeReturnEvent(g, e, targetPts) {
 				return false
 			}
 			if e.kind == evForeign {
@@ -478,6 +489,9 @@ func (st *state) handlerForeignCallersClean(g *graph, reg map[*node]bool, target
 		}
 	}
 	if !hasForeignParam {
+		return true
+	}
+	if st.allParamsSharedRead(g.fn, paramSet) {
 		return true
 	}
 	if g.fn == nil || g.fn.Synthetic != "" {
@@ -538,7 +552,13 @@ func (st *state) handlerForeignCallersClean(g *graph, reg map[*node]bool, target
 							if ce.global != nil && (st.isInitOnlyImmutableGlobal(ce.global) || st.isGuardedGlobal(ce.global)) {
 								continue
 							}
-							if (ce.kind == evForeign || ce.kind == evReturn) && pointsToIntersects(cg, cc, aPts) {
+							if ce.kind == evForeign && pointsToIntersects(cg, cc, aPts) {
+								if ce.param >= 0 && st.sums[caller] != nil && st.sums[caller].isSharedRead(ce.param) {
+									continue
+								}
+								return false
+							}
+							if ce.kind == evReturn && pointsToIntersects(cg, cc, aPts) && !st.isSafeReturnEvent(cg, ce, aPts) {
 								return false
 							}
 							if ce.kind == evWrite && ce.instr != nil && st.nodeWriteMayTouchTarget(cg, aPts, cc, ce.instr, true) {
@@ -571,7 +591,7 @@ func (st *state) handlerForeignCallersClean(g *graph, reg map[*node]bool, target
 // findings, perform zero unguarded writes to their shared roots, and whose registering function
 // performs no concurrent or post-registration writes to the shared region.
 func (st *state) isVerifiedHandlerReg(g *graph, t transfer, reg map[*node]bool, after func(ssa.Instruction) bool, handlerFlagged bool) bool {
-	if handlerFlagged || len(g.cutCalls) > 0 {
+	if handlerFlagged || g == nil {
 		return false
 	}
 	sp, ok := spawnOf(t.instr)
@@ -591,8 +611,7 @@ func (st *state) isVerifiedHandlerReg(g *graph, t transfer, reg map[*node]bool, 
 		if hbSum.pessimistic {
 			return false
 		}
-		hg := st.graphOf(hb.fn)
-		if len(hg.cutCalls) > 0 {
+		if st.handlerRootsHaveCutCall(hb.fn, hb.roots) {
 			return false
 		}
 		if st.handlerHasUnguardedHiddenWrite(hb) {
@@ -600,30 +619,33 @@ func (st *state) isVerifiedHandlerReg(g *graph, t transfer, reg map[*node]bool, 
 		}
 	}
 	targetPts := pointsToSet(g, g.val(t.v))
+	if g.hasCutCallTouching(targetPts) {
+		return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
+	}
 	if !st.handlerForeignCallersClean(g, reg, targetPts) {
-		return false
+		return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
 	}
 	for c := range reg {
 		for _, e := range c.events {
 			if e.global != nil && st.mutatedGlobals[e.global] && !st.isGuardedGlobal(e.global) {
-				return false
+				return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
 			}
 			if e.kind == evWrite && e.instr != nil && st.nodeWriteMayTouchTarget(g, targetPts, c, e.instr, true) {
 				if after(e.instr) {
-					return false
+					return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
 				}
 				if _, isDefer := e.instr.(*ssa.Defer); isDefer {
-					return false
+					return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
 				}
 				if st.isUnjoinedConcurrentSpawnBefore(g, e.instr, t.instr) {
-					return false
+					return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
 				}
 			}
 		}
 	}
 	for _, d := range g.defers {
 		if st.deferMayWriteTarget(g, d, targetPts) {
-			return false
+			return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
 		}
 	}
 	return true
@@ -726,7 +748,7 @@ func everyPathJoinsBeforeReturn(g *graph, t transfer, joins map[ssa.Instruction]
 // errgroup.Group.Go, SafeGoWG, or channel join), checking each captured binding individually as
 // either Shareable/AutoSync, scoped read-only, or scoped fresh-owned.
 func (st *state) isVerifiedScopedForkJoin(g *graph, t transfer, after func(ssa.Instruction) bool, reachMask []bool) bool {
-	if len(g.cutCalls) > 0 {
+	if g == nil {
 		return false
 	}
 	if goIns, isGo := t.instr.(*ssa.Go); isGo && (t.index >= 0 || len(goIns.Call.Args) > 0) {
@@ -756,19 +778,26 @@ func (st *state) isVerifiedScopedForkJoin(g *graph, t transfer, after func(ssa.I
 		return false
 	}
 	fg := st.graphOf(fn)
-	if len(fg.cutCalls) > 0 {
-		return false
-	}
 	inWindow := instrsAfter(g, t, joins, nil)
+	inWinFn := func(ins ssa.Instruction) bool { return inWindow[ins] }
 	for j, b := range mc.Bindings {
 		if j >= len(fn.FreeVars) {
 			return false
 		}
+		fv := fn.FreeVars[j]
 		if st.cls.Shareable(b.Type()) || g.isAutoSyncCapture(t.instr, b) {
 			continue
 		}
-		fv := fn.FreeVars[j]
-		if !st.childLeaksOrTransfersFreeVar(fg, fv) && !cs.freeLeaks(j) {
+		if bn := g.val(b); bn != nil && g.hasCutCallTouching(pointsToSet(g, bn)) {
+			return false
+		}
+		if fvn := fg.val(fv); fvn != nil && fg.hasCutCallTouching(pointsToSet(fg, fvn)) {
+			return false
+		}
+		if st.isProjectedSyncBinding(g, t, fn, j, b, inWinFn, -1) {
+			continue
+		}
+		if !st.childNonFormatLeaksFreeVar(fg, fv, j) {
 			if !cs.writesFree(j) && st.isScopedReadOnlyInParent(g, t, b, inWindow) {
 				continue
 			}
@@ -791,9 +820,40 @@ func (st *state) childLeaksOrTransfersFreeVar(fg *graph, fv *ssa.FreeVar) bool {
 	if n == nil {
 		return false
 	}
-	for c := range fg.region(n) {
+	reg := fg.region(n)
+	for c := range reg {
 		for _, e := range c.events {
-			if e.kind == evEscape || e.kind == evTransfer {
+			if e.kind == evTransfer {
+				return true
+			}
+			if e.kind == evEscape && !fg.formatsOnly(e, reg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (st *state) childNonFormatLeaksFreeVar(fg *graph, fv *ssa.FreeVar, fvIdx int) bool {
+	n := fg.val(fv)
+	if n == nil {
+		return false
+	}
+	reg := fg.region(n)
+	for c := range reg {
+		for _, e := range c.events {
+			switch e.kind {
+			case evWrite:
+				continue
+			case evForeign:
+				if e.free != fvIdx {
+					return true
+				}
+			case evEscape:
+				if !fg.formatsOnly(e, reg) {
+					return true
+				}
+			default:
 				return true
 			}
 		}
@@ -844,9 +904,6 @@ func (st *state) isHelperClosureBindingBenign(g *graph, t transfer, helperMC *ss
 		return false
 	}
 	hg := st.graphOf(helperFn)
-	if len(hg.cutCalls) > 0 {
-		return false
-	}
 	inWindow := instrsAfter(g, t, joins, nil)
 	for k, hb := range helperMC.Bindings {
 		if k >= len(helperFn.FreeVars) {
@@ -856,6 +913,12 @@ func (st *state) isHelperClosureBindingBenign(g *graph, t transfer, helperMC *ss
 			continue
 		}
 		hfv := helperFn.FreeVars[k]
+		if hbn := g.val(hb); hbn != nil && g.hasCutCallTouching(pointsToSet(g, hbn)) {
+			return false
+		}
+		if hfvn := hg.val(hfv); hfvn != nil && hg.hasCutCallTouching(pointsToSet(hg, hfvn)) {
+			return false
+		}
 		if st.childLeaksOrTransfersFreeVar(hg, hfv) || hs.freeLeaks(k) {
 			return false
 		}

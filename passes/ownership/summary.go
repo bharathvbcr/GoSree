@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"go/types"
 	"slices"
+	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -53,6 +54,19 @@ type FuncFact struct {
 	// declared in the callee's package (nil when none are AutoSync).
 	ParamAutoSync []bool
 	ResAutoSync   []bool
+	// SharedRead[i]: the function shares parameter i across concurrent readers (such as registered
+	// HTTP route handlers or proven read-only projections) and mutates nothing reachable from i
+	// after registration, so callers must own/shareRead i and never mutate it after the call.
+	SharedRead []bool
+	// RecvFirewall / RecvFrozen: per-field Firewall and Frozen Sync properties of an exported
+	// method's struct receiver, allowing cross-package disjoint field-projection checks without a
+	// separate type fact.
+	RecvFirewall []bool
+	RecvFrozen   []bool
+	// ProjSync[i]: parameter i is a struct pointer/value whose uses inside this function (and its
+	// callees) touch only proven Firewall or Frozen fields, so cross-package callers can project i
+	// across concurrent closures/handlers safely.
+	ProjSync []bool
 }
 
 func (f *FuncFact) hasExt() bool {
@@ -122,6 +136,14 @@ func (f *FuncFact) GobEncode() ([]byte, error) {
 	if ext {
 		flags |= 1 << 2
 	}
+	sr := anyTrue(f.SharedRead)
+	if sr {
+		flags |= 1 << 3
+	}
+	rf := anyTrue(f.RecvFirewall) || anyTrue(f.RecvFrozen) || anyTrue(f.ProjSync)
+	if rf {
+		flags |= 1 << 4
+	}
 	buf := make([]byte, 0, 16+len(f.Links)*8+len(f.Acquires)*12)
 	buf = append(buf, flags)
 	buf = appendBoolBits(buf, f.Leaks)
@@ -158,6 +180,26 @@ func (f *FuncFact) GobEncode() ([]byte, error) {
 			buf = appendBoolBits(buf, nil)
 		}
 	}
+	if sr {
+		buf = appendBoolBits(buf, f.SharedRead)
+	}
+	if rf {
+		if anyTrue(f.RecvFirewall) {
+			buf = appendBoolBits(buf, f.RecvFirewall)
+		} else {
+			buf = appendBoolBits(buf, nil)
+		}
+		if anyTrue(f.RecvFrozen) {
+			buf = appendBoolBits(buf, f.RecvFrozen)
+		} else {
+			buf = appendBoolBits(buf, nil)
+		}
+		if anyTrue(f.ProjSync) {
+			buf = appendBoolBits(buf, f.ProjSync)
+		} else {
+			buf = appendBoolBits(buf, nil)
+		}
+	}
 	return buf, nil
 }
 
@@ -167,6 +209,9 @@ func (f *FuncFact) GobDecode(data []byte) error {
 		return errors.New("empty FuncFact payload")
 	}
 	flags := data[0]
+	if (flags &^ 0x1f) != 0 {
+		return errors.New("unknown FuncFact flags")
+	}
 	f.Fresh = (flags & (1 << 0)) != 0
 	f.Unknown = (flags & (1 << 1)) != 0
 	rest := data[1:]
@@ -277,6 +322,46 @@ func (f *FuncFact) GobDecode(data []byte) error {
 		f.ParamAutoSync = nil
 		f.ResAutoSync = nil
 	}
+	if (flags & (1 << 3)) != 0 {
+		if f.SharedRead, rest, err = readBoolBits(rest); err != nil {
+			return err
+		}
+		if len(f.SharedRead) == 0 || !anyTrue(f.SharedRead) {
+			return errors.New("non-canonical FuncFact SharedRead")
+		}
+	} else {
+		f.SharedRead = nil
+	}
+	if (flags & (1 << 4)) != 0 {
+		if f.RecvFirewall, rest, err = readBoolBits(rest); err != nil {
+			return err
+		}
+		if len(f.RecvFirewall) > 0 && !anyTrue(f.RecvFirewall) {
+			return errors.New("non-canonical FuncFact RecvFirewall")
+		}
+		if f.RecvFrozen, rest, err = readBoolBits(rest); err != nil {
+			return err
+		}
+		if len(f.RecvFrozen) > 0 && !anyTrue(f.RecvFrozen) {
+			return errors.New("non-canonical FuncFact RecvFrozen")
+		}
+		if f.ProjSync, rest, err = readBoolBits(rest); err != nil {
+			return err
+		}
+		if len(f.ProjSync) > 0 && !anyTrue(f.ProjSync) {
+			return errors.New("non-canonical FuncFact ProjSync")
+		}
+		if f.RecvFirewall == nil && f.RecvFrozen == nil && f.ProjSync == nil {
+			return errors.New("empty FuncFact RecvSync")
+		}
+	} else {
+		f.RecvFirewall = nil
+		f.RecvFrozen = nil
+		f.ProjSync = nil
+	}
+	if len(rest) != 0 {
+		return errors.New("trailing FuncFact bytes")
+	}
 	return nil
 }
 
@@ -327,8 +412,18 @@ type summary struct {
 	waitKind      uint8
 	paramAutoSync []bool
 	resAutoSync   []bool
+	sharedRead    []bool
 	// pessimistic marks a summary for a function gosree could not analyse.
 	pessimistic bool
+	projSync    []bool
+}
+
+func (s *summary) isSharedRead(i int) bool {
+	return !s.pessimistic && i >= 0 && i < len(s.sharedRead) && s.sharedRead[i]
+}
+
+func (s *summary) isProjSync(i int) bool {
+	return !s.pessimistic && i >= 0 && i < len(s.projSync) && s.projSync[i]
 }
 
 func (s *summary) leaks(i int) bool {
@@ -554,6 +649,8 @@ func (st *state) summaryOfFuncObj(obj *types.Func) *summary {
 		waitKind:      f.WaitKind,
 		paramAutoSync: f.ParamAutoSync,
 		resAutoSync:   f.ResAutoSync,
+		sharedRead:    f.SharedRead,
+		projSync:      f.ProjSync,
 	}
 	if c, ok := capContracts[obj.FullName()]; ok && c.freshResult {
 		s.fresh = true
@@ -590,9 +687,21 @@ func adaptBoundMethodSummary(fn *ssa.Function, ms *summary) *summary {
 		bs.spawnParam[i] = ms.spawns(i + 1)
 		bs.writeParam[i] = ms.writes(i + 1)
 		bs.nonRegWriteParam[i] = ms.writesNonReg(i + 1)
+		if ms.isSharedRead(i + 1) {
+			if bs.sharedRead == nil {
+				bs.sharedRead = make([]bool, nParams)
+			}
+			bs.sharedRead[i] = true
+		}
+		if ms.isProjSync(i + 1) {
+			if bs.projSync == nil {
+				bs.projSync = make([]bool, nParams)
+			}
+			bs.projSync[i] = true
+		}
 	}
 	if nFree > 0 {
-		bs.leakFree[0] = ms.leaks(0)
+		bs.leakFree[0] = ms.leaks(0) || ms.spawns(0)
 		bs.writeFree[0] = ms.writes(0)
 	}
 	if ms.waitParam >= 1 {
@@ -1115,6 +1224,38 @@ func isStringByteRuneCopy(dst, src types.Type) bool {
 // computeDirectWrites computes directional 2-level (d1, dPlus) write summaries for fn's
 // parameters and free variables, eliminating symmetric Steensgaard pollution across unrelated
 // closure captures, slice/struct containers, and value-copied structs.
+func fieldVarOfFieldAddr(fa *ssa.FieldAddr) *types.Var {
+	if fa == nil || fa.X == nil {
+		return nil
+	}
+	_, s := derefNamedStruct(fa.X.Type())
+	if s == nil || fa.Field < 0 || fa.Field >= s.NumFields() {
+		return nil
+	}
+	return s.Field(fa.Field)
+}
+
+func calleeOriginPkgPath(fn *ssa.Function) string {
+	if fn == nil {
+		return ""
+	}
+	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+		return fn.Pkg.Pkg.Path()
+	}
+	if orig := fn.Origin(); orig != nil {
+		if orig.Pkg != nil && orig.Pkg.Pkg != nil {
+			return orig.Pkg.Pkg.Path()
+		}
+		if orig.Object() != nil && orig.Object().Pkg() != nil {
+			return orig.Object().Pkg().Path()
+		}
+	}
+	if fn.Object() != nil && fn.Object().Pkg() != nil {
+		return fn.Object().Pkg().Path()
+	}
+	return ""
+}
+
 func computeDirectWrites(fn *ssa.Function, st *state) ([]bool, []bool, []bool) {
 	np := len(fn.Params)
 	nf := len(fn.FreeVars)
@@ -1135,10 +1276,13 @@ func computeDirectWrites(fn *ssa.Function, st *state) ([]bool, []bool, []bool) {
 		switch x := v.(type) {
 		case *ssa.Const, *ssa.Function, *ssa.Builtin, *ssa.Global:
 			return false
-		case *ssa.MakeInterface:
-			return !st.cls.Shareable(x.Type()) || !st.cls.Shareable(x.X.Type())
-		default:
+		case *ssa.Parameter, *ssa.FreeVar, *ssa.Alloc:
 			return !st.cls.Shareable(v.Type())
+		case *ssa.MakeInterface:
+			return (!st.cls.Shareable(x.Type()) && !st.isAutoSyncType(x.Type())) ||
+				(!st.cls.Shareable(x.X.Type()) && !st.isAutoSyncType(x.X.Type()))
+		default:
+			return !st.cls.Shareable(v.Type()) && !st.isAutoSyncType(v.Type())
 		}
 	}
 
@@ -1239,6 +1383,11 @@ func computeDirectWrites(fn *ssa.Function, st *state) ([]bool, []bool, []bool) {
 						}
 					}
 				case *ssa.FieldAddr:
+					if st.autoGuardsVerified {
+						if sf := fieldVarOfFieldAddr(x); sf != nil && st.autoGuarded[sf.Origin()] != nil {
+							continue
+						}
+					}
 					if propSame(x, x.X) {
 						changed = true
 					}
@@ -1451,13 +1600,39 @@ func computeDirectWrites(fn *ssa.Function, st *state) ([]bool, []bool, []bool) {
 		if deep {
 			written, _ = written.unionWith(bothOf(v))
 			writtenNonReg, _ = writtenNonReg.unionWith(bothOf(v))
-		} else {
-			written, _ = written.unionWith(d1[v])
-			writtenNonReg, _ = writtenNonReg.unionWith(d1[v])
+			return
 		}
+		bits := d1[v]
+		if bits.isEmpty() {
+			cur := v
+			for cur != nil && bits.isEmpty() {
+				if _, guarded := st.slotOf(cur); guarded {
+					return
+				}
+				switch x := cur.(type) {
+				case *ssa.FieldAddr:
+					cur = x.X
+				case *ssa.IndexAddr:
+					cur = x.X
+				default:
+					cur = nil
+				}
+				if cur != nil {
+					bits = d1[cur]
+				}
+			}
+		}
+		written, _ = written.unionWith(bits)
+		writtenNonReg, _ = writtenNonReg.unionWith(bits)
 	}
-	markValRegOnly := func(v ssa.Value) {
-		if v == nil {
+	markCallArg := func(v ssa.Value, deep bool) {
+		if v == nil || st.cls.Shareable(v.Type()) || st.isAutoSyncType(v.Type()) {
+			return
+		}
+		markVal(v, deep)
+	}
+	markCallArgRegOnly := func(v ssa.Value) {
+		if v == nil || st.cls.Shareable(v.Type()) || st.isAutoSyncType(v.Type()) {
 			return
 		}
 		if _, guarded := st.slotOf(v); guarded {
@@ -1466,9 +1641,16 @@ func computeDirectWrites(fn *ssa.Function, st *state) ([]bool, []bool, []bool) {
 		written, _ = written.unionWith(bothOf(v))
 	}
 
+	recvWriteOnceInit := st.isMutexWriteOnceInitMethod(fn)
+
 	for _, b := range fn.Blocks {
 		for _, ins := range b.Instrs {
 			if w, ok := writeOf(ins); ok {
+				if recvWriteOnceInit {
+					if fa, isFA := w.addr.(*ssa.FieldAddr); isFA && len(fn.Params) > 0 && fa.X == fn.Params[0] {
+						continue
+					}
+				}
 				markVal(w.addr, false)
 			}
 			switch x := ins.(type) {
@@ -1481,14 +1663,14 @@ func computeDirectWrites(fn *ssa.Function, st *state) ([]bool, []bool, []bool) {
 				}
 				for i, a := range cc.Args {
 					if gSum == nil || gSum.writes(i) {
-						markVal(a, true)
+						markCallArg(a, true)
 					}
 				}
-				markVal(cc.Value, true)
+				markCallArg(cc.Value, true)
 			case *ssa.Call:
-				collectCallWrites(fn, x, &x.Call, st, markVal, markValRegOnly)
+				collectCallWrites(fn, x, &x.Call, st, markCallArg, markCallArgRegOnly)
 			case *ssa.Defer:
-				collectCallWrites(fn, x, &x.Call, st, markVal, markValRegOnly)
+				collectCallWrites(fn, x, &x.Call, st, markCallArg, markCallArgRegOnly)
 			}
 		}
 	}
@@ -1501,6 +1683,316 @@ func computeDirectWrites(fn *ssa.Function, st *state) ([]bool, []bool, []bool) {
 		writeFree[j] = written.has(np + j)
 	}
 	return writeParam, nonRegWriteParam, writeFree
+}
+
+// isMutexWriteOnceInitMethod reports whether fn is an unexported mutex-serialized write-once lazy
+// initializer on *T (such as (*Client).ensureClient):
+//  1. T is a struct declared in this package with a value sync.Mutex/sync.RWMutex field mu and no
+//     struct-type conversions.
+//  2. Every write in fn is a Store to an unexported non-embedded field &recv.f dominated by
+//     recv.mu.Lock() (in lockWrite mode) AND reachable only along the nil/false branch of an
+//     early-return check on one of the written fields (`if recv.g != nil { return ... }`) also
+//     evaluated while holding recv.mu in lockWrite mode.
+//  3. Across the entire package, every store to any field written by fn is either pre-publication
+//     on a fresh struct allocation or holds that receiver's mu in lockWrite mode.
+func (st *state) isMutexWriteOnceInitMethod(fn *ssa.Function) bool {
+	if fn == nil || fn.Synthetic != "" || fn.Parent() != nil || len(fn.Blocks) == 0 || len(fn.Params) == 0 {
+		return false
+	}
+	if token.IsExported(fn.Name()) || fn.Signature == nil || fn.Signature.Recv() == nil {
+		return false
+	}
+	if st.pass == nil || st.pass.Pkg == nil || st.contracts == nil || len(st.allFns) == 0 {
+		return false
+	}
+	recv := fn.Params[0]
+	named, s := derefNamedStruct(recv.Type())
+	if named == nil || s == nil || named.Origin().Obj() == nil || named.Origin().Obj().Pkg() != st.pass.Pkg {
+		return false
+	}
+	if len(st.contracts.structConv[types.TypeString(named.Origin(), nil)]) > 0 {
+		return false
+	}
+	var muIdxs []int
+	for i := range s.NumFields() {
+		sf := s.Field(i)
+		if !sf.Exported() && !sf.Embedded() && isSyncMutexType(sf.Type()) {
+			muIdxs = append(muIdxs, i)
+		}
+	}
+	if len(muIdxs) == 0 {
+		return false
+	}
+
+	writtenFields := map[*types.Var]bool{}
+	var storeInstrs []*ssa.Store
+	for _, b := range fn.Blocks {
+		for _, ins := range b.Instrs {
+			if _, isGo := ins.(*ssa.Go); isGo {
+				return false
+			}
+			w, ok := writeOf(ins)
+			if !ok {
+				continue
+			}
+			stIns, isStore := ins.(*ssa.Store)
+			if !isStore {
+				return false
+			}
+			fa, isFA := w.addr.(*ssa.FieldAddr)
+			if !isFA || fa.X != recv || fa.Field < 0 || fa.Field >= s.NumFields() {
+				return false
+			}
+			sf := s.Field(fa.Field)
+			if sf.Exported() || sf.Embedded() || isSyncMutexType(sf.Type()) {
+				return false
+			}
+			writtenFields[sf.Origin()] = true
+			storeInstrs = append(storeInstrs, stIns)
+		}
+	}
+	if len(storeInstrs) == 0 {
+		return false
+	}
+
+	gs := st.ensureGuardSummaries(st.allFns)
+	fnBefore := st.locksOf(gs, fn)
+	if fnBefore == nil {
+		return false
+	}
+	recvPath, ok := pathOf(recv)
+	if !ok {
+		return false
+	}
+
+	scanFns := st.allFns
+	if st.ssa != nil && st.ssa.Pkg != nil {
+		if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil && !slices.Contains(scanFns, pkgInit) {
+			scanFns = append(append([]*ssa.Function(nil), scanFns...), pkgInit)
+		}
+	}
+
+	for _, muIdx := range muIdxs {
+		wantLock := guardPath{root: recvPath.root, steps: recvPath.steps + "." + strconv.Itoa(muIdx)}
+		allStoresLocked := true
+		for _, stIns := range storeInstrs {
+			at, reach := fnBefore[stIns]
+			if !reach {
+				continue
+			}
+			if at[wantLock] < lockWrite {
+				allStoresLocked = false
+				break
+			}
+		}
+		if !allStoresLocked {
+			continue
+		}
+		if !hasLockedMonotonicFieldGuard(fn, recv, s, writtenFields, wantLock, fnBefore, storeInstrs) {
+			continue
+		}
+		if !st.allPackageFieldStoresHoldMutex(scanFns, writtenFields, muIdx, gs) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func hasLockedMonotonicFieldGuard(
+	fn *ssa.Function,
+	recv ssa.Value,
+	s *types.Struct,
+	writtenFields map[*types.Var]bool,
+	wantLock guardPath,
+	fnBefore map[ssa.Instruction]lockset,
+	storeInstrs []*ssa.Store,
+) bool {
+	for _, b := range fn.Blocks {
+		if len(b.Instrs) == 0 || len(b.Succs) != 2 {
+			continue
+		}
+		br, ok := b.Instrs[len(b.Instrs)-1].(*ssa.If)
+		if !ok {
+			continue
+		}
+		at, reach := fnBefore[br]
+		if !reach || at[wantLock] < lockWrite {
+			continue
+		}
+		uninitSucc := lockedFieldUninitSuccIdx(br.Cond, recv, s, writtenFields)
+		if uninitSucc < 0 {
+			continue
+		}
+		initSucc := b.Succs[1-uninitSucc]
+		if !blockAlwaysReturnsWithoutStore(initSucc, storeInstrs, map[*ssa.BasicBlock]bool{}) {
+			continue
+		}
+		// Every store in fn must be unreachable from entry without passing through b -> b.Succs[uninitSucc].
+		allGuarded := true
+		for _, stIns := range storeInstrs {
+			if blockReachableAvoidingEdge(fn.Blocks[0], stIns.Block(), b, b.Succs[uninitSucc]) {
+				allGuarded = false
+				break
+			}
+		}
+		if allGuarded {
+			return true
+		}
+	}
+	return false
+}
+
+func lockedFieldUninitSuccIdx(cond ssa.Value, recv ssa.Value, s *types.Struct, writtenFields map[*types.Var]bool) int {
+	base, neg := unwrapBoolCond(cond)
+	isWrittenRecvFieldLoad := func(v ssa.Value) bool {
+		load, ok := v.(*ssa.UnOp)
+		if !ok || load.Op != token.MUL {
+			return false
+		}
+		fa, ok := load.X.(*ssa.FieldAddr)
+		if !ok || fa.X != recv || fa.Field < 0 || fa.Field >= s.NumFields() {
+			return false
+		}
+		return writtenFields[s.Field(fa.Field).Origin()]
+	}
+	if isWrittenRecvFieldLoad(base) {
+		// `if recv.inited { return }` -> true (0) is initialized, false (1) is uninitialized.
+		if neg {
+			return 0
+		}
+		return 1
+	}
+	bin, ok := base.(*ssa.BinOp)
+	if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
+		return -1
+	}
+	var other ssa.Value
+	if isWrittenRecvFieldLoad(bin.X) {
+		other = bin.Y
+	} else if isWrittenRecvFieldLoad(bin.Y) {
+		other = bin.X
+	} else {
+		return -1
+	}
+	c, ok := other.(*ssa.Const)
+	if !ok || !c.IsNil() {
+		return -1
+	}
+	// `bin` compares recv.f with nil.
+	uninitWhenTrue := bin.Op == token.EQL
+	if neg {
+		uninitWhenTrue = !uninitWhenTrue
+	}
+	if uninitWhenTrue {
+		return 0
+	}
+	return 1
+}
+
+func blockAlwaysReturnsWithoutStore(b *ssa.BasicBlock, storeInstrs []*ssa.Store, seen map[*ssa.BasicBlock]bool) bool {
+	if b == nil {
+		return false
+	}
+	if seen[b] {
+		return false
+	}
+	seen[b] = true
+	for _, stIns := range storeInstrs {
+		if stIns.Block() == b {
+			return false
+		}
+	}
+	if len(b.Instrs) == 0 {
+		return false
+	}
+	switch b.Instrs[len(b.Instrs)-1].(type) {
+	case *ssa.Return:
+		return true
+	case *ssa.Jump, *ssa.If:
+		if len(b.Succs) == 0 {
+			return false
+		}
+		for _, succ := range b.Succs {
+			if !blockAlwaysReturnsWithoutStore(succ, storeInstrs, seen) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func blockReachableAvoidingEdge(entry, target, guardBlk, requiredSucc *ssa.BasicBlock) bool {
+	visited := map[*ssa.BasicBlock]bool{}
+	var dfs func(cur *ssa.BasicBlock) bool
+	dfs = func(cur *ssa.BasicBlock) bool {
+		if cur == target {
+			return true
+		}
+		if visited[cur] {
+			return false
+		}
+		visited[cur] = true
+		for _, succ := range cur.Succs {
+			if cur == guardBlk && succ == requiredSucc {
+				continue
+			}
+			if dfs(succ) {
+				return true
+			}
+		}
+		return false
+	}
+	return dfs(entry)
+}
+
+func (st *state) allPackageFieldStoresHoldMutex(scanFns []*ssa.Function, fields map[*types.Var]bool, muIdx int, gs *guardState) bool {
+	muStep := "." + strconv.Itoa(muIdx)
+	for _, fn := range scanFns {
+		if len(fn.Blocks) == 0 {
+			continue
+		}
+		var fnBefore map[ssa.Instruction]lockset
+		for _, b := range fn.Blocks {
+			for _, ins := range b.Instrs {
+				stIns, ok := ins.(*ssa.Store)
+				if !ok {
+					continue
+				}
+				fa, ok := stIns.Addr.(*ssa.FieldAddr)
+				if !ok {
+					continue
+				}
+				_, s := derefNamedStruct(fa.X.Type())
+				if s == nil || fa.Field < 0 || fa.Field >= s.NumFields() {
+					continue
+				}
+				if !fields[s.Field(fa.Field).Origin()] {
+					continue
+				}
+				if st.autoPrePub(fn, stIns, fa.X) {
+					continue
+				}
+				bp, ok := pathOf(fa.X)
+				if !ok {
+					return false
+				}
+				if fnBefore == nil {
+					fnBefore = st.locksOf(gs, fn)
+				}
+				at, reach := fnBefore[stIns]
+				if !reach {
+					continue
+				}
+				if at[guardPath{root: bp.root, steps: bp.steps + muStep}] < lockWrite {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 func propCallDirectFlow(
@@ -1526,14 +2018,14 @@ func propCallDirectFlow(
 				if propSame(result, cc.Args[0]) {
 					changed = true
 				}
-				if len(cc.Args) == 2 && !st.cls.Shareable(elemType(cc.Args[0].Type())) {
+				if len(cc.Args) == 2 && !st.cls.Shareable(elemType(cc.Args[0].Type())) && !st.isAutoSyncType(elemType(cc.Args[0].Type())) {
 					if addDPlus(result, bothOf(cc.Args[1])) {
 						changed = true
 					}
 				}
 			}
 		case "copy":
-			if len(cc.Args) == 2 && !st.cls.Shareable(elemType(cc.Args[0].Type())) {
+			if len(cc.Args) == 2 && !st.cls.Shareable(elemType(cc.Args[0].Type())) && !st.isAutoSyncType(elemType(cc.Args[0].Type())) {
 				if propBaseDPlus(cc.Args[0], bothOf(cc.Args[1])) {
 					changed = true
 				}
@@ -1935,7 +2427,95 @@ func paramSpawnedAtMostOnce(param *ssa.Parameter, isSite func(ssa.Instruction) b
 	if param.Referrers() == nil {
 		return false
 	}
-	for _, r := range *param.Referrers() {
+	if cell := singleStoreValueCell(param.Parent(), param); cell != nil {
+		return cellSpawnedAtMostOnce(cell, param, isSite, st)
+	}
+	return valSpawnedAtMostOnce(param, isSite, st)
+}
+
+func singleStoreValueCell(fn *ssa.Function, v ssa.Value) *ssa.Alloc {
+	if fn == nil || v == nil || v.Referrers() == nil {
+		return nil
+	}
+	var store *ssa.Store
+	for _, r := range *v.Referrers() {
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Store:
+			if store != nil || x.Val != v {
+				return nil
+			}
+			store = x
+		default:
+			return nil
+		}
+	}
+	if store == nil {
+		return nil
+	}
+	alloc, ok := store.Addr.(*ssa.Alloc)
+	if !ok || alloc.Parent() != fn || alloc.Referrers() == nil {
+		return nil
+	}
+	for _, r := range *alloc.Referrers() {
+		if r == store {
+			continue
+		}
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.UnOp:
+			if x.Op != token.MUL || x.X != alloc {
+				return nil
+			}
+		case *ssa.MakeClosure:
+			found := false
+			for _, b := range x.Bindings {
+				if b == alloc {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil
+			}
+		default:
+			return nil
+		}
+	}
+	return alloc
+}
+
+func cellSpawnedAtMostOnce(cell *ssa.Alloc, initVal ssa.Value, isSite func(ssa.Instruction) bool, st *state) bool {
+	sawUse := false
+	for _, r := range *cell.Referrers() {
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Store:
+			if x.Addr != cell || x.Val != initVal {
+				return false
+			}
+		case *ssa.UnOp:
+			if x.Op != token.MUL || x.X != cell || !valSpawnedAtMostOnce(x, isSite, st) {
+				return false
+			}
+			sawUse = true
+		case *ssa.MakeClosure:
+			if !singleSpawnClosureOK(x, cell, true, isSite, st) {
+				return false
+			}
+			sawUse = true
+		default:
+			return false
+		}
+	}
+	return sawUse
+}
+
+func valSpawnedAtMostOnce(val ssa.Value, isSite func(ssa.Instruction) bool, st *state) bool {
+	if val.Referrers() == nil {
+		return false
+	}
+	for _, r := range *val.Referrers() {
 		switch x := r.(type) {
 		case *ssa.DebugRef:
 		case *ssa.BinOp:
@@ -1946,8 +2526,8 @@ func paramSpawnedAtMostOnce(param *ssa.Parameter, isSite func(ssa.Instruction) b
 			if !isSite(x) {
 				return false
 			}
-			if x.Call.Value == param {
-				if usedAsArg(x, param, -1) {
+			if x.Call.Value == val {
+				if usedAsArg(x, val, -1) {
 					return false
 				}
 				continue
@@ -1958,7 +2538,7 @@ func paramSpawnedAtMostOnce(param *ssa.Parameter, isSite func(ssa.Instruction) b
 			}
 			nPassed := 0
 			for k, a := range x.Call.Args {
-				if a == param {
+				if a == val {
 					if !synchronousCallsAtMostOnce(callee, k, st, map[*ssa.Function]bool{}) {
 						return false
 					}
@@ -1973,7 +2553,7 @@ func paramSpawnedAtMostOnce(param *ssa.Parameter, isSite func(ssa.Instruction) b
 				return false
 			}
 			if sp, ok := spawnOf(x); ok && sp.via != "" {
-				if sp.fn != param || usedAsArg(x, param, sp.arg) {
+				if sp.fn != val || usedAsArg(x, val, sp.arg) {
 					return false
 				}
 				continue
@@ -1985,18 +2565,18 @@ func paramSpawnedAtMostOnce(param *ssa.Parameter, isSite func(ssa.Instruction) b
 			cs := st.summary(callee)
 			nPassed := 0
 			for k, a := range x.Call.Args {
-				if a == param {
+				if a == val {
 					if !cs.spawns(k) {
 						return false
 					}
 					nPassed++
 				}
 			}
-			if nPassed != 1 || x.Call.Value == param {
+			if nPassed != 1 || x.Call.Value == val {
 				return false
 			}
 		case *ssa.MakeClosure:
-			if !singleSpawnClosureOK(x, param, isSite, st) {
+			if !singleSpawnClosureOK(x, val, false, isSite, st) {
 				return false
 			}
 		default:
@@ -2006,7 +2586,7 @@ func paramSpawnedAtMostOnce(param *ssa.Parameter, isSite func(ssa.Instruction) b
 	return true
 }
 
-func singleSpawnClosureOK(mc *ssa.MakeClosure, param ssa.Value, isSite func(ssa.Instruction) bool, st *state) bool {
+func singleSpawnClosureOK(mc *ssa.MakeClosure, target ssa.Value, targetIsCell bool, isSite func(ssa.Instruction) bool, st *state) bool {
 	if mc.Referrers() == nil {
 		return false
 	}
@@ -2060,14 +2640,42 @@ func singleSpawnClosureOK(mc *ssa.MakeClosure, param ssa.Value, isSite func(ssa.
 		return false
 	}
 	for j, bind := range mc.Bindings {
-		if bind != param {
+		if bind != target {
 			continue
 		}
-		if j >= len(subFn.FreeVars) || !valCalledSyncAtMostOnce(subFn, subFn.FreeVars[j], st, map[*ssa.Function]bool{}) {
+		if j >= len(subFn.FreeVars) {
+			return false
+		}
+		fv := subFn.FreeVars[j]
+		if targetIsCell {
+			if !freeVarCellCalledSyncAtMostOnce(subFn, fv, st, map[*ssa.Function]bool{}) {
+				return false
+			}
+		} else if !valCalledSyncAtMostOnce(subFn, fv, st, map[*ssa.Function]bool{}) {
 			return false
 		}
 	}
 	return true
+}
+
+func freeVarCellCalledSyncAtMostOnce(fn *ssa.Function, fv *ssa.FreeVar, st *state, seen map[*ssa.Function]bool) bool {
+	if fv == nil || fv.Referrers() == nil {
+		return false
+	}
+	var loads []ssa.Value
+	for _, r := range *fv.Referrers() {
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.UnOp:
+			if x.Op != token.MUL || x.X != fv {
+				return false
+			}
+			loads = append(loads, x)
+		default:
+			return false
+		}
+	}
+	return valsCalledSyncAtMostOnce(fn, loads, st, seen)
 }
 
 func synchronousCallsAtMostOnce(fn *ssa.Function, paramIdx int, st *state, seen map[*ssa.Function]bool) bool {
@@ -2081,6 +2689,39 @@ func synchronousCallsAtMostOnce(fn *ssa.Function, paramIdx int, st *state, seen 
 
 func valCalledSyncAtMostOnce(fn *ssa.Function, v ssa.Value, st *state, seen map[*ssa.Function]bool) bool {
 	if v == nil || v.Referrers() == nil {
+		return false
+	}
+	if cell := singleStoreValueCell(fn, v); cell != nil {
+		return allocCellCalledSyncAtMostOnce(fn, cell, v, st, seen)
+	}
+	return valsCalledSyncAtMostOnce(fn, []ssa.Value{v}, st, seen)
+}
+
+func allocCellCalledSyncAtMostOnce(fn *ssa.Function, cell *ssa.Alloc, initVal ssa.Value, st *state, seen map[*ssa.Function]bool) bool {
+	var vals []ssa.Value
+	for _, r := range *cell.Referrers() {
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Store:
+			if x.Addr != cell || x.Val != initVal {
+				return false
+			}
+		case *ssa.UnOp:
+			if x.Op != token.MUL || x.X != cell {
+				return false
+			}
+			vals = append(vals, x)
+		case *ssa.MakeClosure:
+			vals = append(vals, cell)
+		default:
+			return false
+		}
+	}
+	return valsCalledSyncAtMostOnce(fn, vals, st, seen)
+}
+
+func valsCalledSyncAtMostOnce(fn *ssa.Function, vals []ssa.Value, st *state, seen map[*ssa.Function]bool) bool {
+	if len(vals) == 0 {
 		return false
 	}
 	for _, b := range fn.Blocks {
@@ -2099,108 +2740,146 @@ func valCalledSyncAtMostOnce(fn *ssa.Function, v ssa.Value, st *state, seen map[
 		}
 	}
 	var actionSites []ssa.Instruction
-	for _, r := range *v.Referrers() {
-		switch x := r.(type) {
-		case *ssa.DebugRef:
-		case *ssa.BinOp:
-			if x.Op != token.EQL && x.Op != token.NEQ {
-				return false
-			}
-		case *ssa.Call:
-			if x.Call.Value == v {
-				if usedAsArg(x, v, -1) {
+	seenMC := map[*ssa.MakeClosure]bool{}
+	for _, v := range vals {
+		_, vIsCell := v.(*ssa.Alloc)
+		if v.Referrers() == nil {
+			continue
+		}
+		for _, r := range *v.Referrers() {
+			switch x := r.(type) {
+			case *ssa.DebugRef:
+			case *ssa.Store:
+				if !vIsCell || x.Addr != v {
 					return false
 				}
-				actionSites = append(actionSites, x)
-				continue
-			}
-			callee := x.Call.StaticCallee()
-			if callee == nil || x.Call.IsInvoke() {
-				return false
-			}
-			nPassed := 0
-			for k, a := range x.Call.Args {
-				if a == v {
-					if !synchronousCallsAtMostOnce(callee, k, st, seen) {
-						return false
-					}
-					nPassed++
-				}
-			}
-			if nPassed != 1 {
-				return false
-			}
-			actionSites = append(actionSites, x)
-		case *ssa.Defer:
-			if x.Call.Value == v {
-				if usedAsArg(x, v, -1) {
+			case *ssa.UnOp:
+				if !vIsCell || x.Op != token.MUL || x.X != v {
 					return false
 				}
-				actionSites = append(actionSites, x)
-				continue
-			}
-			callee := x.Call.StaticCallee()
-			if callee == nil || x.Call.IsInvoke() {
-				return false
-			}
-			nPassed := 0
-			for k, a := range x.Call.Args {
-				if a == v {
-					if !synchronousCallsAtMostOnce(callee, k, st, seen) {
+			case *ssa.BinOp:
+				if vIsCell || (x.Op != token.EQL && x.Op != token.NEQ) {
+					return false
+				}
+			case *ssa.Call:
+				if vIsCell {
+					return false
+				}
+				if x.Call.Value == v {
+					if usedAsArg(x, v, -1) {
 						return false
 					}
-					nPassed++
-				}
-			}
-			if nPassed != 1 {
-				return false
-			}
-			actionSites = append(actionSites, x)
-		case *ssa.MakeClosure:
-			if x.Referrers() == nil {
-				return false
-			}
-			var callSite ssa.Instruction
-			for _, cr := range *x.Referrers() {
-				if _, dbg := cr.(*ssa.DebugRef); dbg {
+					actionSites = append(actionSites, x)
 					continue
 				}
-				if callSite != nil {
+				callee := x.Call.StaticCallee()
+				if callee == nil || x.Call.IsInvoke() {
 					return false
 				}
-				switch cx := cr.(type) {
-				case *ssa.Call:
-					if cx.Call.Value != x || usedAsArg(cx, x, -1) {
-						return false
+				nPassed := 0
+				for k, a := range x.Call.Args {
+					if a == v {
+						if !synchronousCallsAtMostOnce(callee, k, st, seen) {
+							return false
+						}
+						nPassed++
 					}
-					callSite = cx
-				case *ssa.Defer:
-					if cx.Call.Value != x || usedAsArg(cx, x, -1) {
-						return false
-					}
-					callSite = cx
-				default:
+				}
+				if nPassed != 1 {
 					return false
 				}
-			}
-			subFn, ok := x.Fn.(*ssa.Function)
-			if callSite == nil || !ok || len(subFn.Blocks) == 0 || seen[subFn] {
+				actionSites = append(actionSites, x)
+			case *ssa.Defer:
+				if vIsCell {
+					return false
+				}
+				if x.Call.Value == v {
+					if usedAsArg(x, v, -1) {
+						return false
+					}
+					actionSites = append(actionSites, x)
+					continue
+				}
+				callee := x.Call.StaticCallee()
+				if callee == nil || x.Call.IsInvoke() {
+					return false
+				}
+				nPassed := 0
+				for k, a := range x.Call.Args {
+					if a == v {
+						if !synchronousCallsAtMostOnce(callee, k, st, seen) {
+							return false
+						}
+						nPassed++
+					}
+				}
+				if nPassed != 1 {
+					return false
+				}
+				actionSites = append(actionSites, x)
+			case *ssa.MakeClosure:
+				if seenMC[x] {
+					continue
+				}
+				seenMC[x] = true
+				if x.Referrers() == nil {
+					return false
+				}
+				var callSite ssa.Instruction
+				for _, cr := range *x.Referrers() {
+					if _, dbg := cr.(*ssa.DebugRef); dbg {
+						continue
+					}
+					if callSite != nil {
+						return false
+					}
+					switch cx := cr.(type) {
+					case *ssa.Call:
+						if cx.Call.Value != x || usedAsArg(cx, x, -1) {
+							return false
+						}
+						callSite = cx
+					case *ssa.Defer:
+						if cx.Call.Value != x || usedAsArg(cx, x, -1) {
+							return false
+						}
+						callSite = cx
+					default:
+						return false
+					}
+				}
+				subFn, ok := x.Fn.(*ssa.Function)
+				if callSite == nil || !ok || len(subFn.Blocks) == 0 || seen[subFn] {
+					return false
+				}
+				seen[subFn] = true
+				for j, bind := range x.Bindings {
+					if bind == v {
+						if j >= len(subFn.FreeVars) {
+							delete(seen, subFn)
+							return false
+						}
+						var okSub bool
+						if vIsCell {
+							okSub = freeVarCellCalledSyncAtMostOnce(subFn, subFn.FreeVars[j], st, seen)
+						} else {
+							okSub = valCalledSyncAtMostOnce(subFn, subFn.FreeVars[j], st, seen)
+						}
+						if !okSub {
+							delete(seen, subFn)
+							return false
+						}
+					}
+				}
+				delete(seen, subFn)
+				actionSites = append(actionSites, callSite)
+			default:
 				return false
 			}
-			seen[subFn] = true
-			for j, bind := range x.Bindings {
-				if bind == v {
-					if j >= len(subFn.FreeVars) || !valCalledSyncAtMostOnce(subFn, subFn.FreeVars[j], st, seen) {
-						delete(seen, subFn)
-						return false
-					}
-				}
-			}
-			delete(seen, subFn)
-			actionSites = append(actionSites, callSite)
-		default:
-			return false
 		}
+	}
+	if len(actionSites) == 0 {
+		return false
 	}
 	for _, a := range actionSites {
 		after := reachableAfter(a)
