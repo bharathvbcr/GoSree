@@ -28,6 +28,9 @@ import (
 // archiveRev extracts subdir of repo at rev into dst (replacing it) and returns the commit's full SHA.
 // When the archive held symlink or hard-link entries, which are skipped, one line on diag says how many.
 func archiveRev(repo, rev, subdir, dst string, diag io.Writer) (string, error) {
+	if diag == nil {
+		return "", errors.New("archiveRev: no diagnostic writer: the count of skipped links would go nowhere")
+	}
 	out, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", rev+"^{commit}").Output()
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse %s in %s: %w", rev, repo, err)
@@ -61,6 +64,9 @@ func archiveRev(repo, rev, subdir, dst string, diag io.Writer) (string, error) {
 		return "", xerr
 	}
 	if res.files == 0 {
+		if res.rootLink {
+			return "", fmt.Errorf("git archive %s %s: no files: the subdirectory is itself a symlink or hard link, which is skipped", sha, prefix)
+		}
 		return "", fmt.Errorf("git archive %s %s: no files", sha, prefix)
 	}
 	if res.links > 0 {
@@ -72,7 +78,16 @@ func archiveRev(repo, rev, subdir, dst string, diag io.Writer) (string, error) {
 }
 
 // extraction is what extractTar did: the regular files it wrote and the link entries it skipped.
-type extraction struct{ files, links int }
+type extraction struct {
+	files, links int
+	// rootLink is set when the subdirectory itself was a link entry, so nothing beneath it was kept.
+	rootLink bool
+}
+
+// maxEntryName bounds an entry's cleaned name, relative to the prefix, in bytes: PATH_MAX on Linux
+// (macOS is 1024). A PAX record can name 1 MiB, and the skipped-link lookup costs one hash per path
+// component over the name, so the bound keeps that work per entry fixed. No git tree comes near it.
+const maxEntryName = 4096
 
 // extractTar writes the entries under prefix to dst, with prefix stripped, and counts the files.
 // Every write goes through an os.Root on dst. Symlink and hard-link entries are never created: they
@@ -109,15 +124,23 @@ func extractTar(r io.Reader, prefix, dst string) (extraction, error) {
 			}
 			return res, fmt.Errorf("archive entry %q is outside %q", h.Name, prefix)
 		}
-		if rel == "" {
-			continue
-		}
-		clean := path.Clean(rel)
+		clean := path.Clean(rel) // "." for the prefix directory itself, spelled "" or "." or "l/.."
 		if path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
 			return res, fmt.Errorf("archive entry %q escapes the destination", h.Name)
 		}
+		if len(clean) > maxEntryName {
+			return res, fmt.Errorf("archive entry %.64q... names a path of %d bytes, over the %d-byte bound", h.Name, len(clean), maxEntryName)
+		}
 		if link, ok := skippedAncestor(skipped, clean); ok {
 			return res, fmt.Errorf("archive entry %q is at or beneath the skipped link %q", h.Name, link)
+		}
+		if clean == "." {
+			if h.Typeflag == tar.TypeSymlink || h.Typeflag == tar.TypeLink {
+				skipped[clean] = struct{}{} // the whole subdirectory is a link: every later entry is refused
+				res.links++
+				res.rootLink = true
+			}
+			continue
 		}
 		target := filepath.FromSlash(clean)
 		switch h.Typeflag {
@@ -149,15 +172,26 @@ func extractTar(r io.Reader, prefix, dst string) (extraction, error) {
 	}
 }
 
-// skippedAncestor returns the skipped link that clean is, or lies beneath, if any.
+// skippedAncestor returns the skipped link that clean is, or lies beneath, if any. A skipped link
+// at the root (".") covers every entry. Otherwise it looks up each '/'-delimited prefix of clean,
+// then clean itself; clean is already cleaned and no longer than maxEntryName.
 func skippedAncestor(skipped map[string]struct{}, clean string) (string, bool) {
 	if len(skipped) == 0 {
 		return "", false
 	}
-	for p := clean; p != "." && p != "/"; p = path.Dir(p) {
-		if _, ok := skipped[p]; ok {
-			return p, true
+	if _, ok := skipped["."]; ok {
+		return ".", true
+	}
+	for i := 0; i < len(clean); i++ {
+		if clean[i] != '/' {
+			continue
 		}
+		if _, ok := skipped[clean[:i]]; ok {
+			return clean[:i], true
+		}
+	}
+	if _, ok := skipped[clean]; ok {
+		return clean, true
 	}
 	return "", false
 }

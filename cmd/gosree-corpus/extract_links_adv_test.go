@@ -255,8 +255,8 @@ func TestAdvBreakLinkAtRootUncounted(t *testing.T) {
 		{Name: "svc/a.go", Typeflag: tar.TypeReg, Mode: 0o644},
 	}, []string{"", "a"})
 	files, links, err := advExtract(r, "svc/", dst)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Error("svc/a.go beneath a skipped link at the subdirectory root was accepted")
 	}
 	if links != 1 {
 		t.Errorf("files = %d, links = %d; the archive holds 1 link entry, want links = 1", files, links)
