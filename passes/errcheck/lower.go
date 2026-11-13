@@ -98,6 +98,7 @@ type funcLowerer struct {
 	mem2regErrSlots map[*types.Var]uint32
 	mem2regErrOrder []*types.Var
 	callErrVar      map[*ssa.Call]*types.Var
+	errNames        map[token.Pos]string // call Lparen -> name of the error variable it is assigned to; built on first use
 	valErrVars      map[ssa.Value][]*types.Var
 
 	tuples           []gusseterr.TupleMeta
@@ -1626,6 +1627,7 @@ func (fl *funcLowerer) lowerCall(
 	blankInfo, isBlankedAST := fl.matchBlankedTuple(pos)
 	var tflags uint8
 	errSlot := gusseterr.NoneU32
+	var bindSiteID uint32
 	callSitePos := pos
 	callDesc := describeCallCommon(cc)
 	if isBlankedAST {
@@ -1661,10 +1663,15 @@ func (fl *funcLowerer) lowerCall(
 		Flags:      tflags,
 	})
 	fl.callTupleID[ins] = tid
+	if name := fl.errVarNameAt(pos); name != "" && !isBlankedAST {
+		bindSiteID = fl.pkg.addSite(pos, name, "")
+	} else {
+		bindSiteID = callSiteID
+	}
 
 	*ops = append(*ops, gusseterr.OpIR{
 		Kind:       gusseterr.OpBindTuple,
-		SiteID:     callSiteID,
+		SiteID:     bindSiteID,
 		TupleID:    tid,
 		SlotA:      errSlot,
 		Companions: compSlots,
@@ -2188,6 +2195,41 @@ func (fl *funcLowerer) assignedErrVarNotDiscarded(callPos token.Pos) *types.Var 
 		}
 	})
 	return found
+}
+
+// errVarNameAt is the name of the error variable the call at pos (its Lparen) assigns its error to,
+// or "" when the error goes to a blank, a field or nothing. It is for message text only: unlike
+// callErrVar it ignores a later `_ = err`, so it never decides what is tracked.
+func (fl *funcLowerer) errVarNameAt(pos token.Pos) string {
+	if fl.errNames == nil {
+		fl.errNames = make(map[token.Pos]string)
+		if fl.fn.Syntax() != nil {
+			note := func(stmt ast.Stmt, call ast.Expr) {
+				if c, ok := unparenExpr(call).(*ast.CallExpr); ok {
+					if v := fl.extractLHSAssignedErrVar(stmt, c.Lparen); v != nil {
+						fl.errNames[c.Lparen] = v.Name()
+					}
+				}
+			}
+			walkNoNestedClosures(fl.fn.Syntax(), func(n ast.Node) {
+				switch s := n.(type) {
+				case *ast.AssignStmt:
+					if len(s.Rhs) == 1 {
+						note(s, s.Rhs[0])
+					}
+				case *ast.DeclStmt:
+					if gd, ok := s.Decl.(*ast.GenDecl); ok {
+						for _, spec := range gd.Specs {
+							if vs, ok := spec.(*ast.ValueSpec); ok && len(vs.Values) == 1 {
+								note(s, vs.Values[0])
+							}
+						}
+					}
+				}
+			})
+		}
+	}
+	return fl.errNames[pos]
 }
 
 func (fl *funcLowerer) findErrVarInStmtList(stmts []ast.Stmt, callPos token.Pos) *types.Var {
