@@ -149,8 +149,10 @@ func extractTar(r io.Reader, prefix, dst string) (extraction, error) {
 				skipped[clean] = struct{}{} // the whole subdirectory is a link: every later entry is refused
 				res.links++
 				res.rootLink = true
+			} else if h.Typeflag != tar.TypeDir {
+				return res, fmt.Errorf("archive entry %q names the extraction root itself", h.Name)
 			}
-			continue
+			continue // the prefix directory's own entry
 		}
 		target := filepath.FromSlash(clean)
 		switch h.Typeflag {

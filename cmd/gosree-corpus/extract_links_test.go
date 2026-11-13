@@ -255,3 +255,19 @@ func TestArchiveRevReportsSkippedLinks(t *testing.T) {
 	lstatMissing(t, filepath.Join(dst, "link1"))
 	lstatMissing(t, filepath.Join(dst, "link2"))
 }
+
+// TestExtractTarRefusesNonDirAtRoot: only a directory (the prefix's own entry) or a link may name
+// the extraction root; a regular file spelled svc/. or svc/l/.. is refused, not dropped.
+func TestExtractTarRefusesNonDirAtRoot(t *testing.T) {
+	for _, name := range []string{"svc/.", "svc/l/.."} {
+		_, dst := newDst(t)
+		files, _, err := runExtract(tarOf(t, []tar.Header{{Name: name, Typeflag: tar.TypeReg, Mode: 0o644}}, []string{"x"}), "svc/", dst)
+		if err == nil || !strings.Contains(err.Error(), "names the extraction root itself") {
+			t.Errorf("regular file %q: files = %d, err = %v; want the extraction-root error", name, files, err)
+		}
+	}
+	_, dst := newDst(t)
+	if _, _, err := runExtract(tarOf(t, []tar.Header{{Name: "svc/./", Typeflag: tar.TypeDir, Mode: 0o755}}, []string{""}), "svc/", dst); err != nil {
+		t.Errorf("a directory entry for the root: %v", err)
+	}
+}
