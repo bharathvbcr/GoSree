@@ -22,9 +22,9 @@ func unmatchedWildcards(args []string, matches func(patterns []string) (map[stri
 	if len(positional) < 2 { // alone, an empty pattern is the driver's own error
 		return nil
 	}
-	for _, a := range args[:flagEnd(args)] {
-		name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
-		switch name {
+	flags, _ := scanFlags(args)
+	for _, f := range flags {
+		switch f.name {
 		case "V", "flags", "help", "h":
 			return nil // answered without analysing anything
 		}
