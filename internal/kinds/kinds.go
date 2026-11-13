@@ -50,7 +50,6 @@ var overrides = []Override{
 	{"net.Listener", false, "documented: multiple goroutines may invoke methods on a Listener simultaneously"},
 	{"database/sql.DB", true, "documented: DB is a connection pool safe for concurrent use by multiple goroutines"},
 	{"database/sql.Stmt", true, "documented: Stmt is safe for concurrent use by multiple goroutines"},
-	{"net/http.Client", true, "documented: a Client is safe for concurrent use by multiple goroutines"},
 	{"net/http.ServeMux", true, "documented: ServeMux is safe for concurrent use by multiple goroutines"},
 	{"golang.org/x/oauth2.TokenSource", false, "documented: Token must be safe for concurrent use by multiple goroutines"},
 	{"golang.org/x/time/rate.Limiter", true, "documented: a Limiter is safe for simultaneous use by multiple goroutines"},

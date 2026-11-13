@@ -547,4 +547,35 @@ func RaceIt() {
 			t.Fatalf("expected diagnostic when uncloned *MutableBox falls through default branch of cloneVal")
 		}
 	})
+
+	t.Run("shallow_clone_pointee_mutation_flagged", func(t *testing.T) {
+		diags := runProjModule(t, map[string]string{
+			"cfg/cfg.go": `package cfg
+
+import (
+	"slices"
+	"sync"
+)
+
+type Box struct{ N int }
+
+func mutateViaShallowClone(xs []*Box) {
+	cp := slices.Clone(xs)
+	if len(cp) > 0 {
+		cp[0].N++
+	}
+}
+
+func RunRace(xs []*Box) {
+	var wg sync.WaitGroup
+	wg.Go(func() { mutateViaShallowClone(xs) })
+	wg.Go(func() { mutateViaShallowClone(xs) })
+	wg.Wait()
+}
+`,
+		})
+		if len(diags) == 0 {
+			t.Fatalf("expected diagnostic when mutating pointer element through shallow slices.Clone")
+		}
+	})
 }

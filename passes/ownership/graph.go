@@ -1762,14 +1762,26 @@ func isCapBorrowHelper(fn *ssa.Function) bool {
 	return strings.Contains(s, "/cap.Borrow") || strings.HasPrefix(s, "cap.Borrow")
 }
 
+// isStdlibCloneCall reports whether cc is a direct 1-argument call to slices.Clone or maps.Clone.
+func isStdlibCloneCall(fn *ssa.Function, cc *ssa.CallCommon) bool {
+	if fn == nil || cc == nil || cc.IsInvoke() || len(cc.Args) != 1 {
+		return false
+	}
+	if calleeOriginName(fn) != "Clone" {
+		return false
+	}
+	switch calleeOriginPkgPath(fn) {
+	case "slices", "maps":
+		return true
+	}
+	return false
+}
+
 // isShareableStdlibCloneCall reports whether cc is a direct call to slices.Clone or maps.Clone
 // whose element (and key) types are Shareable or AutoSync, producing a fresh backing array/map
 // whose shallow-copied elements need no alias link back to the input container.
 func isShareableStdlibCloneCall(st *state, fn *ssa.Function, cc *ssa.CallCommon) bool {
-	if st == nil || fn == nil || cc == nil || cc.IsInvoke() || len(cc.Args) != 1 {
-		return false
-	}
-	if calleeOriginName(fn) != "Clone" {
+	if st == nil || !isStdlibCloneCall(fn, cc) {
 		return false
 	}
 	switch calleeOriginPkgPath(fn) {

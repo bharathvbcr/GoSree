@@ -2046,6 +2046,12 @@ func propCallDirectFlow(
 	if isCapBorrowHelper(callee) && result != nil && len(cc.Args) > 0 {
 		return propSame(result, cc.Args[0])
 	}
+	if isStdlibCloneCall(callee, cc) {
+		if result != nil && !isShareableStdlibCloneCall(st, callee, cc) {
+			return addDPlus(result, bothOf(cc.Args[0]))
+		}
+		return false
+	}
 	sum := st.summary(callee)
 	if len(sum.links) == 0 {
 		return false
@@ -2258,7 +2264,7 @@ func collectCallWrites(
 		markVal(cc.Value, true)
 		return
 	}
-	if isCapMove(callee) || isCapBorrowHelper(callee) {
+	if isCapMove(callee) || isCapBorrowHelper(callee) || isStdlibCloneCall(callee, cc) {
 		return
 	}
 	rc, hasContract, cut := st.resolveCallContractCut(caller, cc)
