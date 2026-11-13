@@ -578,7 +578,7 @@ go run ./cmd/gosree-corpus -git ~/src/repo -rev <sha> -subdir backend/svc \
     -annotate cmd/gosree-corpus/refservice/<table>.tsv -list -out build/ref/<run> [-tests]
 ```
 
-`-git` extracts the subdirectory at that commit with `git archive`, reading only the repository's object store, and records the full SHA. `-annotate` adds the `//gosree:` directives of a ledger table (one row per directive, with the finding it answers and its verdict) to the archived copy. A row that does not anchor, a directive that does not parse, or a count of parsed directives that differs from the table stops the run. `-list` writes every finding to `module-findings.json`, each with the transfer that caused it: `SAFE003` and `SAFE008` findings carry the transfer as a related position.
+`-git` extracts the subdirectory at that commit with `git archive`, reading only the repository's object store, and records the full SHA. Symlink and hard-link entries are skipped, never created, and counted on stderr. `-annotate` adds the `//gosree:` directives of a ledger table (one row per directive, with the finding it answers and its verdict) to the archived copy. A row that does not anchor, a directive that does not parse, or a count of parsed directives that differs from the table stops the run. `-list` writes every finding to `module-findings.json`, each with the transfer that caused it: `SAFE003` and `SAFE008` findings carry the transfer as a related position.
 
 ---
 

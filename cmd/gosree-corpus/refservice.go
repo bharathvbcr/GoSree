@@ -26,7 +26,8 @@ import (
 // object store only, so the repository itself is left untouched.
 
 // archiveRev extracts subdir of repo at rev into dst (replacing it) and returns the commit's full SHA.
-func archiveRev(repo, rev, subdir, dst string) (string, error) {
+// When the archive held symlink or hard-link entries, which are skipped, one line on diag says how many.
+func archiveRev(repo, rev, subdir, dst string, diag io.Writer) (string, error) {
 	out, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", rev+"^{commit}").Output()
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse %s in %s: %w", rev, repo, err)
@@ -49,7 +50,7 @@ func archiveRev(repo, rev, subdir, dst string) (string, error) {
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
-	n, xerr := extractTar(pipe, prefix, dst)
+	res, xerr := extractTar(pipe, prefix, dst)
 	if _, err := io.Copy(io.Discard, pipe); err != nil && xerr == nil {
 		xerr = err
 	}
@@ -59,31 +60,43 @@ func archiveRev(repo, rev, subdir, dst string) (string, error) {
 	if xerr != nil {
 		return "", xerr
 	}
-	if n == 0 {
+	if res.files == 0 {
 		return "", fmt.Errorf("git archive %s %s: no files", sha, prefix)
+	}
+	if res.links > 0 {
+		if _, err := fmt.Fprintf(diag, "gosree-corpus: skipped %d symlink or hard-link entries in the archive of %s %s; none was created\n", res.links, sha, prefix); err != nil {
+			return "", err
+		}
 	}
 	return sha, nil
 }
 
+// extraction is what extractTar did: the regular files it wrote and the link entries it skipped.
+type extraction struct{ files, links int }
+
 // extractTar writes the entries under prefix to dst, with prefix stripped, and counts the files.
-// Every write goes through an os.Root on dst, so an entry that would land beneath a symlink the
-// archive itself planted, and so outside dst, fails instead of being written. Symlink entries are
-// still created (they are part of the tree), but annotations are never applied through one.
-func extractTar(r io.Reader, prefix, dst string) (int, error) {
+// Every write goes through an os.Root on dst. Symlink and hard-link entries are never created: they
+// are skipped and counted, because a link in an archived tree is either irrelevant to the analysis or
+// a way to reach outside dst. Nothing may then be written at or beneath the path of a skipped link, so
+// an entry there fails the extraction; a real git tree cannot hold a path that is both a link and a
+// directory, and extracting such an entry would silently build a tree the commit does not have. The
+// set of skipped paths grows with the archive's own link entries, which the archive already bounds.
+func extractTar(r io.Reader, prefix, dst string) (extraction, error) {
 	root, err := os.OpenRoot(dst)
 	if err != nil {
-		return 0, err
+		return extraction{}, err
 	}
 	defer root.Close()
 	tr := tar.NewReader(r)
-	files := 0
+	var res extraction
+	skipped := map[string]struct{}{}
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return files, nil
+			return res, nil
 		}
 		if err != nil {
-			return files, err
+			return res, err
 		}
 		if h.Typeflag == tar.TypeXGlobalHeader {
 			continue // git's commit-id comment
@@ -94,47 +107,59 @@ func extractTar(r io.Reader, prefix, dst string) (int, error) {
 			if h.Typeflag == tar.TypeDir && strings.HasPrefix(prefix, strings.TrimSuffix(h.Name, "/")+"/") {
 				continue
 			}
-			return files, fmt.Errorf("archive entry %q is outside %q", h.Name, prefix)
+			return res, fmt.Errorf("archive entry %q is outside %q", h.Name, prefix)
 		}
 		if rel == "" {
 			continue
 		}
 		clean := path.Clean(rel)
 		if path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") {
-			return files, fmt.Errorf("archive entry %q escapes the destination", h.Name)
+			return res, fmt.Errorf("archive entry %q escapes the destination", h.Name)
+		}
+		if link, ok := skippedAncestor(skipped, clean); ok {
+			return res, fmt.Errorf("archive entry %q is at or beneath the skipped link %q", h.Name, link)
 		}
 		target := filepath.FromSlash(clean)
 		switch h.Typeflag {
 		case tar.TypeDir:
 			if err := root.MkdirAll(target, 0o755); err != nil {
-				return files, err
+				return res, err
 			}
 		case tar.TypeReg:
 			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return files, err
+				return res, err
 			}
 			f, err := root.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 			if err != nil {
-				return files, err
+				return res, err
 			}
 			if _, err := io.Copy(f, tr); err != nil {
-				return files, errors.Join(err, f.Close())
+				return res, errors.Join(err, f.Close())
 			}
 			if err := f.Close(); err != nil {
-				return files, err
+				return res, err
 			}
-			files++
-		case tar.TypeSymlink:
-			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return files, err
-			}
-			if err := root.Symlink(h.Linkname, target); err != nil {
-				return files, err
-			}
+			res.files++
+		case tar.TypeSymlink, tar.TypeLink:
+			skipped[clean] = struct{}{}
+			res.links++
 		default:
-			return files, fmt.Errorf("archive entry %q has unsupported type %q", h.Name, h.Typeflag)
+			return res, fmt.Errorf("archive entry %q has unsupported type %q", h.Name, h.Typeflag)
 		}
 	}
+}
+
+// skippedAncestor returns the skipped link that clean is, or lies beneath, if any.
+func skippedAncestor(skipped map[string]struct{}, clean string) (string, bool) {
+	if len(skipped) == 0 {
+		return "", false
+	}
+	for p := clean; p != "." && p != "/"; p = path.Dir(p) {
+		if _, ok := skipped[p]; ok {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // tableColumns is the header row of an annotation table.
