@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strings"
@@ -24,7 +24,9 @@ import (
 // ModuleReport is the machine-readable result of -module, written to <out>/module-report.json.
 type ModuleReport struct {
 	GoVersion string `json:"go_version"`
-	// GosreeCommit is `git describe --always --dirty` of the gosree checkout the tool was run from.
+	// GosreeCommit names the source this gosree-corpus binary was built from: its 7-character vcs
+	// revision, plus "-dirty" if the tree was modified at build time, or "unknown (no vcs stamp)".
+	// It is read from the binary's build info, never from the working directory.
 	GosreeCommit string   `json:"gosree_commit"`
 	Dir          string   `json:"dir"`
 	Patterns     []string `json:"patterns"`
@@ -263,13 +265,43 @@ func checkApplied(rows []annotation, t PackageStats, tests bool) error {
 	return nil
 }
 
-// gosreeCommit describes the gosree checkout in the working directory, or "unknown" outside one.
+// noVCSStamp is what gosreeCommit reports for a binary built without version control information.
+const noVCSStamp = "unknown (no vcs stamp)"
+
+// readBuildInfo is where gosreeCommit reads the binary's build stamp; tests replace it.
+var readBuildInfo = debug.ReadBuildInfo
+
+// gosreeCommit names the source this binary was built from, read from the vcs.revision and
+// vcs.modified settings that `go build` stamps when it builds inside a git checkout (-buildvcs=auto).
+// The format is the first 7 characters of the revision, plus "-dirty" when vcs.modified is "true",
+// the same shape as `git describe --always --dirty`. A binary with no stamp (built outside a
+// checkout, with -buildvcs=false, or a test binary) reports noVCSStamp. It never consults the
+// working directory, which says nothing about how the binary was built.
 func gosreeCommit() string {
-	out, err := exec.Command("git", "describe", "--always", "--dirty").Output()
-	if err != nil {
-		return "unknown"
+	info, ok := readBuildInfo()
+	if !ok || info == nil {
+		return noVCSStamp
 	}
-	return strings.TrimSpace(string(out))
+	var rev string
+	var modified bool
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			modified = s.Value == "true"
+		}
+	}
+	if rev == "" {
+		return noVCSStamp
+	}
+	if len(rev) > 7 {
+		rev = rev[:7]
+	}
+	if modified {
+		rev += "-dirty"
+	}
+	return rev
 }
 
 // distinctPackages drops the copies go/packages makes when tests are loaded, so no file is counted
