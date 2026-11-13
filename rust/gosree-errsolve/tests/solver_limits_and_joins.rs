@@ -97,9 +97,38 @@ fn call_chain(n: usize) -> Vec<FuncIR> {
     funcs
 }
 
+/// `call_chain` closed into a cycle: function `n - 1` returns a literal nil pointer and calls
+/// function 0, so every function is in one strongly connected component and visiting its
+/// members in index order flips exactly one summary per sweep (what `call_chain` did for the
+/// whole package before phase 1 went callee-first).
+fn call_cycle(n: usize) -> Vec<FuncIR> {
+    let mut funcs = call_chain(n);
+    funcs[n - 1] = FuncIR {
+        flags: FUNC_RETURNS_CONCRETE_ERR_PTR,
+        slot_flags: vec![0],
+        tuples: vec![],
+        blocks: vec![block(
+            vec![OpIR::CallConcretePtr {
+                site_id: 1,
+                dst_slot: 0,
+                callee_idx: 0,
+            }],
+            Terminator::Return {
+                site_id: 2,
+                ret_slot: NONE_U32,
+                flags: RET_CONCRETE_LITERAL_NIL,
+            },
+        )],
+    };
+    funcs
+}
+
+/// The sweep cap applies to each strongly connected component. It used to be reached with
+/// `call_chain(10)`; callee-first order solves a chain one function per component, so the cap
+/// needs a cycle, which `call_cycle(9)` gives with the same numbers.
 #[test]
 fn callgraph_cap_fails_closed_instead_of_exporting_optimistic_summaries() {
-    let funcs = call_chain(10);
+    let funcs = call_cycle(9);
     let err = solve_package_capped(&funcs, &mut || true, 3).unwrap_err();
     assert_eq!(err, SolveError::CallgraphBudgetExceeded(3));
     assert!(err
@@ -117,13 +146,24 @@ fn callgraph_cap_fails_closed_instead_of_exporting_optimistic_summaries() {
         SolveError::CallgraphBudgetExceeded(9)
     );
     assert!(solve_package_capped(&funcs, &mut || true, 10).is_ok());
+
+    // The same chain left open is singleton components needing two sweeps each, at any length.
+    assert!(solve_package_capped(&call_chain(10), &mut || true, 2).is_ok());
+    assert_eq!(
+        solve_package_capped(&call_chain(10), &mut || true, 1).unwrap_err(),
+        SolveError::CallgraphBudgetExceeded(1)
+    );
 }
 
 #[test]
 fn public_entry_converges_on_chains_up_to_max_funcs() {
-    // Callers before callees: one changing sweep per function. The cap is derived from the
-    // function count, so valid chains of any length up to MAX_FUNCS converge.
+    // Callers before callees, and the same chain closed into one cycle (one changing sweep per
+    // function). The cap is derived from the function count, so valid chains and cycles of any
+    // length up to MAX_FUNCS converge.
     for n in [4_097, MAX_FUNCS] {
+        let funcs = call_cycle(n);
+        let res = solve_package(&funcs, &mut || true).expect("cycle converges");
+        assert!(res.may_return_nil.iter().all(|&b| b));
         let funcs = call_chain(n);
         let start = std::time::Instant::now();
         let res = solve_package(&funcs, &mut || true).expect("converges");

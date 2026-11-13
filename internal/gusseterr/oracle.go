@@ -7,12 +7,55 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/bits"
 	"slices"
 )
+
+// addSat and mulSat saturate at the largest uint64 instead of wrapping, so the phase-1 work
+// budget can never be defeated by overflow. They mirror saturating_add and saturating_mul.
+func addSat(a, b uint64) uint64 {
+	s, carry := bits.Add64(a, b, 0)
+	if carry != 0 {
+		return ^uint64(0)
+	}
+	return s
+}
+
+func mulSat(a, b uint64) uint64 {
+	hi, lo := bits.Mul64(a, b)
+	if hi != 0 {
+		return ^uint64(0)
+	}
+	return lo
+}
 
 // DecodePackage decodes and validates a GSE1 binary request frame (matching
 // gosree_errsolve::decode_package).
 func DecodePackage(frame []byte) ([]FuncIR, error) {
+	return decodePackage(frame, MaxDecodedBytes)
+}
+
+// decodeBudget charges decoded bytes against the decoded-size bound before the structure they
+// pay for is allocated, so a hostile count is refused before it is acted on. Mirrors
+// DecodeBudget in rust/gosree-errsolve/src/lib.rs.
+type decodeBudget struct {
+	used, max uint64
+}
+
+func (b *decodeBudget) charge(count, unit uint64) error {
+	hi, lo := bits.Mul64(count, unit)
+	total, carry := bits.Add64(lo, b.used, 0)
+	if hi != 0 || carry != 0 || total > b.max {
+		return errors.New("GSE1 limit exceeded: decoded_bytes")
+	}
+	b.used = total
+	return nil
+}
+
+// decodePackage is DecodePackage with an explicit decoded-size bound (tests pass a small one);
+// it mirrors decode_package_bounded in rust/gosree-errsolve/src/lib.rs.
+func decodePackage(frame []byte, maxDecodedBytes uint64) ([]FuncIR, error) {
+	budget := decodeBudget{max: maxDecodedBytes}
 	if len(frame) > MaxFrameBytes {
 		return nil, errors.New("GSE1 limit exceeded: frame_bytes")
 	}
@@ -103,6 +146,11 @@ func DecodePackage(frame []byte) ([]FuncIR, error) {
 		if err := checkStateCells(uint64(numBlocks), uint64(numSlots)); err != nil {
 			return nil, err
 		}
+		for _, c := range [][2]uint64{{1, DecodedFuncBytes}, {uint64(numSlots), 1}, {uint64(numTuples), DecodedTupleBytes}} {
+			if err := budget.charge(c[0], c[1]); err != nil {
+				return nil, err
+			}
+		}
 
 		if pos+int(numSlots) > len(frame) {
 			return nil, errors.New("truncated GSE1 frame")
@@ -132,6 +180,9 @@ func DecodePackage(frame []byte) ([]FuncIR, error) {
 
 		blocks := make([]BlockIR, 0, min(int(numBlocks), 128))
 		for range int(numBlocks) {
+			if err := budget.charge(1, DecodedBlockBytes); err != nil {
+				return nil, err
+			}
 			tk, err := readU8()
 			if err != nil {
 				return nil, err
@@ -212,6 +263,9 @@ func DecodePackage(frame []byte) ([]FuncIR, error) {
 			if nPhis > MaxPhisPerBlock {
 				return nil, errors.New("GSE1 limit exceeded: num_phis")
 			}
+			if err := budget.charge(uint64(nPhis), DecodedPhiBytes); err != nil {
+				return nil, err
+			}
 			phis := make([]PhiIR, 0, min(int(nPhis), 64))
 			for range int(nPhis) {
 				dst, err := readU32()
@@ -227,6 +281,9 @@ func DecodePackage(frame []byte) ([]FuncIR, error) {
 				}
 				if arity > MaxPhiArity {
 					return nil, errors.New("GSE1 limit exceeded: phi_arity")
+				}
+				if err := budget.charge(uint64(arity), DecodedPhiEdgeBytes); err != nil {
+					return nil, err
 				}
 				inc := make([]PhiEdge, 0, int(arity))
 				for range int(arity) {
@@ -255,6 +312,9 @@ func DecodePackage(frame []byte) ([]FuncIR, error) {
 			}
 			if nOps > MaxOpsPerBlock {
 				return nil, errors.New("GSE1 limit exceeded: num_ops")
+			}
+			if err := budget.charge(uint64(nOps), DecodedOpBytes); err != nil {
+				return nil, err
 			}
 			ops := make([]OpIR, 0, min(int(nOps), 128))
 			for range int(nOps) {
@@ -290,6 +350,9 @@ func DecodePackage(frame []byte) ([]FuncIR, error) {
 					}
 					if cc > MaxCompanions {
 						return nil, errors.New("GSE1 limit exceeded: companions")
+					}
+					if err := budget.charge(uint64(cc), DecodedCompanionBytes); err != nil {
+						return nil, err
 					}
 					comps := make([]uint32, 0, int(cc))
 					for range int(cc) {
@@ -417,6 +480,14 @@ func DecodePackage(frame []byte) ([]FuncIR, error) {
 // SolveFrameOracle decodes frame, runs the pure-Go reference oracle, and
 // encodes the resulting GSR1 response bytes.
 func SolveFrameOracle(ctx context.Context, frame []byte) ([]byte, error) {
+	return solveFrameOracle(ctx, frame, MaxResponseBytes)
+}
+
+// solveFrameOracle is SolveFrameOracle with an explicit response-size bound (tests pass a small
+// one). The response length is known from the result before anything is encoded, so an
+// over-large one is refused without allocating it, with the text the native path's refusal has
+// (gusset: "output N bytes exceeds maximum M bytes").
+func solveFrameOracle(ctx context.Context, frame []byte, maxResponseBytes int) ([]byte, error) {
 	funcs, err := DecodePackage(frame)
 	if err != nil {
 		return nil, err
@@ -424,6 +495,9 @@ func SolveFrameOracle(ctx context.Context, frame []byte) ([]byte, error) {
 	res, err := SolveOracle(ctx, funcs)
 	if err != nil {
 		return nil, err
+	}
+	if n := encodedResultLen(res); n > maxResponseBytes {
+		return nil, fmt.Errorf("output %d bytes exceeds maximum %d bytes", n, maxResponseBytes)
 	}
 	return EncodeResult(res), nil
 }
@@ -919,9 +993,111 @@ func (h *u32MinHeap) pop() uint32 {
 	return top
 }
 
+// phase1Stats counts the phase-1 work of solveOracleLimited; tests read it. It is the
+// load-independent measure of phase-1 cost. Mirrors Phase1Stats in rust/gosree-errsolve/src/lib.rs.
+type phase1Stats struct {
+	solves uint64 // solveFuncOracle calls made by phase 1
+	work   uint64 // work units of those solves (blocks plus ops of each function solved, per solve)
+	sccs   uint64 // strongly connected components of the call graph that phase 1 visited
+	sweeps uint64 // sweeps run over all components, each component's confirming sweep included
+}
+
+// sccPollSteps mirrors SCC_POLL_STEPS in rust/gosree-errsolve/src/lib.rs: the component search
+// polls the context once per this many steps.
+const sccPollSteps = 1024
+
+// callSCCs mirrors call_sccs in rust/gosree-errsolve/src/lib.rs: the strongly connected
+// components of the graph whose edge v -> w means w calls v (callers[v] lists the w), restricted
+// to active nodes, found by an iterative Tarjan search (a call chain of MaxFuncs functions would
+// overflow the stack recursively). Tarjan emits a component after every component reachable from
+// it, which here is every component of its callers, so the emission order is callers first. It
+// returns one flat member list and the exclusive end offset of each component, in emission order.
+func callSCCs(ctx context.Context, callers [][]uint32, active []bool) (members, ends []uint32, err error) {
+	const unvisited = ^uint32(0)
+	n := len(callers)
+	index := make([]uint32, n)
+	for i := range index {
+		index[i] = unvisited
+	}
+	low := make([]uint32, n)
+	onStack := make([]bool, n)
+	var stack []uint32
+	type frame struct {
+		node uint32
+		pos  int
+	}
+	var frames []frame
+	nextIndex := uint32(0)
+	steps := 0
+	for root := range n {
+		if !active[root] || index[root] != unvisited {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		index[root], low[root] = nextIndex, nextIndex
+		nextIndex++
+		stack = append(stack, uint32(root))
+		onStack[root] = true
+		frames = append(frames, frame{uint32(root), 0})
+		for len(frames) > 0 {
+			steps++
+			if steps%sccPollSteps == 0 {
+				if err := ctx.Err(); err != nil {
+					return nil, nil, err
+				}
+			}
+			top := &frames[len(frames)-1]
+			v := top.node
+			if top.pos < len(callers[v]) {
+				w := callers[v][top.pos]
+				top.pos++
+				switch {
+				case !active[w]:
+				case index[w] == unvisited:
+					index[w], low[w] = nextIndex, nextIndex
+					nextIndex++
+					stack = append(stack, w)
+					onStack[w] = true
+					frames = append(frames, frame{w, 0})
+				case onStack[w]:
+					low[v] = min(low[v], index[w])
+				}
+				continue
+			}
+			frames = frames[:len(frames)-1]
+			if low[v] == index[v] {
+				for {
+					m := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					onStack[m] = false
+					members = append(members, m)
+					if m == v {
+						break
+					}
+				}
+				ends = append(ends, uint32(len(members)))
+			}
+			if len(frames) > 0 {
+				p := frames[len(frames)-1].node
+				low[p] = min(low[p], low[v])
+			}
+		}
+	}
+	return members, ends, nil
+}
+
 // solveOracle is SolveOracle with an explicit call-graph sweep cap (tests pass a small cap to
-// reach the error).
+// reach the error). The cap applies to each strongly connected component on its own.
 func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (PackageResult, error) {
+	return solveOracleLimited(ctx, funcsIn, maxCallgraphIters, Phase1WorkFactor, Phase1WorkFloor, &phase1Stats{})
+}
+
+// solveOracleLimited is solveOracle with an explicit phase-1 work budget (tests pass a small one
+// to reach the error) and a counter; it mirrors solve_package_limited in
+// rust/gosree-errsolve/src/lib.rs.
+func solveOracleLimited(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int, workFactor, workFloor uint64, stats *phase1Stats) (PackageResult, error) {
 	if ctx == nil {
 		return PackageResult{}, errors.New("gusseterr: nil context")
 	}
@@ -943,21 +1119,39 @@ func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (
 	}
 
 	// Phase 1: Interprocedural call-graph fixpoint.
-	// The summaries only flip false -> true, so this converges in at most one changing sweep
-	// per function plus one confirming sweep. A function is re-solved only after one of its
-	// callees flipped (its result depends on nothing else), so a long chain costs one solve per
-	// function and per call edge, not one per sweep. Missing the cap would export optimistic
-	// summaries that hide ERR004 findings, so it is an error.
+	// The summaries only flip false -> true, and a function's result depends on nothing but its
+	// callees' summaries, so the least fixpoint is unique and any order that ends with every
+	// function stable under the final summaries reaches it. Missing the sweep cap would export
+	// optimistic summaries that hide ERR004 findings, so it is an error.
 	//
-	// A sweep visits the dirty functions in index order, from two min-heaps (thisSweep: ahead of
-	// the sweep's position; nextSweep: behind it) rather than a scan of every index per sweep,
-	// which was quadratic on a chain whose callers precede their callees. The sweeps, the solves
-	// and their order are those of the scan; the cost is O((solves + call edges) x log
-	// functions). dirty[i] is true while i is queued, or when i can never be solved again, so no
-	// index is queued twice. Mirrors solve_package_capped in rust/gosree-errsolve/src/lib.rs.
+	// The order is callee-first: the call graph's strongly connected components are solved in
+	// reverse topological order, so every callee outside a component is final before any of its
+	// callers is first solved, and a function outside a cycle is solved exactly once. (In index
+	// order a function calling every member of a caller-first chain was re-solved after each
+	// member flipped: O(n^2), 186 s at 262,144 functions.) Inside a component the dirty-worklist
+	// sweeps of the index-order phase are kept: thisSweep holds the dirty members still ahead of
+	// the sweep's position and nextSweep those behind it, both min-heaps, so a sweep visits them
+	// in index order and costs O((solves + call edges) x log functions). dirty[i] is true while i
+	// is queued, when i can never be solved again (its summary is already may-nil or it returns
+	// no concrete error pointer), and while i has not been reached yet (a flipped callee's
+	// callers in later components are solved when their turn comes), so no index is queued
+	// twice. Only functions that can still flip are graph nodes: an inactive function is never
+	// solved, so an edge through it carries no information.
+	//
+	// A component that is itself a cycle can still cost O(n^2) (a hub calling every member of a
+	// chain that closes back on the hub), so the solves are also bounded by a whole-package work
+	// budget in a deterministic unit: the blocks plus ops of each function per solve, against
+	// workFactor x the package's blocks plus ops (at least workFloor). The unit is the same in
+	// both engines, so both refuse the same packages at the same solve. Cap and budget are
+	// checked after every solve, and the context is polled per component and per sweep. Mirrors
+	// solve_package_limited in rust/gosree-errsolve/src/lib.rs.
 	callers := make([][]uint32, nFuncs)
+	unitWork := make([]uint64, nFuncs)
+	var size uint64
 	for idx := range funcs {
+		work := uint64(len(funcs[idx].Blocks))
 		for bi := range funcs[idx].Blocks {
+			work += uint64(len(funcs[idx].Blocks[bi].Ops))
 			for oi := range funcs[idx].Blocks[bi].Ops {
 				op := &funcs[idx].Blocks[bi].Ops[oi]
 				if op.Kind != OpCallConcretePtr {
@@ -969,59 +1163,82 @@ func solveOracle(ctx context.Context, funcsIn []FuncIR, maxCallgraphIters int) (
 				}
 			}
 		}
+		unitWork[idx] = work
+		size += work
 	}
+	budget := max(workFloor, mulSat(size, workFactor))
+	active := make([]bool, nFuncs)
+	for i := range funcs {
+		active[i] = !mayReturnNil[i] && funcs[i].Flags&FuncReturnsConcreteErrPtr != 0
+	}
+	sccMembers, sccEnds, err := callSCCs(ctx, callers, active)
+	if err != nil {
+		return PackageResult{}, err
+	}
+
 	dirty := make([]bool, nFuncs)
-	thisSweep := make(u32MinHeap, nFuncs) // ascending, so already a heap
 	for i := range dirty {
 		dirty[i] = true
-		thisSweep[i] = uint32(i)
 	}
-	var nextSweep u32MinHeap
-	converged := false
-	for range maxCallgraphIters {
-		if err := ctx.Err(); err != nil {
-			return PackageResult{}, err
+	var thisSweep, nextSweep u32MinHeap
+	var workDone uint64
+	for k := len(sccEnds) - 1; k >= 0; k-- {
+		start := uint32(0)
+		if k > 0 {
+			start = sccEnds[k-1]
 		}
-		anyChanged := false
-		for len(thisSweep) > 0 {
-			idx := thisSweep.pop()
-			if mayReturnNil[idx] || !dirty[idx] || funcs[idx].Flags&FuncReturnsConcreteErrPtr == 0 {
-				continue
-			}
-			dirty[idx] = false
-			if len(funcs[idx].Blocks) == 0 {
-				mayReturnNil[idx] = true
-				anyChanged = true
-				continue
-			}
-			fnMayNil, _, err := solveFuncOracle(ctx, idx, &funcs[idx], mayReturnNil, false)
-			if err != nil {
+		stats.sccs++
+		for _, m := range sccMembers[start:sccEnds[k]] {
+			thisSweep.push(m)
+		}
+		converged := false
+		for range maxCallgraphIters {
+			if err := ctx.Err(); err != nil {
 				return PackageResult{}, err
 			}
-			if fnMayNil {
-				mayReturnNil[idx] = true
-				anyChanged = true
-				for _, c := range callers[idx] {
-					if dirty[c] {
-						continue
-					}
-					dirty[c] = true
-					if c > idx {
-						thisSweep.push(c)
-					} else {
-						nextSweep.push(c)
+			stats.sweeps++
+			anyChanged := false
+			for len(thisSweep) > 0 {
+				idx := thisSweep.pop()
+				if mayReturnNil[idx] || !dirty[idx] {
+					continue
+				}
+				dirty[idx] = false
+				fnMayNil, _, err := solveFuncOracle(ctx, idx, &funcs[idx], mayReturnNil, false)
+				if err != nil {
+					return PackageResult{}, err
+				}
+				stats.solves++
+				workDone = addSat(workDone, unitWork[idx])
+				stats.work = workDone
+				if workDone > budget {
+					return PackageResult{}, fmt.Errorf("phase-1 work budget exceeded: %d work units against a budget of %d (ops plus blocks of every function solved; the budget is %d times the package's ops plus blocks, at least %d)", workDone, budget, Phase1WorkFactor, Phase1WorkFloor)
+				}
+				if fnMayNil {
+					mayReturnNil[idx] = true
+					anyChanged = true
+					for _, c := range callers[idx] {
+						if dirty[c] {
+							continue
+						}
+						dirty[c] = true
+						if c > idx {
+							thisSweep.push(c)
+						} else {
+							nextSweep.push(c)
+						}
 					}
 				}
 			}
+			if !anyChanged {
+				converged = true
+				break
+			}
+			thisSweep, nextSweep = nextSweep, thisSweep
 		}
-		if !anyChanged {
-			converged = true
-			break
+		if !converged {
+			return PackageResult{}, fmt.Errorf("gusseterr: call-graph summary fixpoint did not converge within %d iterations", maxCallgraphIters)
 		}
-		thisSweep, nextSweep = nextSweep, thisSweep
-	}
-	if !converged {
-		return PackageResult{}, fmt.Errorf("gusseterr: call-graph summary fixpoint did not converge within %d iterations", maxCallgraphIters)
 	}
 
 	// Phase 2: Intraprocedural CFG fixpoint + diagnostic extraction.

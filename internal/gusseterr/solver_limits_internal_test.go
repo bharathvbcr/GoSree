@@ -29,13 +29,35 @@ func callChain(n int) []FuncIR {
 	return funcs
 }
 
+// callCycle is callChain closed into a cycle: function i returns the pointer returned by function
+// i+1, and the last function returns a literal nil pointer and calls function 0. Every function
+// is in one strongly connected component, so visiting its members in index order flips exactly
+// one summary per sweep, as callChain did for the whole package before phase 1 went callee-first.
+func callCycle(n int) []FuncIR {
+	funcs := callChain(n)
+	last := &funcs[n-1]
+	*last = FuncIR{
+		Flags:     FuncReturnsConcreteErrPtr,
+		SlotFlags: []uint8{0},
+		Blocks: []BlockIR{{
+			Ops:  []OpIR{{Kind: OpCallConcretePtr, SiteID: 1, SlotA: 0, SlotB: 0}},
+			Term: Terminator{Kind: TermReturn, SiteID: 2, RetSlot: NoneU32, RetFlags: RetConcreteLiteralNil},
+		}},
+	}
+	return funcs
+}
+
+// TestOracleCallgraphCapFailsClosed: the sweep cap applies to each strongly connected component.
+// It used to be exercised with callChain(10); callee-first order solves a chain one function per
+// component, so the cap needs a cycle to be reached, which callCycle(9) gives with the same
+// numbers (nine changing sweeps and a confirming tenth).
 func TestOracleCallgraphCapFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	funcs := callChain(10)
+	funcs := callCycle(9)
 
 	_, err := solveOracle(ctx, funcs, 3)
 	if err == nil || !strings.Contains(err.Error(), "did not converge within 3 iterations") {
-		t.Fatalf("cap of 3 sweeps over a 10-function chain: err = %v, want a non-convergence error", err)
+		t.Fatalf("cap of 3 sweeps over a 9-function cycle: err = %v, want a non-convergence error", err)
 	}
 	// Nine sweeps each flip one summary; a tenth, unchanged sweep confirms the fixpoint. A fixpoint
 	// reached on the last permitted sweep without that confirmation is not trusted.
@@ -53,6 +75,13 @@ func TestOracleCallgraphCapFailsClosed(t *testing.T) {
 		if !b {
 			t.Fatalf("func %d summary is not may-nil after convergence", i)
 		}
+	}
+	// The same chain left open is ten singleton components, each needing two sweeps.
+	if _, err := solveOracle(ctx, callChain(10), 2); err != nil {
+		t.Fatalf("an acyclic chain needs two sweeps per component under any length: %v", err)
+	}
+	if _, err := solveOracle(ctx, callChain(10), 1); err == nil {
+		t.Fatal("a cap of one sweep cannot confirm a fixpoint")
 	}
 }
 
