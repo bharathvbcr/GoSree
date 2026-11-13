@@ -21,6 +21,18 @@ type packageBuilder struct {
 	sites      []siteMeta
 	// blankedCallSites maps (funcIdx, tupleSiteID) or slot use to the blanked assignment site.
 	blankedBySite map[uint32]siteMeta
+	// closurePlans caches the closure pair plan per closure; a nil plan means the closure is untracked.
+	closurePlans map[*ssa.Function]*closurePlan
+	// closureCalls caches the closure's one dominating call per closure; a nil entry means the
+	// closure is untracked. closureFxs and closedNames belong to closureeffects.go.
+	closureCalls map[*ssa.Function]*closureCall
+	closureFxs   map[*ssa.Function]*closureFx
+	closedNames  map[string]bool
+	astInfos     map[*ssa.Function]*funcASTInfo
+	// parentIndexes caches the per-parent facts the plans share; planWork counts the instructions,
+	// blocks and referrers visited while building them (a deterministic cost measure for tests).
+	parentIndexes map[*ssa.Function]*parentIndex
+	planWork      uint64
 }
 
 func newPackageBuilder(pass *analysis.Pass, funcs []*ssa.Function) *packageBuilder {
@@ -34,6 +46,11 @@ func newPackageBuilder(pass *analysis.Pass, funcs []*ssa.Function) *packageBuild
 		funcIdxMap:    idxMap,
 		sites:         []siteMeta{{pos: token.NoPos}}, // site 0 reserved
 		blankedBySite: make(map[uint32]siteMeta),
+		closurePlans:  make(map[*ssa.Function]*closurePlan),
+		closureCalls:  make(map[*ssa.Function]*closureCall),
+		closureFxs:    make(map[*ssa.Function]*closureFx),
+		astInfos:      make(map[*ssa.Function]*funcASTInfo),
+		parentIndexes: make(map[*ssa.Function]*parentIndex),
 	}
 	return b
 }
@@ -81,6 +98,7 @@ type funcLowerer struct {
 	mem2regErrSlots map[*types.Var]uint32
 	mem2regErrOrder []*types.Var
 	callErrVar      map[*ssa.Call]*types.Var
+	errNames        map[token.Pos]string // call Lparen -> name of the error variable it is assigned to; built on first use
 	valErrVars      map[ssa.Value][]*types.Var
 
 	tuples           []gusseterr.TupleMeta
@@ -89,6 +107,7 @@ type funcLowerer struct {
 	boxedConcreteErr map[ssa.Value]types.Type
 	ioReadErrVals    map[ssa.Value]bool
 	companionVals    map[ssa.Value]bool
+	pairDesc         map[ssa.Value]string // captured value cell -> description of the closure's fallible call
 
 	lineIdx         *blockLineIndex
 	consumedBlanked map[token.Pos]bool
@@ -107,7 +126,7 @@ func (b *packageBuilder) lowerFunc(funcIdx uint32, fn *ssa.Function) gusseterr.F
 		return gusseterr.FuncIR{Flags: flags}
 	}
 
-	astInfo := scanFuncAST(b.pass, fn.Syntax())
+	astInfo := b.takeASTInfo(fn)
 	_, usedVars := scanBlankDiscardedAndUsedVars(b.pass, fn.Syntax())
 
 	fl := &funcLowerer{
@@ -127,6 +146,7 @@ func (b *packageBuilder) lowerFunc(funcIdx uint32, fn *ssa.Function) gusseterr.F
 		boxedConcreteErr: make(map[ssa.Value]types.Type),
 		ioReadErrVals:    make(map[ssa.Value]bool),
 		companionVals:    make(map[ssa.Value]bool),
+		pairDesc:         make(map[ssa.Value]string),
 
 		consumedBlanked: make(map[token.Pos]bool),
 	}
@@ -652,6 +672,394 @@ func (fl *funcLowerer) seedCompanionVals() {
 	}
 }
 
+// closurePlan describes a closure that assigns the (value, error) results of one fallible call to
+// captured variables, so the pair leaves the closure together and its obligation moves to the
+// enclosing function: the closure's store of the value is not a use, and the enclosing function
+// binds the captured cells as a fallible tuple at the one call that runs the closure.
+type closurePlan struct {
+	call       *ssa.Call        // the fallible call inside the closure
+	parentCall *ssa.Call        // the enclosing function's single call of the closure
+	mc         *ssa.MakeClosure // the closure value that call runs
+	errIdx     int              // free-variable index that receives the error
+	valIdx     []int            // free-variable indexes that receive value components
+	valStores  map[*ssa.Store]bool
+}
+
+// closurePlanFor returns the plan for closure fn, or nil when the pair cannot be tracked soundly.
+// Nil is the fail-closed answer: the closure's store of the value stays a use and is reported.
+// The result is cached per closure.
+func (b *packageBuilder) closurePlanFor(fn *ssa.Function) *closurePlan {
+	if p, ok := b.closurePlans[fn]; ok {
+		return p
+	}
+	p := b.buildClosurePlan(fn)
+	b.closurePlans[fn] = p
+	return p
+}
+
+// closurePlanAt returns the plan for the closure that call runs, when call is the one place the
+// enclosing function runs it.
+func (b *packageBuilder) closurePlanAt(call *ssa.Call) *closurePlan {
+	mc, ok := call.Call.Value.(*ssa.MakeClosure)
+	if !ok || call.Call.IsInvoke() {
+		return nil
+	}
+	fn, ok := mc.Fn.(*ssa.Function)
+	if !ok {
+		return nil
+	}
+	if p := b.closurePlanFor(fn); p != nil && p.parentCall == call {
+		return p
+	}
+	return nil
+}
+
+// parentIndex is what every closure of one enclosing function needs to know about it, computed in
+// one pass so that a plan costs the size of its closure, not of the parent.
+type parentIndex struct {
+	closures map[*ssa.Function]*ssa.MakeClosure // nil value: the closure is built at more than one site
+	// retDom is the nearest block that dominates every return block, or nil when there is none. A
+	// call runs on every path to a return exactly when its block dominates retDom.
+	retDom *ssa.BasicBlock
+	// namedResults holds the names of the parent's named results: their cells are read by the
+	// return itself (a bare return, and the deferred and recovered paths), not by a visible load.
+	namedResults map[string]bool
+}
+
+func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
+	if ix, ok := b.parentIndexes[parent]; ok {
+		return ix
+	}
+	ix := &parentIndex{closures: make(map[*ssa.Function]*ssa.MakeClosure), namedResults: make(map[string]bool)}
+	if res := parent.Signature.Results(); res != nil {
+		for i := range res.Len() {
+			if name := res.At(i).Name(); name != "" && name != "_" {
+				ix.namedResults[name] = true
+			}
+		}
+	}
+	var retDom *ssa.BasicBlock
+	seenRet := false
+	for _, blk := range parent.Blocks {
+		b.planWork += uint64(len(blk.Instrs)) + 1
+		if len(blk.Instrs) == 0 {
+			continue
+		}
+		for _, ins := range blk.Instrs {
+			if m, ok := ins.(*ssa.MakeClosure); ok {
+				if fn, ok := m.Fn.(*ssa.Function); ok {
+					if _, dup := ix.closures[fn]; dup {
+						ix.closures[fn] = nil
+					} else {
+						ix.closures[fn] = m
+					}
+				}
+			}
+		}
+		if _, isRet := blk.Instrs[len(blk.Instrs)-1].(*ssa.Return); !isRet {
+			continue
+		}
+		// The Recover block is entered only by a recovered panic and returns the result cells
+		// (go/ssa createRecoverBlock), which no plan tracks (namedResults). It has no dominator, so
+		// counting it would make every function with a defer lack a return dominator.
+		if blk == parent.Recover {
+			continue
+		}
+		if !seenRet {
+			seenRet, retDom = true, blk
+			continue
+		}
+		for retDom != nil && !retDom.Dominates(blk) {
+			b.planWork++
+			retDom = retDom.Idom()
+		}
+	}
+	ix.retDom = retDom
+	b.parentIndexes[parent] = ix
+	return ix
+}
+
+// closureCall is the one place an enclosing function runs a closure: the single MakeClosure that
+// builds it and the single call of the value.
+//
+// The call runs on every path to a return when its block dominates the returns. A call on one
+// branch leaves the cells at their previous values on the other, and the join of the two cannot
+// carry the tuple. The Recover block is not counted (parentIndexFor).
+type closureCall struct {
+	mc        *ssa.MakeClosure
+	call      *ssa.Call
+	dominates bool
+}
+
+// closureCallFor returns the closureCall of closure fn, or nil when the enclosing function does not
+// run it at exactly one dominating call (it is built at several sites, called more than once or
+// not at all, called on one branch only, or the value goes anywhere but that call: stored, passed,
+// deferred, started as a goroutine or returned). Nil is the fail-closed answer. The result is
+// cached per closure.
+func (b *packageBuilder) closureCallFor(fn *ssa.Function) *closureCall {
+	if cc, ok := b.closureCalls[fn]; ok {
+		return cc
+	}
+	cc := b.findClosureCall(fn)
+	b.closureCalls[fn] = cc
+	return cc
+}
+
+func (b *packageBuilder) findClosureCall(fn *ssa.Function) *closureCall {
+	parent := fn.Parent()
+	if parent == nil || len(fn.FreeVars) == 0 || len(fn.Blocks) == 0 {
+		return nil
+	}
+	pix := b.parentIndexFor(parent)
+
+	// The enclosing function runs the closure at exactly one call, in a block it lowers, and the
+	// closure value goes nowhere else (not stored, passed, deferred or started as a goroutine).
+	mc := pix.closures[fn]
+	if mc == nil {
+		return nil
+	}
+	var parentCall *ssa.Call
+	for _, ref := range liveReferrers(mc) {
+		b.planWork++
+		call, ok := ref.(*ssa.Call)
+		if !ok || call.Call.Value != mc || call.Block() == parent.Recover || parentCall != nil {
+			return nil
+		}
+		for _, arg := range call.Call.Args {
+			if arg == mc {
+				return nil
+			}
+		}
+		parentCall = call
+	}
+	if parentCall == nil {
+		return nil
+	}
+	return &closureCall{
+		mc:        mc,
+		call:      parentCall,
+		dominates: pix.retDom != nil && parentCall.Block().Dominates(pix.retDom),
+	}
+}
+
+func (b *packageBuilder) buildClosurePlan(fn *ssa.Function) *closurePlan {
+	cc := b.closureCallFor(fn)
+	if cc == nil || !cc.dominates {
+		return nil
+	}
+	mc, parentCall := cc.mc, cc.call
+	pix := b.parentIndexFor(fn.Parent())
+
+	// Collect the value components the closure stores to captured variables together with the
+	// error of the same call, in the same block.
+	plan := &closurePlan{mc: mc, parentCall: parentCall, errIdx: -1, valStores: make(map[*ssa.Store]bool)}
+	for _, blk := range fn.Blocks {
+		if blk == fn.Recover {
+			continue
+		}
+		for _, ins := range blk.Instrs {
+			b.planWork++
+			st, ok := ins.(*ssa.Store)
+			if !ok {
+				continue
+			}
+			valFV, ok := st.Addr.(*ssa.FreeVar)
+			if !ok {
+				continue
+			}
+			ext, ok := st.Val.(*ssa.Extract)
+			if !ok {
+				continue
+			}
+			call, ok := ext.Tuple.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			sig := call.Call.Signature()
+			last := sig.Results().Len() - 1
+			if !sigReturnsErrorLast(sig) || last < 1 || ext.Index >= last {
+				continue
+			}
+			errFV := errStoredInBlock(call, last, st.Block())
+			if errFV == nil {
+				continue
+			}
+			if plan.call != nil && plan.call != call {
+				return nil
+			}
+			plan.call = call
+			plan.valIdx = append(plan.valIdx, freeVarIndex(fn, valFV))
+			plan.errIdx = freeVarIndex(fn, errFV)
+			plan.valStores[st] = true
+		}
+	}
+	if plan.call == nil || plan.errIdx < 0 {
+		return nil
+	}
+
+	// A named result is read by the parent's return, which checks only a literal nil or blanked
+	// error: a pair that ends up in a returned cell is left to the closure-store report.
+	// Each captured variable the pair lands in is written once by the closure and touched only
+	// through plain loads and stores, in the closure and in the enclosing function, and no other
+	// closure captures it: nothing else can change it between the call and the check. The closure
+	// does not read a value cell back: a load from a captured variable is not tied to the call's
+	// tuple, so a use of it inside the closure would go unchecked. Keeping such a closure untracked
+	// leaves its store of the value reported.
+	seen := map[int]bool{}
+	for _, idx := range append([]int{plan.errIdx}, plan.valIdx...) {
+		if idx < 0 || seen[idx] || idx >= len(mc.Bindings) {
+			return nil
+		}
+		seen[idx] = true
+		if !singlyStoredFreeVar(fn.FreeVars[idx], idx == plan.errIdx) {
+			return nil
+		}
+		alloc, ok := mc.Bindings[idx].(*ssa.Alloc)
+		if !ok || !isLocalCellAlloc(alloc) || pix.namedResults[alloc.Comment] || !capturedOnlyBy(alloc, mc) {
+			return nil
+		}
+	}
+	return plan
+}
+
+func liveReferrers(v ssa.Value) []ssa.Instruction {
+	if v.Referrers() == nil {
+		return nil
+	}
+	var out []ssa.Instruction
+	for _, ref := range *v.Referrers() {
+		if _, dbg := ref.(*ssa.DebugRef); !dbg {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+func freeVarIndex(fn *ssa.Function, fv *ssa.FreeVar) int {
+	for i, f := range fn.FreeVars {
+		if f == fv {
+			return i
+		}
+	}
+	return -1
+}
+
+// errStoredInBlock returns the captured variable that the error result of call is stored to in blk.
+func errStoredInBlock(call *ssa.Call, last int, blk *ssa.BasicBlock) *ssa.FreeVar {
+	for _, ref := range liveReferrers(call) {
+		ext, ok := ref.(*ssa.Extract)
+		if !ok || ext.Index != last {
+			continue
+		}
+		for _, r := range liveReferrers(ext) {
+			if st, ok := r.(*ssa.Store); ok && st.Val == ext && st.Block() == blk {
+				if fv, ok := st.Addr.(*ssa.FreeVar); ok {
+					return fv
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// singlyStoredFreeVar reports whether the closure stores to fv exactly once and otherwise only
+// loads it, or does not load it at all when loadsAllowed is false.
+func singlyStoredFreeVar(fv *ssa.FreeVar, loadsAllowed bool) bool {
+	stores := 0
+	for _, ref := range liveReferrers(fv) {
+		switch r := ref.(type) {
+		case *ssa.Store:
+			if r.Addr != fv || r.Val == ssa.Value(fv) {
+				return false
+			}
+			stores++
+		case *ssa.UnOp:
+			if r.Op != token.MUL || !loadsAllowed {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return stores == 1
+}
+
+// capturedOnlyBy reports whether mc is the only closure that captures the cell.
+func capturedOnlyBy(alloc *ssa.Alloc, mc *ssa.MakeClosure) bool {
+	for _, ref := range liveReferrers(alloc) {
+		if m, ok := ref.(*ssa.MakeClosure); ok && m != mc {
+			return false
+		}
+	}
+	return true
+}
+
+// seedClosurePairs marks the captured cells that a tracked closure fills with value components as
+// companions, so loads from them are fallible results tied to the tuple bound at the closure call.
+func (fl *funcLowerer) seedClosurePairs() {
+	for _, b := range fl.fn.Blocks {
+		if b == fl.fn.Recover {
+			continue
+		}
+		for _, ins := range b.Instrs {
+			call, ok := ins.(*ssa.Call)
+			if !ok {
+				continue
+			}
+			if plan := fl.pkg.closurePlanAt(call); plan != nil {
+				for _, idx := range plan.valIdx {
+					fl.companionVals[plan.mc.Bindings[idx]] = true
+					fl.pairDesc[plan.mc.Bindings[idx]] = "result of " + describeCallCommon(&plan.call.Call)
+				}
+			}
+		}
+	}
+}
+
+// bindClosurePair binds, right after the call that runs a tracked closure, the cells the closure
+// filled as a fallible tuple: the error cell is the tuple's error and the value cells are its
+// companions. The nil check of the error cell then proves the value cells, and every other path
+// (a reassigned cell, an unchecked use) stays unproven.
+func (fl *funcLowerer) bindClosurePair(call *ssa.Call, ops *[]gusseterr.OpIR) {
+	plan := fl.pkg.closurePlanAt(call)
+	if plan == nil {
+		return
+	}
+	errSlot := fl.slot(plan.mc.Bindings[plan.errIdx])
+	comps := make([]uint32, 0, len(plan.valIdx))
+	for _, idx := range plan.valIdx {
+		comps = append(comps, fl.slot(plan.mc.Bindings[idx]))
+	}
+	var tflags uint8
+	if isIOReaderRead(&plan.call.Call) {
+		tflags |= gusseterr.TupleIORead
+	}
+	siteID := fl.pkg.addSite(plan.call.Call.Pos(), describeCallCommon(&plan.call.Call), "")
+	// The bind overwrites the error cell, so an unread earlier error is reported at this op: name the
+	// variable there, as the no-closure twin's OpBindErr does, and keep the call on the tuple's site.
+	bindSiteID := fl.pkg.addSite(plan.call.Call.Pos(), cellSiteName(plan.mc.Bindings[plan.errIdx]), "")
+	tid := uint32(len(fl.tuples))
+	fl.tuples = append(fl.tuples, gusseterr.TupleMeta{ErrSlot: errSlot, CallSiteID: siteID, Flags: tflags})
+	*ops = append(*ops,
+		gusseterr.OpIR{Kind: gusseterr.OpBindTuple, SiteID: bindSiteID, TupleID: tid, SlotA: errSlot, Companions: comps},
+		// The closure already handled the error cell as an escaping error value, so the bind must
+		// not leave it unread: without this, `err = nil` between the call and the check reports an
+		// overwritten unchecked error, which the same sequence without a closure does not.
+		gusseterr.OpIR{Kind: gusseterr.OpObserveErr, SiteID: 0, SlotA: errSlot},
+	)
+}
+
+// closurePairStore reports whether st stores a value component of a fallible call into a captured
+// variable as part of a pair that escapes the closure with its error. Like returning (v, err), that
+// is not a use: the enclosing function binds the pair at the closure call and holds the check.
+func (fl *funcLowerer) closurePairStore(st *ssa.Store) bool {
+	if _, ok := st.Addr.(*ssa.FreeVar); !ok || !fl.companionVals[st.Val] {
+		return false
+	}
+	plan := fl.pkg.closurePlanFor(fl.fn)
+	return plan != nil && plan.valStores[st]
+}
+
 func isIOEOFValue(v ssa.Value) bool {
 	if u, ok := v.(*ssa.UnOp); ok && u.Op == token.MUL {
 		v = u.X
@@ -734,10 +1142,12 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 	fl.seedErrVarOrigins()
 	fl.seedBoxedConcreteErr()
 	fl.seedIOReadErrVals()
+	fl.seedClosurePairs()
 	fl.seedCompanionVals()
 
 	nBlocks := len(fl.fn.Blocks)
 	blocks := make([]gusseterr.BlockIR, nBlocks)
+	deferRuns := blocksWhereDefersRun(fl.fn)
 
 	// Map AST shadowed error positions to their best matching basic block.
 	shadowBlocks := make(map[int][]shadowErrAST)
@@ -789,19 +1199,21 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 
 			case *ssa.Call:
 				fl.lowerCall(x, &ops, consumedUnhandled, consumedCloses)
-				if isNoReturnCall(&x.Call) {
+				fl.bindClosurePair(x, &ops)
+				fl.replayClosureEffects(x, &ops)
+				if noReturnKindOf(&x.Call) != callReturns {
 					terminatedEarly = true
 				}
 
 			case *ssa.Defer:
-				fl.lowerDefer(x, &ops, consumedUnhandled, consumedCloses)
+				fl.lowerDefer(x, &ops, consumedUnhandled, consumedCloses, deferRuns[bbIdx])
 
 			case *ssa.Go:
 				fl.lowerGo(x, &ops, consumedUnhandled)
 
 			case *ssa.Store:
 				if alloc, ok := x.Addr.(*ssa.Alloc); ok && fl.localCells[alloc] {
-					sid := fl.siteForVal(x.Pos(), describeSSAVal(alloc))
+					sid := fl.siteForVal(x.Pos(), cellSiteName(alloc))
 					ops = append(ops, gusseterr.OpIR{
 						Kind:    gusseterr.OpAssignSlot,
 						SiteID:  sid,
@@ -832,7 +1244,7 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 					}
 					if isErrorInterface(x.Val.Type()) || len(fl.valErrVars[x.Val]) > 0 {
 						fl.emitObserveErr(&ops, x.Val)
-					} else {
+					} else if !fl.closurePairStore(x) {
 						fl.emitUseCompanion(&ops, x.Pos(), x.Val)
 					}
 					fl.emitUseCompanion(&ops, x.Pos(), x.Addr)
@@ -1215,12 +1627,17 @@ func (fl *funcLowerer) lowerCall(
 	blankInfo, isBlankedAST := fl.matchBlankedTuple(pos)
 	var tflags uint8
 	errSlot := gusseterr.NoneU32
+	var bindSiteID uint32
 	callSitePos := pos
 	callDesc := describeCallCommon(cc)
 	if isBlankedAST {
 		tflags |= gusseterr.TupleErrBlanked
 		callSitePos = blankInfo.pos
 		callDesc = blankInfo.callDesc
+	} else if fl.astInfo.discarded[pos] {
+		// Every result is blanked. go/ssa still emits the error Extract, and binding it to a slot
+		// nothing reads would make the next trip round a loop report it as an overwritten error.
+		tflags |= gusseterr.TupleErrBlanked
 	} else {
 		if v, ok := fl.callErrVar[ins]; ok {
 			varSid := fl.pkg.addSite(pos, v.Name(), "")
@@ -1246,10 +1663,15 @@ func (fl *funcLowerer) lowerCall(
 		Flags:      tflags,
 	})
 	fl.callTupleID[ins] = tid
+	if name := fl.errVarNameAt(pos); name != "" && !isBlankedAST {
+		bindSiteID = fl.pkg.addSite(pos, name, "")
+	} else {
+		bindSiteID = callSiteID
+	}
 
 	*ops = append(*ops, gusseterr.OpIR{
 		Kind:       gusseterr.OpBindTuple,
-		SiteID:     callSiteID,
+		SiteID:     bindSiteID,
 		TupleID:    tid,
 		SlotA:      errSlot,
 		Companions: compSlots,
@@ -1290,6 +1712,7 @@ func (fl *funcLowerer) lowerDefer(
 	ops *[]gusseterr.OpIR,
 	consumedUnhandled map[token.Pos]bool,
 	consumedCloses map[token.Pos]bool,
+	deferRuns bool,
 ) {
 	cc := &ins.Call
 	pos := cc.Pos()
@@ -1297,7 +1720,10 @@ func (fl *funcLowerer) lowerDefer(
 
 	if cl, key, ok := fl.matchCloseSite(cc, pos, consumedCloses); ok {
 		consumedCloses[key] = true
-		if recv := methodReceiverVal(cc); recv != nil {
+		// A defer whose every path ends in a process exit never runs its Close, so there is
+		// nothing to resolve at an exit; the site is consumed all the same, so no other pass
+		// reports it as a bare Close.
+		if recv := methodReceiverVal(cc); recv != nil && deferRuns {
 			sid := fl.pkg.addSite(cl.pos, cl.recvDesc, "")
 			*ops = append(*ops, gusseterr.OpIR{
 				Kind:    gusseterr.OpUnhandledClose,
@@ -1556,7 +1982,11 @@ func (fl *funcLowerer) emitUseCompanion(ops *[]gusseterr.OpIR, pos token.Pos, v 
 		pos = v.Pos()
 	}
 	s := fl.slot(v)
-	fl.emitUseCompanionSlot(ops, pos, s, describeSSAVal(v))
+	desc := describeSSAVal(v)
+	if cell, ok := fl.loadedCell[v]; ok && fl.pairDesc[cell] != "" {
+		desc = fl.pairDesc[cell]
+	}
+	fl.emitUseCompanionSlot(ops, pos, s, desc)
 }
 
 func (fl *funcLowerer) emitUseCompanionSlot(ops *[]gusseterr.OpIR, pos token.Pos, s uint32, desc string) {
@@ -1765,6 +2195,41 @@ func (fl *funcLowerer) assignedErrVarNotDiscarded(callPos token.Pos) *types.Var 
 		}
 	})
 	return found
+}
+
+// errVarNameAt is the name of the error variable the call at pos (its Lparen) assigns its error to,
+// or "" when the error goes to a blank, a field or nothing. It is for message text only: unlike
+// callErrVar it ignores a later `_ = err`, so it never decides what is tracked.
+func (fl *funcLowerer) errVarNameAt(pos token.Pos) string {
+	if fl.errNames == nil {
+		fl.errNames = make(map[token.Pos]string)
+		if fl.fn.Syntax() != nil {
+			note := func(stmt ast.Stmt, call ast.Expr) {
+				if c, ok := unparenExpr(call).(*ast.CallExpr); ok {
+					if v := fl.extractLHSAssignedErrVar(stmt, c.Lparen); v != nil {
+						fl.errNames[c.Lparen] = v.Name()
+					}
+				}
+			}
+			walkNoNestedClosures(fl.fn.Syntax(), func(n ast.Node) {
+				switch s := n.(type) {
+				case *ast.AssignStmt:
+					if len(s.Rhs) == 1 {
+						note(s, s.Rhs[0])
+					}
+				case *ast.DeclStmt:
+					if gd, ok := s.Decl.(*ast.GenDecl); ok {
+						for _, spec := range gd.Specs {
+							if vs, ok := spec.(*ast.ValueSpec); ok && len(vs.Values) == 1 {
+								note(s, vs.Values[0])
+							}
+						}
+					}
+				}
+			})
+		}
+	}
+	return fl.errNames[pos]
 }
 
 func (fl *funcLowerer) findErrVarInStmtList(stmts []ast.Stmt, callPos token.Pos) *types.Var {
@@ -2080,7 +2545,23 @@ func isIOReaderRead(cc *ssa.CallCommon) bool {
 	return ok && basic.Kind() == types.Byte && isErrorInterface(sig.Results().At(1).Type())
 }
 
-func isNoReturnCall(cc *ssa.CallCommon) bool {
+// callEnds says how a call that never returns to its caller ends the goroutine, which decides
+// whether the deferred calls of the functions on its stack run.
+type callEnds uint8
+
+const (
+	// callReturns is any call that comes back.
+	callReturns callEnds = iota
+	// callExitsProcess ends the whole process: os.Exit and log.Fatal*, as functions or methods of
+	// *log.Logger. No deferred call runs.
+	callExitsProcess
+	// callUnwinds leaves the function by unwinding its stack: runtime.Goexit, panic through
+	// log.Panic*, and testing's Fatal, Fatalf and FailNow (which call runtime.Goexit). Deferred
+	// calls run.
+	callUnwinds
+)
+
+func noReturnKindOf(cc *ssa.CallCommon) callEnds {
 	var pkgPath, typeName, fnName string
 	if cc.IsInvoke() && cc.Method != nil {
 		fnName = cc.Method.Name()
@@ -2097,18 +2578,85 @@ func isNoReturnCall(cc *ssa.CallCommon) bool {
 		}
 	}
 	if pkgPath == "os" && fnName == "Exit" {
-		return true
+		return callExitsProcess
+	}
+	if pkgPath == "log" && strings.HasPrefix(fnName, "Fatal") {
+		return callExitsProcess
 	}
 	if pkgPath == "runtime" && fnName == "Goexit" {
-		return true
+		return callUnwinds
 	}
-	if pkgPath == "log" && (strings.HasPrefix(fnName, "Fatal") || strings.HasPrefix(fnName, "Panic")) {
-		return true
+	if pkgPath == "log" && strings.HasPrefix(fnName, "Panic") {
+		return callUnwinds
 	}
 	if strings.Contains(typeName, "testing.") && (fnName == "Fatal" || fnName == "Fatalf" || fnName == "FailNow") {
-		return true
+		return callUnwinds
 	}
-	return false
+	return callReturns
+}
+
+// blocksWhereDefersRun marks the blocks from which the deferred calls can run. It is false only
+// where some path ends in a process exit and no path ends any other way, which is the card's
+// ruling: deferred calls do not run after os.Exit or log.Fatal*, and do after a return, a panic or
+// an unwinding call. A block that can only loop or wait forever has no exit either, so it keeps
+// true (any call in it may panic); a loop that can also leave through an exit is judged by its
+// exits, so spinning is not counted as a way to run the deferred calls.
+func blocksWhereDefersRun(fn *ssa.Function) []bool {
+	runs, _ := blocksWhereDefersRunWork(fn)
+	return runs
+}
+
+// blocksWhereDefersRunWork computes the answer of blocksWhereDefersRun and the work it took, in
+// blocks and edges visited, which tests bound. Two reverse reachability passes, each visiting a
+// block once and an edge once: from the blocks whose first never-returning call unwinds or that
+// end a path with no successor (a return, a panic), and from the blocks whose first never-returning
+// call exits the process. A block that reaches the first set runs deferred calls; a block that
+// reaches neither is a closed loop and runs them too; the rest reach only exits.
+func blocksWhereDefersRunWork(fn *ssa.Function) ([]bool, uint64) {
+	n := len(fn.Blocks)
+	toEnd := make([]bool, n)
+	toExit := make([]bool, n)
+	exits := make([]bool, n)
+	work := uint64(n)
+	var endQueue, exitQueue []int
+	for i, b := range fn.Blocks {
+		kind := callReturns
+		for _, ins := range b.Instrs {
+			if call, ok := ins.(*ssa.Call); ok {
+				if kind = noReturnKindOf(&call.Call); kind != callReturns {
+					break
+				}
+			}
+		}
+		switch {
+		case kind == callExitsProcess:
+			exits[i], toExit[i] = true, true
+			exitQueue = append(exitQueue, i)
+		case kind == callUnwinds || len(b.Succs) == 0:
+			toEnd[i] = true
+			endQueue = append(endQueue, i)
+		}
+	}
+	walk := func(queue []int, seen []bool) {
+		for len(queue) > 0 {
+			b := queue[len(queue)-1]
+			queue = queue[:len(queue)-1]
+			for _, p := range fn.Blocks[b].Preds {
+				work++
+				if !seen[p.Index] && !exits[p.Index] {
+					seen[p.Index] = true
+					queue = append(queue, p.Index)
+				}
+			}
+		}
+	}
+	walk(endQueue, toEnd)
+	walk(exitQueue, toExit)
+	runs := make([]bool, n)
+	for i := range runs {
+		runs[i] = toEnd[i] || !toExit[i]
+	}
+	return runs, work
 }
 
 func isStdlibInfallibleConstructor(pkgPath, name string) bool {
@@ -2186,20 +2734,35 @@ func describeCallCommon(cc *ssa.CallCommon) string {
 	return "call()"
 }
 
-func describeSSAVal(v ssa.Value) string {
+// ssaValName is the source name of a variable cell or parameter, bare. The formatters in
+// errcheck.go quote a name once; describeSSAVal quotes it for the messages that interpolate a
+// description unquoted.
+func ssaValName(v ssa.Value) (string, bool) {
 	switch x := v.(type) {
-	case *ssa.Extract:
+	case *ssa.Alloc:
+		return x.Comment, x.Comment != ""
+	case *ssa.Parameter:
+		return x.Name(), x.Name() != ""
+	}
+	return "", false
+}
+
+// cellSiteName is the detail of a site that stores into a variable cell: the bare variable name.
+func cellSiteName(v ssa.Value) string {
+	if name, ok := ssaValName(v); ok {
+		return name
+	}
+	return "companion value"
+}
+
+func describeSSAVal(v ssa.Value) string {
+	if x, ok := v.(*ssa.Extract); ok {
 		if call, ok := x.Tuple.(*ssa.Call); ok {
 			return "result of " + describeCallCommon(&call.Call)
 		}
-	case *ssa.Alloc:
-		if x.Comment != "" {
-			return "'" + x.Comment + "'"
-		}
-	case *ssa.Parameter:
-		if x.Name() != "" {
-			return "'" + x.Name() + "'"
-		}
+	}
+	if name, ok := ssaValName(v); ok {
+		return "'" + name + "'"
 	}
 	return "companion value"
 }

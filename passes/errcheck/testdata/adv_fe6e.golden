@@ -1,0 +1,48 @@
+errc7ddadv/a.go:116:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:128:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:144:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:166:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:214:4: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:226:31: ERR003: assignment to 'err' overwrites an earlier unchecked error
+errc7ddadv/a.go:235:9: ERR003: assignment to 'err' overwrites an earlier unchecked error
+errc7ddadv/a.go:262:19: ERR003: assignment to 'err' overwrites an earlier unchecked error
+errc7ddadv/a.go:298:13: ERR003: assignment to 'err' overwrites an earlier unchecked error
+errc7ddadv/a.go:314:14: ERR003: assignment to 'err' overwrites an earlier unchecked error
+errc7ddadv/a.go:324:2: ERR002: companion value from companion value is used after discarding its error with '_'
+errc7ddadv/a.go:336:19: ERR003: assignment to 'err' overwrites an earlier unchecked error
+errc7ddadv/a.go:352:10: ERR003: assignment to 'err' overwrites an earlier unchecked error
+errc7ddadv/a.go:374:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:393:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:412:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:434:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:452:2: ERR005: deferred Close() on writable resource w discards flush error
+errc7ddadv/a.go:482:3: ERR005: deferred Close() on writable resource w discards flush error
+errc7ddadv/a.go:504:2: ERR005: deferred Close() on writable resource w discards flush error
+errc7ddadv/a.go:51:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:548:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:561:3: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:588:3: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:597:3: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:608:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:63:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:694:11: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:715:2: ERR001: error return from cl() is discarded without handling (bind and check err, or assign to _ to discard explicitly)
+errc7ddadv/a.go:93:2: ERR005: Close() on writable resource b discards flush error
+errc7ddadv/b.go:100:3: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:13:3: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:22:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:28:12: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:34:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:68:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:74:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:81:16: ERR005: Close() on writable resource w discards flush error
+errc7ddadvdup/a.go:11:3: ERR005: Close() on writable resource w discards flush error
+errc7ddadvdup/a.go:17:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadvdup/a.go:24:4: ERR005: Close() on writable resource w discards flush error
+errc7ddadvdup/a.go:39:3: ERR005: Close() on writable resource w discards flush error
+errc7ddadvdup/a.go:46:3: ERR005: Close() on writable resource w discards flush error
+errc7ddadvdup/a.go:54:3: ERR005: deferred Close() on writable resource w discards flush error
+errc7ddadvmiss/a.go:16:2: ERR005: Close() on writable resource a discards flush error
+errc7ddadvmiss/a.go:23:2: ERR005: Close() on writable resource a discards flush error
+errc7ddadvmiss/a.go:31:2: ERR005: Close() on writable resource a discards flush error
+errc7ddadvmiss/a.go:40:3: ERR005: Close() on writable resource a discards flush error

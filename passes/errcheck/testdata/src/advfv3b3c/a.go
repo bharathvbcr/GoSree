@@ -65,7 +65,7 @@ func loopReassign(w io.WriteCloser) func() {
 		for i := 0; i < 2; i++ {
 			w.Close() // want "ERR005"
 			w = open()
-			_, _ = w.Write(nil) // want "ERR003"
+			_, _ = w.Write(nil) // ft-c7dd: the error is explicitly blanked, so ERR003 does not apply (RULES.md: `_ = f()` is the explicit-discard escape)
 		}
 	}
 }
@@ -82,16 +82,18 @@ func replacedBetween(w io.WriteCloser) {
 
 // ---- Probe 3: interprocedural ----
 
-// P3a: the enclosing function defers Close; a closure it calls does the write.
+// P3a: the enclosing function defers Close; a closure it calls does the write. Reported since
+// ft-fe6e: the closure is called once, on every path to the return, and goes nowhere else.
 func enclosingDefersClosureWrites(f *os.File) {
-	defer f.Close() // P3a
+	defer f.Close() // want "ERR005"
 	func() { _, _ = f.Write(nil) }()
 }
 
-// P3b: the closure closes; the enclosing function writes.
+// P3b: the closure closes; the enclosing function writes. Reported since ft-fe6e, at the Close in
+// the closure.
 func closureClosesEnclosingWrites(f *os.File) {
 	_, _ = f.Write(nil)
-	func() { f.Close() }() // P3b
+	func() { f.Close() }() // want "ERR005"
 }
 
 // P3b2: deferred closure closes, enclosing writes.
@@ -100,10 +102,11 @@ func deferredClosureCloses(f *os.File) {
 	_, _ = f.Write(nil)
 }
 
-// P3c: local captured var, closure defers close, enclosing writes after creating closure.
+// P3c: local captured var, closure defers close, enclosing writes after creating closure. Reported
+// since ft-fe6e: the deferred Close runs when the closure returns, at the call, after the write.
 func localCaptured() {
 	f, _ := os.Create("x")           // want "ERR002"
-	cl := func() { defer f.Close() } // P3c
+	cl := func() { defer f.Close() } // want "ERR005"
 	_, _ = f.Write(nil)
 	cl()
 }

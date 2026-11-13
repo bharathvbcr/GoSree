@@ -78,6 +78,10 @@ var Analyzer = &analysis.Analyzer{
 	ResultType: reflect.TypeFor[*Summary](),
 }
 
+// closurePlanWorkHook, when set by a test, receives the closure-plan work counter once a package is
+// lowered, before it is solved.
+var closurePlanWorkHook func(work uint64)
+
 type siteMeta struct {
 	pos    token.Pos
 	detail string
@@ -112,6 +116,9 @@ func run(pass *analysis.Pass) (any, error) {
 
 	b := newPackageBuilder(pass, funcs)
 	irFuncs := b.lowerAll()
+	if closurePlanWorkHook != nil {
+		closurePlanWorkHook(b.planWork)
+	}
 
 	res, err := gusseterr.Solve(context.Background(), irFuncs)
 	if err != nil {

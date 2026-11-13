@@ -16,8 +16,9 @@ func TestAdv3b3cReassignFalsePositive(t *testing.T) {
 }
 
 // Current behavior of the captured-resource shapes that hold (true positives and silent cases) and
-// of pre-existing misses (nothing is reported for the interprocedural, field-load and
-// range-over-func-body shapes; see the comments in the fixtures).
+// of pre-existing misses (nothing is reported for the field-load shapes and for a closure the
+// creator does not run at one dominating call; see the comments in the fixtures). A closure it
+// does run so is replayed at the call (ft-fe6e), which the P3a, P3b and P3c wants state.
 func TestAdv3b3cCapturedResources(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "advfv3b3c")
 }
