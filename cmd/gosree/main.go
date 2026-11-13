@@ -24,7 +24,6 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -118,28 +117,16 @@ func isMetaCommand(args []string) bool {
 	if end < len(args) && args[end] == "help" {
 		return true
 	}
+	flags, _ := scanFlags(args)
 	printFlags := false // the last value of -flags decides, as in parseCommandLine
-	for i := 0; i < end; i++ {
-		arg := args[i]
-		name := strings.TrimLeft(arg, "-")
-		value, hasValue := "", false
-		if k := strings.IndexByte(name, '='); k >= 0 {
-			name, value, hasValue = name[:k], name[k+1:], true
-		}
-		truthy := func() bool {
-			if !hasValue {
-				return true
-			}
-			b, err := strconv.ParseBool(value)
-			return err != nil || b
-		}
-		switch name {
+	for _, f := range flags {
+		switch f.name {
 		case "flags":
-			printFlags = truthy()
+			printFlags = f.truthy()
 		case "V":
 			return true
 		case "help", "h":
-			if truthy() {
+			if f.truthy() {
 				return true
 			}
 		}
@@ -172,17 +159,9 @@ func hasUnknownFlag(args []string, analyzers []*analysis.Analyzer) bool {
 	for _, a := range analyzers {
 		known[a.Name] = true
 	}
-	end := flagEnd(args)
-	for i := 0; i < end; i++ {
-		arg := args[i]
-		if arg == "--" || len(arg) < 2 || arg[0] != '-' {
-			continue
-		}
-		name := strings.TrimLeft(arg, "-")
-		if k := strings.IndexByte(name, '='); k >= 0 {
-			name = name[:k]
-		}
-		if !known[name] {
+	flags, _ := scanFlags(args)
+	for _, f := range flags {
+		if !known[f.name] {
 			return true
 		}
 	}

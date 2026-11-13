@@ -22,22 +22,54 @@ var valueFlags = map[string]bool{
 	"tags": true, "c": true, "debug": true, "cpuprofile": true, "memprofile": true, "trace": true,
 }
 
-// flagEnd returns the index of the first positional argument: where the driver's flags stop. It
-// follows the rule parseCommandLine uses (a flag package stops at the first non-flag or "--", and a
-// value flag may take the next argument).
-func flagEnd(args []string) int {
+// cmdFlag is one flag of the command line as the driver's flag package reads it.
+type cmdFlag struct {
+	name     string
+	value    string
+	hasValue bool // "-name=value", or a value flag that took the next argument
+	start    int  // index of the flag's first argument
+	end      int  // index just past its last argument (a consumed value included)
+}
+
+// scanFlags reads the leading flags: the ones before the first positional argument or "--". A value
+// flag without "=" consumes the next argument, so that argument is part of the flag and never a
+// flag of its own. It is the one walk every reader of the command line goes through, so they cannot
+// disagree about where a flag starts or what is its value. end is the index of the first positional
+// argument.
+func scanFlags(args []string) (flags []cmdFlag, end int) {
 	i := 0
 	for ; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" || len(arg) < 2 || arg[0] != '-' {
 			break
 		}
-		name := strings.TrimLeft(arg, "-")
-		if !strings.Contains(name, "=") && valueFlags[name] && i+1 < len(args) {
+		f := cmdFlag{name: strings.TrimLeft(arg, "-"), start: i}
+		if k := strings.IndexByte(f.name, '='); k >= 0 {
+			f.name, f.value, f.hasValue = f.name[:k], f.name[k+1:], true
+		} else if valueFlags[f.name] && i+1 < len(args) {
 			i++
+			f.value, f.hasValue = args[i], true
 		}
+		f.end = i + 1
+		flags = append(flags, f)
 	}
-	return i
+	return flags, i
+}
+
+// flagEnd returns the index of the first positional argument: where the driver's flags stop.
+func flagEnd(args []string) int {
+	_, end := scanFlags(args)
+	return end
+}
+
+// truthy reads a boolean flag's value as the flag package does; an unparsable value is the driver's
+// error to report, so it counts as set.
+func (f cmdFlag) truthy() bool {
+	if !f.hasValue {
+		return true
+	}
+	b, err := strconv.ParseBool(f.value)
+	return err != nil || b
 }
 
 // plan is what gosree does with its command line before the driver sees it.
@@ -74,32 +106,10 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 		given[name] = v
 	}
 	printFlags := false // the last value of -flags
-	i := 0
-	for ; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" || len(arg) < 2 || arg[0] != '-' {
-			break
-		}
-		start := i
-		name := strings.TrimLeft(arg, "-")
-		value, hasValue := "", false
-		if k := strings.IndexByte(name, '='); k >= 0 {
-			name, value, hasValue = name[:k], name[k+1:], true
-		}
-		take := func() string { // the value of a flag whose value is the next argument
-			if !hasValue && valueFlags[name] && i+1 < len(args) {
-				i++
-				value, hasValue = args[i], true
-			}
-			return value
-		}
-		truthy := func() bool {
-			if !hasValue {
-				return true
-			}
-			b, err := strconv.ParseBool(value)
-			return err != nil || b // an unparsable value is the driver's error to report
-		}
+	flags, end := scanFlags(args)
+	for _, f := range flags {
+		name := f.name
+		truthy := f.truthy
 		switch {
 		case name == "V":
 			return plan{args: args}, nil // the driver answers this without analysing anything
@@ -120,7 +130,7 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 				return plan{}, errors.New("-" + name + " is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings")
 			}
 		case name == "tags":
-			if v := strings.TrimSpace(take()); v != "" {
+			if v := strings.TrimSpace(f.value); v != "" {
 				if strings.ContainsAny(v, " \t") {
 					return plan{}, errors.New("-tags takes a comma-separated list; a space-separated list is not supported")
 				}
@@ -138,12 +148,10 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 			}
 			enabled[name] = truthy()
 			record(name, enabled[name])
-		default:
-			take()
 		}
-		kept = append(kept, args[start:i+1]...)
+		kept = append(kept, args[f.start:f.end]...)
 	}
-	p.args = append(kept, args[i:]...)
+	p.args = append(kept, args[end:]...)
 	if printFlags {
 		return plan{args: args}, nil // the driver prints its flags and exits without analysing
 	}
