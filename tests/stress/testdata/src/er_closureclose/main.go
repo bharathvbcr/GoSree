@@ -1,9 +1,12 @@
 // Package er_closureclose stress-tests ERR005 where the write and the Close that drops its error
 // sit in different functions, or are reached through a field or a captured pointer. Each marked
-// line is a Close error dropped on a resource that was written; none is reported today, because a
-// closure and its creator are lowered separately and a resource reached through a field has no
-// written flag shared between its loads. The fix was tried on run2/c7dd-err005-wip and set aside
-// because it reported Close of resources that were not written; card ft-fe6eb6d8 owns it.
+// line is a Close error dropped on a resource that was written. A closure and its creator are
+// lowered separately, so ft-fe6e replays a closure's writes and Closes in the creator, at the one
+// call that runs it, when the closure is called once on every path to a return and goes nowhere
+// else (four HITs). The rest are not reported: a closure that escapes, is deferred or is passed as
+// the body of a range-over-func loop is not replayed, and a resource reached through a field has no
+// written flag shared between its loads. Path keying was tried on run2/c7dd-err005-wip and set
+// aside because it reported Close of resources that were not written; card ft-fe6eb6d8 owns it.
 package er_closureclose
 
 import (
@@ -30,14 +33,14 @@ func seq(n int) iter.Seq[int] {
 
 // The creator defers Close and a closure it calls does the write.
 func creatorDefersClosureWrites(w io.WriteCloser) {
-	defer w.Close() // MISS(ERR005): ft-fe6eb6d8: the write is in a closure, a different function from the Close
+	defer w.Close() // HIT(ERR005): ft-fe6e: the closure is called once on every path to the return, so its write is replayed at the call
 	func() { _, _ = w.Write(nil) }()
 }
 
 // The creator writes and a closure it calls closes.
 func closureClosesCreatorWrites(w io.WriteCloser) {
 	_, _ = w.Write(nil)
-	func() { w.Close() }() // MISS(ERR005): ft-fe6eb6d8: the Close is in a closure, a different function from the write
+	func() { w.Close() }() // HIT(ERR005): ft-fe6e: the closure is called once on every path to the return, so its Close is replayed at the call
 }
 
 func deferredClosureCloses(w io.WriteCloser) {
@@ -47,7 +50,7 @@ func deferredClosureCloses(w io.WriteCloser) {
 
 func localCapturedByClosure() {
 	w := open()
-	cl := func() { defer w.Close() } // MISS(ERR005): ft-fe6eb6d8: the Close is in a closure the creator runs after writing
+	cl := func() { defer w.Close() } // HIT(ERR005): ft-fe6e: the closure's deferred Close runs when it returns, at the one call, after the write
 	_, _ = w.Write(nil)
 	cl()
 }
@@ -109,7 +112,7 @@ func deferBeforeLoopBodyWrites(w io.WriteCloser) {
 func bodyWritesClosureCloses(w io.WriteCloser) {
 	for range seq(2) {
 		_, _ = w.Write(nil)
-		func() { w.Close() }() // MISS(ERR005): ft-fe6eb6d8: the Close is in a closure inside the body that writes
+		func() { w.Close() }() // HIT(ERR005): ft-fe6e: the closure is called once in the body, which holds the write and the call
 	}
 }
 
