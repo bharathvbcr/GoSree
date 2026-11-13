@@ -23,12 +23,19 @@ errc7ddadv/a.go:548:2: ERR005: Close() on writable resource w discards flush err
 errc7ddadv/a.go:561:3: ERR005: Close() on writable resource w discards flush error
 errc7ddadv/a.go:588:3: ERR005: Close() on writable resource w discards flush error
 errc7ddadv/a.go:597:3: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:608:2: ERR005: Close() on writable resource w discards flush error
 errc7ddadv/a.go:63:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/a.go:694:11: ERR005: Close() on writable resource w discards flush error
 errc7ddadv/a.go:715:2: ERR001: error return from cl() is discarded without handling (bind and check err, or assign to _ to discard explicitly)
 errc7ddadv/a.go:93:2: ERR005: Close() on writable resource b discards flush error
+errc7ddadv/b.go:100:3: ERR005: Close() on writable resource w discards flush error
 errc7ddadv/b.go:13:3: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:22:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:28:12: ERR005: Close() on writable resource w discards flush error
 errc7ddadv/b.go:34:2: ERR005: Close() on writable resource w discards flush error
 errc7ddadv/b.go:68:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:74:2: ERR005: Close() on writable resource w discards flush error
+errc7ddadv/b.go:81:16: ERR005: Close() on writable resource w discards flush error
 errc7ddadvdup/a.go:11:3: ERR005: Close() on writable resource w discards flush error
 errc7ddadvdup/a.go:17:2: ERR005: Close() on writable resource w discards flush error
 errc7ddadvdup/a.go:24:4: ERR005: Close() on writable resource w discards flush error

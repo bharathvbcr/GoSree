@@ -42,11 +42,12 @@ func closureInBody(w io.WriteCloser) {
 	}
 }
 
-// P5c: body writes, closure in the body closes the captured var.
+// P5c: body writes, closure in the body closes the captured var. Reported since ft-fe6e: the
+// closure is called once in the body, which is itself the function the write and the call are in.
 func bodyWritesClosureCloses(w io.WriteCloser) {
 	for range seq(2) {
 		_, _ = w.Write(nil)
-		func() { w.Close() }() // P5c
+		func() { w.Close() }() // want "ERR005"
 	}
 }
 

@@ -23,6 +23,12 @@ type packageBuilder struct {
 	blankedBySite map[uint32]siteMeta
 	// closurePlans caches the closure pair plan per closure; a nil plan means the closure is untracked.
 	closurePlans map[*ssa.Function]*closurePlan
+	// closureCalls caches the closure's one dominating call per closure; a nil entry means the
+	// closure is untracked. closureFxs and closedNames belong to closureeffects.go.
+	closureCalls map[*ssa.Function]*closureCall
+	closureFxs   map[*ssa.Function]*closureFx
+	closedNames  map[string]bool
+	astInfos     map[*ssa.Function]*funcASTInfo
 	// parentIndexes caches the per-parent facts the plans share; planWork counts the instructions,
 	// blocks and referrers visited while building them (a deterministic cost measure for tests).
 	parentIndexes map[*ssa.Function]*parentIndex
@@ -41,6 +47,9 @@ func newPackageBuilder(pass *analysis.Pass, funcs []*ssa.Function) *packageBuild
 		sites:         []siteMeta{{pos: token.NoPos}}, // site 0 reserved
 		blankedBySite: make(map[uint32]siteMeta),
 		closurePlans:  make(map[*ssa.Function]*closurePlan),
+		closureCalls:  make(map[*ssa.Function]*closureCall),
+		closureFxs:    make(map[*ssa.Function]*closureFx),
+		astInfos:      make(map[*ssa.Function]*funcASTInfo),
 		parentIndexes: make(map[*ssa.Function]*parentIndex),
 	}
 	return b
@@ -116,7 +125,7 @@ func (b *packageBuilder) lowerFunc(funcIdx uint32, fn *ssa.Function) gusseterr.F
 		return gusseterr.FuncIR{Flags: flags}
 	}
 
-	astInfo := scanFuncAST(b.pass, fn.Syntax())
+	astInfo := b.takeASTInfo(fn)
 	_, usedVars := scanBlankDiscardedAndUsedVars(b.pass, fn.Syntax())
 
 	fl := &funcLowerer{
@@ -711,6 +720,10 @@ type parentIndex struct {
 	// retDom is the nearest block that dominates every return block, or nil when there is none. A
 	// call runs on every path to a return exactly when its block dominates retDom.
 	retDom *ssa.BasicBlock
+	// mainRetDom is the same, over the returns the function lowers: the Recover block (the path of
+	// a recovered panic, which has no predecessor and is not lowered) is left out, so a function
+	// with a defer can still have a call that dominates its returns. It is nil when there is none.
+	mainRetDom *ssa.BasicBlock
 	// namedResults holds the names of the parent's named results: their cells are read by the
 	// return itself (a bare return, and the deferred and recovered paths), not by a visible load.
 	namedResults map[string]bool
@@ -728,7 +741,8 @@ func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
 			}
 		}
 	}
-	var retDom *ssa.BasicBlock
+	var retDom, mainRetDom *ssa.BasicBlock
+	mainNone := false
 	for _, blk := range parent.Blocks {
 		b.planWork += uint64(len(blk.Instrs)) + 1
 		if len(blk.Instrs) == 0 {
@@ -748,6 +762,16 @@ func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
 		if _, isRet := blk.Instrs[len(blk.Instrs)-1].(*ssa.Return); !isRet {
 			continue
 		}
+		if blk != parent.Recover && !mainNone {
+			if mainRetDom == nil {
+				mainRetDom = blk
+			}
+			for mainRetDom != nil && !mainRetDom.Dominates(blk) {
+				b.planWork++
+				mainRetDom = mainRetDom.Idom()
+			}
+			mainNone = mainRetDom == nil
+		}
 		if retDom == nil {
 			retDom = blk
 			continue
@@ -758,11 +782,40 @@ func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
 		}
 	}
 	ix.retDom = retDom
+	ix.mainRetDom = mainRetDom
 	b.parentIndexes[parent] = ix
 	return ix
 }
 
-func (b *packageBuilder) buildClosurePlan(fn *ssa.Function) *closurePlan {
+// closureCall is the one place an enclosing function runs a closure: the single MakeClosure that
+// builds it and the single call of the value.
+//
+// The call runs on every path to a return when its block dominates the returns. A call on one
+// branch leaves the cells at their previous values on the other, and the join of the two cannot
+// carry the tuple. domAll counts every return block (what the closure pair plan requires), domLowered
+// the returns the function lowers (what the effect replay requires).
+type closureCall struct {
+	mc         *ssa.MakeClosure
+	call       *ssa.Call
+	domAll     bool
+	domLowered bool
+}
+
+// closureCallFor returns the closureCall of closure fn, or nil when the enclosing function does not
+// run it at exactly one dominating call (it is built at several sites, called more than once or
+// not at all, called on one branch only, or the value goes anywhere but that call: stored, passed,
+// deferred, started as a goroutine or returned). Nil is the fail-closed answer. The result is
+// cached per closure.
+func (b *packageBuilder) closureCallFor(fn *ssa.Function) *closureCall {
+	if cc, ok := b.closureCalls[fn]; ok {
+		return cc
+	}
+	cc := b.findClosureCall(fn)
+	b.closureCalls[fn] = cc
+	return cc
+}
+
+func (b *packageBuilder) findClosureCall(fn *ssa.Function) *closureCall {
 	parent := fn.Parent()
 	if parent == nil || len(fn.FreeVars) == 0 || len(fn.Blocks) == 0 {
 		return nil
@@ -792,11 +845,21 @@ func (b *packageBuilder) buildClosurePlan(fn *ssa.Function) *closurePlan {
 	if parentCall == nil {
 		return nil
 	}
-	// The call runs on every path to a return. A call on one branch leaves the cells at their
-	// previous values on the other, and the join of the two cannot carry the tuple.
-	if pix.retDom == nil || !parentCall.Block().Dominates(pix.retDom) {
+	return &closureCall{
+		mc:         mc,
+		call:       parentCall,
+		domAll:     pix.retDom != nil && parentCall.Block().Dominates(pix.retDom),
+		domLowered: pix.mainRetDom != nil && parentCall.Block().Dominates(pix.mainRetDom),
+	}
+}
+
+func (b *packageBuilder) buildClosurePlan(fn *ssa.Function) *closurePlan {
+	cc := b.closureCallFor(fn)
+	if cc == nil || !cc.domAll {
 		return nil
 	}
+	mc, parentCall := cc.mc, cc.call
+	pix := b.parentIndexFor(fn.Parent())
 
 	// Collect the value components the closure stores to captured variables together with the
 	// error of the same call, in the same block.
@@ -1145,6 +1208,7 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 			case *ssa.Call:
 				fl.lowerCall(x, &ops, consumedUnhandled, consumedCloses)
 				fl.bindClosurePair(x, &ops)
+				fl.replayClosureEffects(x, &ops)
 				if noReturnKindOf(&x.Call) != callReturns {
 					terminatedEarly = true
 				}
