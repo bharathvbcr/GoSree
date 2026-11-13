@@ -71,3 +71,27 @@ func TestAdv8f3cBlocksWhereDefersRunScale(t *testing.T) {
 		t.Fatalf("allocations grow with the function: %.0f at %d blocks, %.0f at %d", aSmall, len(small.Blocks), aBig, len(ret.Blocks))
 	}
 }
+
+// ft-8f3c: the fixpoint behind blocksWhereDefersRun visits each block once and each edge once, so
+// its work counter (blocks plus edges visited) grows linearly with the function. The chain has
+// a fixed number of edges per block; the exit tail makes every block exitOnly, the worst case.
+func TestBlocksWhereDefersRunWorkIsLinear(t *testing.T) {
+	var perBlock [2]float64
+	for i, n := range []int{700, 10500} {
+		fn := chainFunc(t, n, "os.Exit(1)\n\treturn x")
+		runs, work := blocksWhereDefersRunWork(fn)
+		for j, r := range runs {
+			if r {
+				t.Fatalf("%d blocks: block %d still runs defers on an exit-only function", len(fn.Blocks), j)
+			}
+		}
+		perBlock[i] = float64(work) / float64(len(fn.Blocks))
+		t.Logf("%d blocks: work %d (%.2f per block)", len(fn.Blocks), work, perBlock[i])
+		if work > 4*uint64(len(fn.Blocks)) {
+			t.Fatalf("%d blocks: work %d exceeds four per block", len(fn.Blocks), work)
+		}
+	}
+	if perBlock[1] > perBlock[0]*1.1 {
+		t.Fatalf("work per block grows with size: %.2f then %.2f", perBlock[0], perBlock[1])
+	}
+}

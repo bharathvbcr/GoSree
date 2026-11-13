@@ -2498,15 +2498,30 @@ func noReturnKindOf(cc *ssa.CallCommon) callEnds {
 	return callReturns
 }
 
-// blocksWhereDefersRun marks the blocks from which a path leaves the function with its deferred
-// calls running: a return, a panic, or a call that unwinds. A block is false when every path
-// from it ends in a process exit, where no deferred call runs. A block that ends a path in any
-// other way (a stop with no successor) counts as running them, so only a path that visibly ends
-// in os.Exit or log.Fatal* changes an answer.
+// blocksWhereDefersRun marks the blocks from which the deferred calls can run. It is false only
+// where some path ends in a process exit and no path ends any other way, which is the card's
+// ruling: deferred calls do not run after os.Exit or log.Fatal*, and do after a return, a panic or
+// an unwinding call. A block that can only loop or wait forever has no exit either, so it keeps
+// true (any call in it may panic); a loop that can also leave through an exit is judged by its
+// exits, so spinning is not counted as a way to run the deferred calls.
 func blocksWhereDefersRun(fn *ssa.Function) []bool {
-	runs := make([]bool, len(fn.Blocks))
-	exits := make([]bool, len(fn.Blocks))
-	var work []*ssa.BasicBlock
+	runs, _ := blocksWhereDefersRunWork(fn)
+	return runs
+}
+
+// blocksWhereDefersRunWork computes the answer of blocksWhereDefersRun and the work it took, in
+// blocks and edges visited, which tests bound. Two reverse reachability passes, each visiting a
+// block once and an edge once: from the blocks whose first never-returning call unwinds or that
+// end a path with no successor (a return, a panic), and from the blocks whose first never-returning
+// call exits the process. A block that reaches the first set runs deferred calls; a block that
+// reaches neither is a closed loop and runs them too; the rest reach only exits.
+func blocksWhereDefersRunWork(fn *ssa.Function) ([]bool, uint64) {
+	n := len(fn.Blocks)
+	toEnd := make([]bool, n)
+	toExit := make([]bool, n)
+	exits := make([]bool, n)
+	work := uint64(n)
+	var endQueue, exitQueue []int
 	for i, b := range fn.Blocks {
 		kind := callReturns
 		for _, ins := range b.Instrs {
@@ -2516,23 +2531,35 @@ func blocksWhereDefersRun(fn *ssa.Function) []bool {
 				}
 			}
 		}
-		exits[i] = kind == callExitsProcess
-		if kind == callUnwinds || (kind == callReturns && len(b.Succs) == 0) {
-			runs[i] = true
-			work = append(work, b)
+		switch {
+		case kind == callExitsProcess:
+			exits[i], toExit[i] = true, true
+			exitQueue = append(exitQueue, i)
+		case kind == callUnwinds || len(b.Succs) == 0:
+			toEnd[i] = true
+			endQueue = append(endQueue, i)
 		}
 	}
-	for len(work) > 0 {
-		b := work[len(work)-1]
-		work = work[:len(work)-1]
-		for _, p := range b.Preds {
-			if !runs[p.Index] && !exits[p.Index] {
-				runs[p.Index] = true
-				work = append(work, p)
+	walk := func(queue []int, seen []bool) {
+		for len(queue) > 0 {
+			b := queue[len(queue)-1]
+			queue = queue[:len(queue)-1]
+			for _, p := range fn.Blocks[b].Preds {
+				work++
+				if !seen[p.Index] && !exits[p.Index] {
+					seen[p.Index] = true
+					queue = append(queue, p.Index)
+				}
 			}
 		}
 	}
-	return runs
+	walk(endQueue, toEnd)
+	walk(exitQueue, toExit)
+	runs := make([]bool, n)
+	for i := range runs {
+		runs[i] = toEnd[i] || !toExit[i]
+	}
+	return runs, work
 }
 
 func isStdlibInfallibleConstructor(pkgPath, name string) bool {
