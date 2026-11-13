@@ -926,6 +926,90 @@ func Run() {
 `,
 			},
 			{
+				name: "probe10b_generic_tuple_return_assign_call_valuespec_evil",
+				want: true,
+				code: `package app
+
+import "testmod/ifacepkg"
+
+type EvilStore struct{ n int }
+func (e *EvilStore) Touch() { e.n++ }
+type DuckTouch interface { Touch() }
+func pairDuck[T any](x T) (T, int) { return x, 0 }
+func boxViaTuple[T DuckTouch](x T) (ifacepkg.Store, int) { return pairDuck(x) }
+
+func Run() {
+	s, _ := boxViaTuple(&EvilStore{})
+	ifacepkg.RunConcurrent(s)
+}
+`,
+			},
+			{
+				name: "generic_tuple_assign_call_and_valuespec_evil",
+				want: true,
+				code: `package app
+
+import "testmod/ifacepkg"
+
+type EvilStore struct{ n int }
+func (e *EvilStore) Touch() { e.n++ }
+type DuckTouch interface { Touch() }
+func twoDuck[T any](x T) (T, T) { return x, x }
+func takeTwo(a, b ifacepkg.Store) {
+	ifacepkg.RunConcurrent(a)
+	ifacepkg.RunConcurrent(b)
+}
+func viaTupleAll[T DuckTouch](x T) {
+	var a, b ifacepkg.Store = twoDuck(x)
+	a, b = twoDuck(x)
+	takeTwo(twoDuck(x))
+	_, _ = a, b
+}
+
+func Run() {
+	viaTupleAll(&EvilStore{})
+}
+`,
+			},
+			{
+				name: "generic_duck_typeswitch_evil",
+				want: true,
+				code: `package app
+
+import "testmod/ifacepkg"
+
+type EvilStore struct{ n int }
+func (e *EvilStore) Touch() { e.n++ }
+type DuckTouch interface { Touch() }
+func switchDuck[T DuckTouch](x T) {
+	switch s := any(x).(type) {
+	case ifacepkg.Store:
+		ifacepkg.RunConcurrent(s)
+	}
+}
+
+func Run() {
+	switchDuck(&EvilStore{})
+}
+`,
+			},
+			{
+				name: "safe_generic_tuple_forwarding_clean",
+				want: false,
+				code: `package app
+
+import "testmod/ifacepkg"
+
+func pairSafe[T any](x T) (T, int) { return x, 0 }
+func boxSafeTuple[T ifacepkg.Store](x T) (ifacepkg.Store, int) { return pairSafe(x) }
+
+func Run() {
+	s, _ := boxSafeTuple(&ifacepkg.SafeStore{})
+	ifacepkg.RunConcurrent(s)
+}
+`,
+			},
+			{
 				name: "generic_struct_holder_evil",
 				want: true,
 				code: `package app

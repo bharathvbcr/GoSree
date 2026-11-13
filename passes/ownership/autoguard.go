@@ -4018,16 +4018,12 @@ func (st *state) checkAutoSyncGenericFuncBodies() {
 		return
 	}
 	info := st.pass.TypesInfo
-	checkConv := func(pos token.Pos, expr ast.Expr, targetType types.Type) {
-		if expr == nil || targetType == nil {
+	checkTypeConv := func(pos token.Pos, srcType, targetType types.Type) {
+		if srcType == nil || targetType == nil || types.Identical(srcType, types.Typ[types.UntypedNil]) {
 			return
 		}
 		targetNamed, ok := st.isAutoSyncInterfaceType(targetType)
 		if !ok {
-			return
-		}
-		srcType := info.TypeOf(expr)
-		if srcType == nil || types.Identical(srcType, types.Typ[types.UntypedNil]) {
 			return
 		}
 		if tp, isTP := types.Unalias(srcType).(*types.TypeParam); isTP {
@@ -4041,6 +4037,22 @@ func (st *state) checkAutoSyncGenericFuncBodies() {
 			return
 		}
 		st.report(pos, NotOwned, "value of type "+srcType.String()+" converted to concurrency-safe interface "+targetNamed.Obj().Name()+" is not proven concurrency-safe")
+	}
+	checkConv := func(pos token.Pos, expr ast.Expr, targetType types.Type) {
+		if expr == nil || targetType == nil {
+			return
+		}
+		checkTypeConv(pos, info.TypeOf(expr), targetType)
+	}
+	checkTypeAssertion := func(pos token.Pos, srcType, targetType types.Type) {
+		if srcType == nil || targetType == nil {
+			return
+		}
+		if targetNamed, ok := st.isAutoSyncInterfaceType(targetType); ok {
+			if !st.cls.Shareable(srcType) && !st.isAutoSyncType(srcType) {
+				st.report(pos, NotOwned, "value of type "+srcType.String()+" asserted to concurrency-safe interface "+targetNamed.Obj().Name()+" is not proven concurrency-safe")
+			}
+		}
 	}
 
 	inspectScope := func(body *ast.BlockStmt, curSig *types.Signature) {
@@ -4060,9 +4072,18 @@ func (st *state) checkAutoSyncGenericFuncBodies() {
 				}
 				return
 			case *ast.ReturnStmt:
-				if sig != nil && sig.Results() != nil && len(x.Results) == sig.Results().Len() {
-					for i, res := range x.Results {
-						checkConv(res.Pos(), res, sig.Results().At(i).Type())
+				if sig != nil && sig.Results() != nil {
+					nr := sig.Results().Len()
+					if len(x.Results) == nr {
+						for i, res := range x.Results {
+							checkConv(res.Pos(), res, sig.Results().At(i).Type())
+						}
+					} else if len(x.Results) == 1 && nr > 1 {
+						if tup, ok := info.TypeOf(x.Results[0]).(*types.Tuple); ok && tup.Len() == nr {
+							for i := range nr {
+								checkTypeConv(x.Results[0].Pos(), tup.At(i).Type(), sig.Results().At(i).Type())
+							}
+						}
 					}
 				}
 			case *ast.AssignStmt:
@@ -4070,12 +4091,74 @@ func (st *state) checkAutoSyncGenericFuncBodies() {
 					for i, rhs := range x.Rhs {
 						checkConv(rhs.Pos(), rhs, info.TypeOf(x.Lhs[i]))
 					}
+				} else if len(x.Lhs) > 1 && len(x.Rhs) == 1 {
+					if tup, ok := info.TypeOf(x.Rhs[0]).(*types.Tuple); ok && tup.Len() == len(x.Lhs) {
+						for i, lhs := range x.Lhs {
+							checkTypeConv(x.Rhs[0].Pos(), tup.At(i).Type(), info.TypeOf(lhs))
+						}
+					}
 				}
 			case *ast.ValueSpec:
+				var targetAt func(i int) types.Type
 				if x.Type != nil {
 					tt := info.TypeOf(x.Type)
-					for _, val := range x.Values {
-						checkConv(val.Pos(), val, tt)
+					targetAt = func(int) types.Type { return tt }
+				} else {
+					targetAt = func(i int) types.Type {
+						if i < len(x.Names) && x.Names[i] != nil {
+							if obj := info.Defs[x.Names[i]]; obj != nil {
+								return obj.Type()
+							}
+						}
+						return nil
+					}
+				}
+				if len(x.Values) == len(x.Names) {
+					for i, val := range x.Values {
+						checkConv(val.Pos(), val, targetAt(i))
+					}
+				} else if len(x.Values) == 1 && len(x.Names) > 1 {
+					if tup, ok := info.TypeOf(x.Values[0]).(*types.Tuple); ok && tup.Len() == len(x.Names) {
+						for i := range len(x.Names) {
+							checkTypeConv(x.Values[0].Pos(), tup.At(i).Type(), targetAt(i))
+						}
+					}
+				}
+			case *ast.RangeStmt:
+				if x.Tok == token.ASSIGN {
+					if rt := info.TypeOf(x.X); rt != nil {
+						var kt, vt types.Type
+						switch u := rt.Underlying().(type) {
+						case *types.Slice:
+							vt = u.Elem()
+						case *types.Array:
+							vt = u.Elem()
+						case *types.Pointer:
+							if arr, ok := u.Elem().Underlying().(*types.Array); ok {
+								vt = arr.Elem()
+							}
+						case *types.Map:
+							kt, vt = u.Key(), u.Elem()
+						case *types.Chan:
+							kt = u.Elem()
+						case *types.Signature:
+							if u.Params() != nil && u.Params().Len() == 1 {
+								if ysig, ok := u.Params().At(0).Type().Underlying().(*types.Signature); ok && ysig.Params() != nil {
+									if ysig.Params().Len() >= 1 {
+										kt = ysig.Params().At(0).Type()
+									}
+									if ysig.Params().Len() >= 2 {
+										vt = ysig.Params().At(1).Type()
+									}
+								}
+							}
+						}
+						if x.Key != nil && kt != nil {
+							checkTypeConv(x.Key.Pos(), kt, info.TypeOf(x.Key))
+						}
+						if x.Value != nil && vt != nil {
+							checkTypeConv(x.Value.Pos(), vt, info.TypeOf(x.Value))
+						}
 					}
 				}
 			case *ast.SendStmt:
@@ -4091,6 +4174,14 @@ func (st *state) checkAutoSyncGenericFuncBodies() {
 					}
 				} else if ft := info.TypeOf(x.Fun); ft != nil {
 					if csig, ok := ft.Underlying().(*types.Signature); ok {
+						if len(x.Args) == 1 && !x.Ellipsis.IsValid() {
+							if tup, ok := info.TypeOf(x.Args[0]).(*types.Tuple); ok {
+								for i := range tup.Len() {
+									checkTypeConv(x.Args[0].Pos(), tup.At(i).Type(), sigParamTypeAt(csig, i, false))
+								}
+								break
+							}
+						}
 						for i, arg := range x.Args {
 							checkConv(arg.Pos(), arg, sigParamTypeAt(csig, i, x.Ellipsis.IsValid()))
 						}
@@ -4098,10 +4189,27 @@ func (st *state) checkAutoSyncGenericFuncBodies() {
 				}
 			case *ast.TypeAssertExpr:
 				if x.Type != nil {
-					if targetNamed, ok := st.isAutoSyncInterfaceType(info.TypeOf(x.Type)); ok {
-						srcType := info.TypeOf(x.X)
-						if srcType != nil && !st.cls.Shareable(srcType) && !st.isAutoSyncType(srcType) {
-							st.report(x.Pos(), NotOwned, "value of type "+srcType.String()+" asserted to concurrency-safe interface "+targetNamed.Obj().Name()+" is not proven concurrency-safe")
+					checkTypeAssertion(x.Pos(), info.TypeOf(x.X), info.TypeOf(x.Type))
+				}
+			case *ast.TypeSwitchStmt:
+				var ta *ast.TypeAssertExpr
+				switch a := x.Assign.(type) {
+				case *ast.ExprStmt:
+					ta, _ = a.X.(*ast.TypeAssertExpr)
+				case *ast.AssignStmt:
+					if len(a.Rhs) == 1 {
+						ta, _ = a.Rhs[0].(*ast.TypeAssertExpr)
+					}
+				}
+				if ta != nil && x.Body != nil {
+					srcType := info.TypeOf(ta.X)
+					for _, stmt := range x.Body.List {
+						cc, ok := stmt.(*ast.CaseClause)
+						if !ok {
+							continue
+						}
+						for _, ctExpr := range cc.List {
+							checkTypeAssertion(ctExpr.Pos(), srcType, info.TypeOf(ctExpr))
 						}
 					}
 				}
