@@ -168,6 +168,12 @@ func SolveFrame(ctx context.Context, frame []byte) ([]byte, error) {
 		if attempt == 0 && errors.Is(err, gusset.ErrClosed) && !closed.Load() {
 			continue
 		}
+		var ge *gusset.Error
+		if errors.As(err, &ge) {
+			if refusal := engineRefusal(ge.Msg, err); refusal != nil {
+				return nil, refusal
+			}
+		}
 		return nil, err
 	}
 	return nil, ErrClosed

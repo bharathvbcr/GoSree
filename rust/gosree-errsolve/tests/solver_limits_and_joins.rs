@@ -97,33 +97,74 @@ fn call_chain(n: usize) -> Vec<FuncIR> {
     funcs
 }
 
+/// `call_chain` closed into a cycle: function `n - 1` returns a literal nil pointer and calls
+/// function 0, so every function is in one strongly connected component and visiting its
+/// members in index order flips exactly one summary per sweep (what `call_chain` did for the
+/// whole package before phase 1 went callee-first).
+fn call_cycle(n: usize) -> Vec<FuncIR> {
+    let mut funcs = call_chain(n);
+    funcs[n - 1] = FuncIR {
+        flags: FUNC_RETURNS_CONCRETE_ERR_PTR,
+        slot_flags: vec![0],
+        tuples: vec![],
+        blocks: vec![block(
+            vec![OpIR::CallConcretePtr {
+                site_id: 1,
+                dst_slot: 0,
+                callee_idx: 0,
+            }],
+            Terminator::Return {
+                site_id: 2,
+                ret_slot: NONE_U32,
+                flags: RET_CONCRETE_LITERAL_NIL,
+            },
+        )],
+    };
+    funcs
+}
+
+/// The sweep cap applies to each strongly connected component.
+///
+/// The numbers moved when the order inside a component became callee-first (reverse finish order
+/// of the search over callers) instead of function-index order. In index order `call_cycle(9)`
+/// flipped one function per sweep (nine changing sweeps and a confirming tenth: caps 3/9/10). Now
+/// the nil returned by the last function reaches every other function in the first sweep except
+/// function 0, which calls function 1 and was solved first: it flips in the second sweep and a
+/// third confirms. So the cycle needs a cap of 3 and fails closed at 2 and 1.
 #[test]
 fn callgraph_cap_fails_closed_instead_of_exporting_optimistic_summaries() {
-    let funcs = call_chain(10);
-    let err = solve_package_capped(&funcs, &mut || true, 3).unwrap_err();
-    assert_eq!(err, SolveError::CallgraphBudgetExceeded(3));
-    assert!(err
-        .to_string()
-        .contains("did not converge within 3 iterations"));
+    let funcs = call_cycle(9);
+    for cap in [1usize, 2] {
+        let err = solve_package_capped(&funcs, &mut || true, cap).unwrap_err();
+        assert_eq!(err, SolveError::CallgraphBudgetExceeded(cap));
+        assert!(err
+            .to_string()
+            .contains(&format!("did not converge within {cap} iterations")));
+    }
 
-    // With enough sweeps the same package converges and every summary is may-nil.
+    // Two sweeps change a summary and a third, unchanged one confirms the fixpoint. A fixpoint
+    // reached on the last permitted sweep without that confirmation is not trusted.
+    assert!(solve_package_capped(&funcs, &mut || true, 3).is_ok());
     let res = solve_package_capped(&funcs, &mut || true, 64).expect("converges");
     assert!(res.may_return_nil.iter().all(|&b| b));
 
-    // Nine sweeps each flip one summary; a tenth, unchanged sweep confirms the fixpoint. A
-    // fixpoint reached on the last permitted sweep without that confirmation is not trusted.
+    // The same chain left open is singleton components needing two sweeps each, at any length.
+    assert!(solve_package_capped(&call_chain(10), &mut || true, 2).is_ok());
     assert_eq!(
-        solve_package_capped(&funcs, &mut || true, 9).unwrap_err(),
-        SolveError::CallgraphBudgetExceeded(9)
+        solve_package_capped(&call_chain(10), &mut || true, 1).unwrap_err(),
+        SolveError::CallgraphBudgetExceeded(1)
     );
-    assert!(solve_package_capped(&funcs, &mut || true, 10).is_ok());
 }
 
 #[test]
 fn public_entry_converges_on_chains_up_to_max_funcs() {
-    // Callers before callees: one changing sweep per function. The cap is derived from the
-    // function count, so valid chains of any length up to MAX_FUNCS converge.
+    // Callers before callees, and the same chain closed into one cycle (one changing sweep per
+    // function). The cap is derived from the function count, so valid chains and cycles of any
+    // length up to MAX_FUNCS converge.
     for n in [4_097, MAX_FUNCS] {
+        let funcs = call_cycle(n);
+        let res = solve_package(&funcs, &mut || true).expect("cycle converges");
+        assert!(res.may_return_nil.iter().all(|&b| b));
         let funcs = call_chain(n);
         let start = std::time::Instant::now();
         let res = solve_package(&funcs, &mut || true).expect("converges");

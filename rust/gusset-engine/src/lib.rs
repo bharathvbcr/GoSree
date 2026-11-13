@@ -41,7 +41,7 @@ pub unsafe extern "C" fn gosree_gusset_init() -> i32 {
                 ctx.check()
                     .map_err(|reason| format!("cancelled: {reason:?}"))?;
                 gosree_errsolve::solve_frame(input, || ctx.check().is_ok())
-                    .map_err(|err| err.to_string())
+                    .map_err(|err| err.wire_message())
             },
         );
 

@@ -110,11 +110,15 @@ func randomCallGraph(r *rand.Rand, n int) []FuncIR {
 	return funcs
 }
 
-// TestHeapSweepsMatchScanSweeps: the heap-driven phase 1 runs exactly the sweeps of the scan it
-// replaced. On random call graphs (cycles, self-calls, callers on both sides of their callees)
-// the summaries are the scan's, the scan's sweep count converges, and one sweep fewer reports
-// non-convergence, so the cap means what it meant.
-func TestHeapSweepsMatchScanSweeps(t *testing.T) {
+// TestSCCPhase1MatchesScanSummaries: the callee-first phase 1 reaches the summaries of the
+// index-order scan it replaced. On random call graphs (cycles, self-calls, callers on both sides
+// of their callees) the summaries are the scan's. The scan's sweep count is no longer the
+// component sweep count (callee-first order needs fewer sweeps over the whole package and each
+// component has its own cap), so the old "exactly the scan's sweeps" and "one fewer sweep
+// fails" assertions were retired with the order that produced them; len(funcs)+1 per component
+// is the proven bound and must converge. The summaries, which the scan fixes uniquely, are the
+// contract, and the differential test against the naive solver covers them again.
+func TestSCCPhase1MatchesScanSummaries(t *testing.T) {
 	ctx := context.Background()
 	r := rand.New(rand.NewPCG(0x5eed, 0x1111))
 	maxSweeps := 0
@@ -123,17 +127,14 @@ func TestHeapSweepsMatchScanSweeps(t *testing.T) {
 		funcs := randomCallGraph(r, n)
 		want, sweeps := scanSweeps(t, funcs)
 		maxSweeps = max(maxSweeps, sweeps)
-		res, err := solveOracle(ctx, funcs, sweeps)
+		res, err := solveOracle(ctx, funcs, n+1)
 		if err != nil {
-			t.Fatalf("trial %d (n=%d): cap of the scan's %d sweeps: %v", trial, n, sweeps, err)
+			t.Fatalf("trial %d (n=%d): cap of n+1 sweeps per component: %v", trial, n, err)
 		}
 		for i := range want {
 			if res.MayReturnNil[i] != want[i] {
 				t.Fatalf("trial %d (n=%d): func %d summary %v, scan %v", trial, n, i, res.MayReturnNil[i], want[i])
 			}
-		}
-		if _, err := solveOracle(ctx, funcs, sweeps-1); err == nil {
-			t.Fatalf("trial %d (n=%d): converged within %d sweeps, the scan needed %d", trial, n, sweeps-1, sweeps)
 		}
 	}
 	if maxSweeps < 3 {
