@@ -137,22 +137,11 @@ func CacheScenario() (string, bool) {
 // Scenario 5: Adversarial Multi-Goroutine Penetration Suite (Negative Attacks)
 // =========================================================================
 
-// Positive control: Read-only concurrent fan-out of unmutated pointer is race-free.
-func Attack1ReadOnlyFanOut() {
-	j := &Job{ID: 1}
-	go func() {
-		_ = j.ID
-	}()
-	go func() {
-		_ = j.ID
-	}()
-}
-
-// Attack 1: Double move of \iso pointer to two independent goroutines with mutation
+// Attack 1: Double move of \iso pointer to two independent goroutines
 func Attack1DoubleMove() {
 	j := &Job{ID: 1}
 	go func() {
-		j.ID = 2
+		_ = j.ID
 	}()
 	go func() { // want `SAFE003: .* is used after it was captured by a goroutine`
 		_ = j.ID

@@ -95,15 +95,5 @@ func crossPackageLockAndSpawn() {
 
 	t := lib.NewThing()
 	lib.Spawn(func() { _ = lib.Size(t) })
-	// Both sides only read t (lib.Size's summary, imported as a fact, says so): two reads are not
-	// a race, so the use after the move is not reported.
-	_ = lib.Size(t)
-
-	// The spawner fact still makes lib.Spawn a goroutine boundary: a write on either side is a race.
-	w := lib.NewThing()
-	lib.Spawn(func() { lib.Bump(w) })
-	_ = lib.Size(w) // want `SAFE003: variable w is used after it was captured by a goroutine started by lib\.Spawn`
-	r := lib.NewThing()
-	lib.Spawn(func() { _ = lib.Size(r) })
-	lib.Bump(r) // want `SAFE003: variable r is used after it was captured by a goroutine started by lib\.Spawn`
+	_ = lib.Size(t) // want `SAFE003: variable t is used after it was captured by a goroutine started by lib\.Spawn`
 }

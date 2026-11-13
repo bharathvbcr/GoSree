@@ -95,7 +95,7 @@ func deadSend(ch chan *Job) *Job {
 func constFalseLoop(ch chan *Job) {
 	j := &Job{}
 	for false {
-		ch <- j
+		ch <- j // FP(SAFE003): the loop body never runs (for false), yet the send is treated as reaching itself on the next iteration
 	}
-	j.ID = 1 // FP(SAFE003): the send is in a for-false loop that never runs; the constant condition is not pruned
+	j.ID = 1
 }

@@ -274,117 +274,11 @@ func (g *graph) written(ins ssa.Instruction, v ssa.Value, desc string) {
 	g.add(g.val(v), ev(evWrite, ins, desc))
 }
 
-func isInPlaceUnmarshalMethodName(name string) bool {
-	return strings.HasPrefix(name, "Unmarshal") || name == "GobDecode"
-}
-
-// isEncapsulatedMethodRecvCall reports whether callee is a method invoked with arg at receiver
-// slot 0 whose pointer/value type is Shareable or AutoSync (so internal state access is
-// encapsulated by the type's own contract, unlike external pointer writes, in-place unmarshalers,
-// or whole-field stores).
-func isEncapsulatedMethodRecvCall(st *state, callee *ssa.Function, argIdx int, arg ssa.Value) bool {
-	if st == nil || argIdx != 0 || arg == nil || callee == nil || callee.Signature == nil || callee.Signature.Recv() == nil {
-		return false
-	}
-	if isInPlaceUnmarshalMethodName(callee.Name()) {
-		return false
-	}
-	return st.cls.Shareable(arg.Type()) || st.isAutoSyncType(arg.Type())
-}
-
-// writtenAddr records a write to v, peeling interior FieldAddr/IndexAddr projections (including
-// through ChangeType, Phi, or local Alloc cells) when v's own pointer type is Shareable or AutoSync
-// (such as `&cfg.Re` of type `*regexp.Regexp` or `&cfg.Spec` of an AutoSync struct) so whole-field
-// overwrites charge evWrite to the enclosing struct/array node.
-func (g *graph) writtenAddr(ins ssa.Instruction, v ssa.Value, desc string) {
-	if _, guarded := g.st.slotOf(v); guarded {
-		return
-	}
-	if n := g.val(v); n != nil {
-		g.add(n, ev(evWrite, ins, desc))
-		switch v.(type) {
-		case *ssa.MakeInterface, *ssa.ChangeInterface:
-		default:
-			return
-		}
-	}
-	seen := map[ssa.Value]bool{}
-	var walk func(cur ssa.Value, sawInterior bool)
-	walk = func(cur ssa.Value, sawInterior bool) {
-		if cur == nil || seen[cur] {
-			return
-		}
-		seen[cur] = true
-		if _, guarded := g.st.slotOf(cur); guarded {
-			return
-		}
-		if sawInterior {
-			if n := g.val(cur); n != nil {
-				g.add(n, ev(evWrite, ins, desc))
-				return
-			}
-		}
-		switch x := cur.(type) {
-		case *ssa.FieldAddr:
-			walk(x.X, true)
-		case *ssa.IndexAddr:
-			walk(x.X, true)
-		case *ssa.ChangeType:
-			walk(x.X, sawInterior)
-		case *ssa.MakeInterface:
-			walk(x.X, sawInterior)
-		case *ssa.ChangeInterface:
-			walk(x.X, sawInterior)
-		case *ssa.Phi:
-			for _, edge := range x.Edges {
-				walk(edge, sawInterior)
-			}
-		case *ssa.UnOp:
-			if x.Op == token.MUL {
-				if a, ok := x.X.(*ssa.Alloc); ok && a.Referrers() != nil {
-					for _, r := range *a.Referrers() {
-						if stIns, isStore := r.(*ssa.Store); isStore && stIns.Addr == a {
-							walk(stIns.Val, sawInterior)
-						}
-					}
-				}
-			}
-		}
-	}
-	walk(v, false)
-}
-
-// unwrapClosureValue strips type and interface conversions around a MakeClosure.
-func unwrapClosureValue(v ssa.Value) (*ssa.MakeClosure, bool) {
-	for {
-		switch x := v.(type) {
-		case *ssa.MakeClosure:
-			return x, true
-		case *ssa.ChangeType:
-			v = x.X
-		case *ssa.MakeInterface:
-			v = x.X
-		case *ssa.ChangeInterface:
-			v = x.X
-		default:
-			return nil, false
-		}
-	}
-}
-
-// writtenCaptures records a write through each value closure v captured that its body may write.
+// writtenCaptures records a write through every value closure v captured: a function value whose
+// body runs where gosree cannot see it may write all of them.
 func (g *graph) writtenCaptures(ins ssa.Instruction, v ssa.Value, desc string) {
-	mc, ok := unwrapClosureValue(v)
-	if !ok {
-		return
-	}
-	writes := func(int) bool { return true }
-	if fn, ok := mc.Fn.(*ssa.Function); ok && fn != nil {
-		s := g.st.summary(fn)
-		writes = s.writesFree
-	}
-	for j, b := range mc.Bindings {
-		if writes(j) {
+	if mc, ok := v.(*ssa.MakeClosure); ok {
+		for _, b := range mc.Bindings {
 			g.written(ins, b, desc)
 		}
 	}
@@ -392,7 +286,7 @@ func (g *graph) writtenCaptures(ins ssa.Instruction, v ssa.Value, desc string) {
 
 func (g *graph) instr(ins ssa.Instruction) {
 	if w, ok := writeOf(ins); ok {
-		g.writtenAddr(ins, w.addr, "written here")
+		g.written(ins, w.addr, "written here")
 	}
 	switch ins := ins.(type) {
 	case *ssa.Alloc, *ssa.MakeSlice, *ssa.MakeMap:
@@ -400,9 +294,6 @@ func (g *graph) instr(ins ssa.Instruction) {
 	case *ssa.MakeClosure:
 		c := g.val(ins)
 		for _, b := range ins.Bindings {
-			if g.isAutoSyncCapture(ins, b) {
-				continue
-			}
 			if bn := g.val(b); bn != nil && c != nil {
 				g.union(g.pointee(c), bn)
 			}
@@ -417,24 +308,7 @@ func (g *graph) instr(ins ssa.Instruction) {
 	case *ssa.FieldAddr:
 		g.deriveOrForeign(ins, ins.X, "a field of shared value "+ins.X.Type().String())
 	case *ssa.Field:
-		if g.st.isAutoSyncType(ins.Type()) {
-			if vn := g.val(ins); vn != nil {
-				if xn := g.val(ins.X); xn != nil {
-					for c := range g.region(xn) {
-						for _, e := range c.events {
-							if e.kind == evForeign {
-								g.add(vn, e)
-								break
-							}
-						}
-					}
-				} else {
-					g.add(vn, ev(evForeign, ins, "a field of shared value "+ins.X.Type().String()))
-				}
-			}
-		} else {
-			g.deriveOrForeign(ins, ins.X, "a field of shared value "+ins.X.Type().String())
-		}
+		g.deriveOrForeign(ins, ins.X, "a field of shared value "+ins.X.Type().String())
 	case *ssa.IndexAddr:
 		g.deriveOrForeign(ins, ins.X, "an element of shared value "+ins.X.Type().String())
 	case *ssa.Index:
@@ -472,20 +346,7 @@ func (g *graph) instr(ins ssa.Instruction) {
 			if vn == nil {
 				return
 			}
-			if _, isFA := ins.X.(*ssa.FieldAddr); isFA && g.st.isAutoSyncType(ins.Type()) {
-				if xn := g.val(ins.X); xn != nil {
-					for c := range g.region(xn) {
-						for _, e := range c.events {
-							if e.kind == evForeign {
-								g.add(vn, e)
-								break
-							}
-						}
-					}
-				} else {
-					g.add(vn, ev(evForeign, ins, "load through a shared pointer of type "+ins.X.Type().String()))
-				}
-			} else if xn := g.val(ins.X); xn != nil {
+			if xn := g.val(ins.X); xn != nil {
 				g.union(vn, g.pointee(xn))
 			} else {
 				g.add(vn, ev(evForeign, ins, "load through a shared pointer of type "+ins.X.Type().String()))
@@ -1231,155 +1092,10 @@ func (g *graph) closureRetains(mc *ssa.MakeClosure) {
 		}
 	}
 	for j, b := range mc.Bindings {
-		if g.isAutoSyncCapture(mc, b) {
-			continue
-		}
 		if bn := g.val(b); bn != nil && leaks(j) {
 			g.add(bn, ev(evEscape, mc, "captured by a closure that may retain or share it"))
 		}
 	}
-}
-
-func (g *graph) isAutoSyncCapture(ins ssa.Instruction, b ssa.Value) bool {
-	if g == nil || g.st == nil || b == nil {
-		return false
-	}
-	if !g.st.cls.Shareable(b.Type()) && g.st.isAutoSyncType(b.Type()) {
-		return true
-	}
-	return g.isAutoSyncFinalCell(ins, b)
-}
-
-// isAutoSyncFinalCell mirrors finalCells (cfg.go) for cells holding an AutoSync value: single
-// heap Allocs and Go 1.22+ per-iteration loop Phis selecting exclusively among such heap Allocs,
-// provided no store to any cell instance can execute after ins (or after any capturing closure)
-// without re-executing that cell's Alloc first.
-func (g *graph) isAutoSyncFinalCell(ins ssa.Instruction, b ssa.Value) bool {
-	isElemAutoSync := func(t types.Type) bool {
-		ptr, ok := t.Underlying().(*types.Pointer)
-		return ok && !g.st.cls.Shareable(ptr.Elem()) && g.st.isAutoSyncType(ptr.Elem())
-	}
-	if !isElemAutoSync(b.Type()) {
-		return false
-	}
-	comp := []ssa.Value{}
-	inComp := map[ssa.Value]bool{}
-	add := func(v ssa.Value) bool {
-		switch x := v.(type) {
-		case *ssa.Alloc:
-			if !x.Heap || x.Parent() != g.fn || !isElemAutoSync(x.Type()) {
-				return false
-			}
-		case *ssa.Phi:
-			if x.Parent() != g.fn || len(x.Edges) == 0 || !isElemAutoSync(x.Type()) {
-				return false
-			}
-		default:
-			return false
-		}
-		if !inComp[v] {
-			inComp[v] = true
-			comp = append(comp, v)
-		}
-		return true
-	}
-	if !add(b) {
-		return false
-	}
-	for head := 0; head < len(comp); head++ {
-		cur := comp[head]
-		if phi, isPhi := cur.(*ssa.Phi); isPhi {
-			for _, e := range phi.Edges {
-				if !add(e) {
-					return false
-				}
-			}
-		}
-		if cur.Referrers() != nil {
-			for _, r := range *cur.Referrers() {
-				if rPhi, isPhi := r.(*ssa.Phi); isPhi {
-					if !add(rPhi) {
-						return false
-					}
-				}
-			}
-		}
-	}
-	var captures []*ssa.MakeClosure
-	var stores []*ssa.Store
-	for _, v := range comp {
-		refs := v.Referrers()
-		if refs == nil {
-			return false
-		}
-		for _, r := range *refs {
-			switch r := r.(type) {
-			case *ssa.MakeClosure:
-				captures = append(captures, r)
-				fn, ok := r.Fn.(*ssa.Function)
-				if !ok {
-					return false
-				}
-				for j, bnd := range r.Bindings {
-					if bnd == v && (j >= len(fn.FreeVars) || freeVarWritten(fn.FreeVars[j])) {
-						return false
-					}
-				}
-			case *ssa.Store:
-				if r.Addr != v || r.Parent() != g.fn {
-					return false
-				}
-				stores = append(stores, r)
-			case *ssa.UnOp:
-				if r.Op != token.MUL {
-					return false
-				}
-			case *ssa.Phi:
-				if !inComp[r] {
-					return false
-				}
-			case *ssa.DebugRef:
-			default:
-				return false
-			}
-		}
-	}
-	if len(stores) == 0 {
-		return false
-	}
-	checkNoStoreAfter := func(start ssa.Instruction) bool {
-		if start == nil || start.Parent() != g.fn {
-			return false
-		}
-		var after func(ssa.Instruction) bool
-		for _, s := range stores {
-			if s == start {
-				return false
-			}
-			if alloc, isAlloc := s.Addr.(*ssa.Alloc); isAlloc {
-				if reachableWithoutKill(start, s, alloc) {
-					return false
-				}
-			} else {
-				if after == nil {
-					after = reachableAfter(start)
-				}
-				if after(s) {
-					return false
-				}
-			}
-		}
-		return true
-	}
-	if !checkNoStoreAfter(ins) {
-		return false
-	}
-	for _, mc := range captures {
-		if !checkNoStoreAfter(mc) {
-			return false
-		}
-	}
-	return true
 }
 
 // closureUsedOnlyAtCallSites reports whether every use of v (a closure, or a conversion of one) is a
@@ -1430,7 +1146,7 @@ func (g *graph) closureUsedOnlyAtCallSites(mc *ssa.MakeClosure, v ssa.Value) boo
 	return true
 }
 
-// isIsoArg reports whether v is passed to a //gosree:iso or spawner callback parameter of the static callee.
+// isIsoArg reports whether v is passed to a //gosree:iso parameter of the static callee, which owns it.
 func (g *graph) isIsoArg(cc *ssa.CallCommon, v ssa.Value) bool {
 	fn := cc.StaticCallee()
 	if fn == nil {
@@ -1438,7 +1154,7 @@ func (g *graph) isIsoArg(cc *ssa.CallCommon, v ssa.Value) bool {
 	}
 	sum := g.st.summary(fn)
 	for i, a := range cc.Args {
-		if a == v && (sum.isIso(i) || sum.spawns(i)) {
+		if a == v && sum.isIso(i) {
 			return true
 		}
 	}
@@ -1464,18 +1180,9 @@ func (g *graph) goStmt(ins *ssa.Go) {
 			g.transferWithOp(ins, v, token.NoPos, -1, what)
 		}
 	}
-	var goSum *summary
-	if callee := cc.StaticCallee(); callee != nil && !cc.IsInvoke() {
-		goSum = g.st.summary(callee)
-	}
 	for i, a := range cc.Args {
 		g.transferWithOp(ins, a, token.NoPos, i, "passed to a goroutine")
-		if goSum == nil || goSum.writes(i) {
-			g.written(ins, a, "passed to a goroutine, which may write it")
-		}
-	}
-	if cc.IsInvoke() {
-		g.written(ins, cc.Value, "receiver of a method started as a goroutine, which may write it")
+		g.written(ins, a, "passed to a goroutine, which may write it")
 	}
 	g.writtenCaptures(ins, cc.Value, "captured by a goroutine, which may write it")
 }
@@ -1540,10 +1247,8 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		published, rc, hasContract := g.applyCallContract(ins, cc)
 		desc := "passed to interface method " + cc.Method.Name() + " (dynamic dispatch may retain it)"
 		wdesc := "passed to interface method " + cc.Method.Name() + ", which may write it"
-		if !g.st.isAutoSyncType(cc.Value.Type()) {
-			g.add(g.val(cc.Value), ev(evEscape, ins, desc))
-			g.written(ins, cc.Value, wdesc)
-		}
+		g.add(g.val(cc.Value), ev(evEscape, ins, desc))
+		g.written(ins, cc.Value, wdesc)
 		for i, a := range cc.Args {
 			switch {
 			case !published[i]:
@@ -1553,7 +1258,7 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 				g.add(g.val(a), ev(evEscape, ins, desc))
 			}
 			if !hasContract || !rc.suppressWrite {
-				g.writtenAddr(ins, a, wdesc)
+				g.written(ins, a, wdesc)
 			}
 		}
 		if result != nil && (!hasContract || !rc.freshResult) {
@@ -1594,7 +1299,7 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 				g.add(g.val(a), ev(evEscape, ins, "passed to a dynamic function call"))
 			}
 			if !hasContract || !rc.suppressWrite {
-				g.writtenAddr(ins, a, "passed to a dynamic function call, which may write it")
+				g.written(ins, a, "passed to a dynamic function call, which may write it")
 			}
 		}
 		g.written(ins, cc.Value, "called dynamically; its captures may be written")
@@ -1616,12 +1321,6 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 		}
 		return
 	}
-	if isShareableStdlibCloneCall(g.st, fn, cc) {
-		if result != nil {
-			g.val(result)
-		}
-		return
-	}
 	// A callback the callee runs on another goroutine moves there, like a go statement's function.
 	// Its argument is then a transfer and not also an escape into the callee.
 	spawned := -1
@@ -1636,39 +1335,37 @@ func (g *graph) call(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.Value) 
 	note := sum.unavailable()
 	g.link(cc, sum, result, spawned)
 	for i, a := range cc.Args {
-		if i == spawned {
+		an := g.val(a)
+		if an == nil || i == spawned {
 			continue
 		}
-		an := g.val(a)
-		if an != nil {
-			switch {
-			case published[i]:
-				// The contract stands for the publish. Whatever else the callee does with the
-				// argument is still an escape: something its body does besides, or a callable it
-				// hands the argument to that may keep it (resolvedCallContract.escapeArgs).
-				if rc.alsoEscapes(i) {
-					g.add(an, ev(evEscape, ins, "passed to "+name+", which publishes it and may also retain or share it"+note))
-				}
-			case sum.isIso(i):
-				g.transferWithOp(ins, a, token.NoPos, i, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
-				g.writtenCaptures(ins, a, "captured by a closure passed to "+name+", which may write it")
-			case sum.spawns(i):
-				what := "started on a goroutine by " + name
-				if _, closure := a.(*ssa.MakeClosure); closure {
-					what = "captured by a goroutine started by " + name
-				}
-				g.transferWithOp(ins, a, token.NoPos, i, what)
-				g.writtenCaptures(ins, a, "captured by a callback started by "+name+", which may write it")
-			case sum.leaks(i):
-				e := ev(evEscape, ins, "passed to "+name+", which may retain or share it"+note)
-				if !sum.leaksBesidesContract(i) {
-					e.byContract = g.handedOn(cc, fn, i, a)
-				}
-				g.add(an, e)
+		switch {
+		case published[i]:
+			// The contract stands for the publish. Whatever else the callee does with the
+			// argument is still an escape: something its body does besides, or a callable it
+			// hands the argument to that may keep it (resolvedCallContract.escapeArgs).
+			if rc.alsoEscapes(i) {
+				g.add(an, ev(evEscape, ins, "passed to "+name+", which publishes it and may also retain or share it"+note))
 			}
+		case sum.isIso(i):
+			g.transferWithOp(ins, a, token.NoPos, i, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
+			g.writtenCaptures(ins, a, "captured by a closure passed to "+name+", which may write it")
+		case sum.spawns(i):
+			what := "started on a goroutine by " + name
+			if _, closure := a.(*ssa.MakeClosure); closure {
+				what = "captured by a goroutine started by " + name
+			}
+			g.transferWithOp(ins, a, token.NoPos, i, what)
+			g.writtenCaptures(ins, a, "captured by a callback started by "+name+", which may write it")
+		case sum.leaks(i):
+			e := ev(evEscape, ins, "passed to "+name+", which may retain or share it"+note)
+			if !sum.leaksBesidesContract(i) {
+				e.byContract = g.handedOn(cc, fn, i, a)
+			}
+			g.add(an, e)
 		}
-		if sum.writes(i) && (!hasContract || !rc.suppressWrite) && (an != nil || !isEncapsulatedMethodRecvCall(g.st, fn, i, a)) {
-			g.writtenAddr(ins, a, "passed to "+name+", which may write it"+note)
+		if sum.writes(i) && (!hasContract || !rc.suppressWrite) {
+			g.written(ins, a, "passed to "+name+", which may write it"+note)
 		}
 	}
 	if mc, ok := cc.Value.(*ssa.MakeClosure); ok {
@@ -1794,35 +1491,35 @@ func (g *graph) callOfKnown(ins ssa.Instruction, cc *ssa.CallCommon, result ssa.
 	}
 	for i, a := range cc.Args {
 		an := g.val(a)
-		if an != nil {
-			if published[i] {
-				// The contract stands for the publish; what else a callee does with it is an escape.
-				if rc.alsoEscapes(i) {
-					g.add(an, ev(evEscape, ins, "passed to a dynamic function call"))
-				}
-			} else if e := g.forwardedEscape(ins, cc, i, a, "passed to a dynamic function call"); e.byContract != 0 {
-				// A forward: the called value and the argument are both parameters of this function,
-				// and the index holds the rule for it. What the call does with the argument is
-				// decided at each call of this function, by that rule, and not here: a helper that
-				// hands its parameter to whatever it is given does not itself move or keep it.
-				g.add(an, e)
-			} else if name, ok := which(func(s *summary) bool { return s.isIso(i) }); ok {
-				g.transferWithOp(ins, a, token.NoPos, i, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
-				g.writtenCaptures(ins, a, "captured by a closure passed to "+name+", which may write it")
-			} else if name, ok := which(func(s *summary) bool { return s.spawns(i) }); ok {
-				what := "started on a goroutine by " + name
-				if _, closure := a.(*ssa.MakeClosure); closure {
-					what = "captured by a goroutine started by " + name
-				}
-				g.transferWithOp(ins, a, token.NoPos, i, what)
-				g.writtenCaptures(ins, a, "captured by a callback started by "+name+", which may write it")
-			} else if name, ok := which(func(s *summary) bool { return s.leaks(i) }); ok {
-				g.add(an, g.forwardedEscape(ins, cc, i, a, "passed to "+name+", which may retain or share it"))
-			}
+		if an == nil {
+			continue
 		}
-		if name, ok := which(func(s *summary) bool { return s.writes(i) }); ok && (!hasContract || !rc.suppressWrite) &&
-			(an != nil || slices.ContainsFunc(targets, func(t calledFunc) bool { return !isEncapsulatedMethodRecvCall(g.st, t.fn, i, a) })) {
-			g.writtenAddr(ins, a, "passed to "+name+", which may write it")
+		if published[i] {
+			// The contract stands for the publish; what else a callee does with it is an escape.
+			if rc.alsoEscapes(i) {
+				g.add(an, ev(evEscape, ins, "passed to a dynamic function call"))
+			}
+		} else if e := g.forwardedEscape(ins, cc, i, a, "passed to a dynamic function call"); e.byContract != 0 {
+			// A forward: the called value and the argument are both parameters of this function,
+			// and the index holds the rule for it. What the call does with the argument is
+			// decided at each call of this function, by that rule, and not here: a helper that
+			// hands its parameter to whatever it is given does not itself move or keep it.
+			g.add(an, e)
+		} else if name, ok := which(func(s *summary) bool { return s.isIso(i) }); ok {
+			g.transferWithOp(ins, a, token.NoPos, i, fmt.Sprintf("passed to owned parameter %d of %s", i, name))
+			g.writtenCaptures(ins, a, "captured by a closure passed to "+name+", which may write it")
+		} else if name, ok := which(func(s *summary) bool { return s.spawns(i) }); ok {
+			what := "started on a goroutine by " + name
+			if _, closure := a.(*ssa.MakeClosure); closure {
+				what = "captured by a goroutine started by " + name
+			}
+			g.transferWithOp(ins, a, token.NoPos, i, what)
+			g.writtenCaptures(ins, a, "captured by a callback started by "+name+", which may write it")
+		} else if name, ok := which(func(s *summary) bool { return s.leaks(i) }); ok {
+			g.add(an, g.forwardedEscape(ins, cc, i, a, "passed to "+name+", which may retain or share it"))
+		}
+		if name, ok := which(func(s *summary) bool { return s.writes(i) }); ok && (!hasContract || !rc.suppressWrite) {
+			g.written(ins, a, "passed to "+name+", which may write it")
 		}
 	}
 	for k, t := range targets {
@@ -1971,15 +1668,11 @@ func (g *graph) meetDepth(a, b *node) (int, int, bool) {
 func (g *graph) builtin(ins ssa.Instruction, b *ssa.Builtin, args []ssa.Value, result ssa.Value) {
 	switch b.Name() {
 	case "append":
-		if result == nil || len(args) == 0 {
+		if result == nil {
 			return
 		}
-		g.join(result, args[0])
-		if len(args) == 2 && !g.st.cls.Shareable(elemType(args[0].Type())) && !g.st.isAutoSyncType(elemType(args[0].Type())) {
-			rn, sn := g.val(result), g.val(args[1])
-			if rn != nil && sn != nil {
-				g.union(g.pointee(rn), g.pointee(sn))
-			}
+		for _, a := range args {
+			g.join(result, a)
 		}
 	case "copy":
 		// copy moves elements; it only creates aliasing when the elements themselves hold pointers.
@@ -2144,44 +1837,4 @@ func isCapBorrowHelper(fn *ssa.Function) bool {
 	}
 	s := fn.String()
 	return strings.Contains(s, "/cap.Borrow") || strings.HasPrefix(s, "cap.Borrow")
-}
-
-// isStdlibCloneCall reports whether cc is a direct 1-argument call to slices.Clone or maps.Clone.
-func isStdlibCloneCall(fn *ssa.Function, cc *ssa.CallCommon) bool {
-	if fn == nil || cc == nil || cc.IsInvoke() || len(cc.Args) != 1 {
-		return false
-	}
-	if calleeOriginName(fn) != "Clone" {
-		return false
-	}
-	switch calleeOriginPkgPath(fn) {
-	case "slices", "maps":
-		return true
-	}
-	return false
-}
-
-// isShareableStdlibCloneCall reports whether cc is a direct call to slices.Clone or maps.Clone
-// whose element (and key) types are Shareable or AutoSync, producing a fresh backing array/map
-// whose shallow-copied elements need no alias link back to the input container.
-func isShareableStdlibCloneCall(st *state, fn *ssa.Function, cc *ssa.CallCommon) bool {
-	if st == nil || !isStdlibCloneCall(fn, cc) {
-		return false
-	}
-	switch calleeOriginPkgPath(fn) {
-	case "slices":
-		sl, ok := cc.Args[0].Type().Underlying().(*types.Slice)
-		if !ok {
-			return false
-		}
-		return st.cls.Shareable(sl.Elem()) || st.isAutoSyncType(sl.Elem())
-	case "maps":
-		mp, ok := cc.Args[0].Type().Underlying().(*types.Map)
-		if !ok {
-			return false
-		}
-		return (st.cls.Shareable(mp.Key()) || st.isAutoSyncType(mp.Key())) &&
-			(st.cls.Shareable(mp.Elem()) || st.isAutoSyncType(mp.Elem()))
-	}
-	return false
 }

@@ -11,7 +11,7 @@ type Group struct {
 
 func (g *Group) Go(f func() error) {
 	g.wg.Add(1)
-	go func() {
+	go func() { // HIT(SAFE002)
 		defer g.wg.Done()
 		if err := f(); err != nil {
 			g.mu.Lock()

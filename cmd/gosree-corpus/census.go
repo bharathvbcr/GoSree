@@ -863,10 +863,7 @@ func (c *census) own(n *types.Named) ownResult {
 		if !isSlot(ft) {
 			// Every module struct the field's type names is a child, whether or not the type is
 			// shareable: the struct itself, a generic's type arguments, and the elements of arrays,
-			// slices, maps, channels and pointers. A field classed G below is walked too: G says a
-			// guarded_by row would cover the field, but the census does not check that what is read
-			// from it stays under the lock (SAFE009's leave check), and a value returned from a locked
-			// getter is shared as freely as one read without the lock.
+			// slices, maps, channels and pointers.
 			children = append(children, c.reach(ft)...)
 		}
 		switch {

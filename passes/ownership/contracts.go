@@ -476,9 +476,6 @@ func derefStructTypeKey(ptrType types.Type) (string, bool) {
 	if _, ok := elem.Underlying().(*types.Struct); !ok {
 		return "", false
 	}
-	if n, ok := elem.(*types.Named); ok {
-		elem = n.Origin()
-	}
 	return types.TypeString(elem, nil), true
 }
 
@@ -489,9 +486,6 @@ func structValueTypeKey(valType types.Type) (string, bool) {
 	elem := types.Unalias(valType)
 	if _, ok := elem.Underlying().(*types.Struct); !ok {
 		return "", false
-	}
-	if n, ok := elem.(*types.Named); ok {
-		elem = n.Origin()
 	}
 	return types.TypeString(elem, nil), true
 }
@@ -530,7 +524,6 @@ type contractIndex struct {
 	retFreshButForwards map[*ssa.Function]bool
 	directImports       map[string]*types.Package
 	localNamedTypes     []*types.Named
-	localAllNamedTypes  []*types.Named
 	boxedTypes          []types.Type
 
 	// structConv links the struct types this package converts between, values or pointers, by
@@ -616,11 +609,8 @@ func (st *state) buildContractIndex(fns []*ssa.Function) *contractIndex {
 		scope := st.pass.Pkg.Scope()
 		for _, name := range scope.Names() {
 			if tn, ok := scope.Lookup(name).(*types.TypeName); ok {
-				if named, ok := types.Unalias(tn.Type()).(*types.Named); ok && !types.IsInterface(named) {
-					ci.localAllNamedTypes = append(ci.localAllNamedTypes, named.Origin())
-					if named.TypeParams() == nil {
-						ci.localNamedTypes = append(ci.localNamedTypes, named)
-					}
+				if named, ok := types.Unalias(tn.Type()).(*types.Named); ok && named.TypeParams() == nil && !types.IsInterface(named) {
+					ci.localNamedTypes = append(ci.localNamedTypes, named)
 				}
 			}
 		}
@@ -2164,9 +2154,6 @@ func (st *state) checkSharedLoadWrites(fns []*ssa.Function) {
 					if argFn, ok := mc.Fn.(*ssa.Function); ok && len(argFn.Blocks) > 0 && st.followable(argFn) {
 						st.forwardShared(ins, argFn, nil, mc.Bindings, origins, rootOf, add, emit)
 						for j, b := range mc.Bindings {
-							if st.isAutoSyncType(b.Type()) {
-								continue
-							}
 							if root, ok := rootOf(b); ok && j < len(argFn.FreeVars) {
 								add(argFn, argFn.FreeVars[j], origins[root])
 							}
@@ -2239,7 +2226,7 @@ func (st *state) propagateSharedToCallee(
 			return
 		}
 		for i, a := range cc.Args {
-			if !sum.writes(i) || st.cls.Shareable(a.Type()) || st.isAutoSyncType(a.Type()) {
+			if !sum.writes(i) || st.cls.Shareable(a.Type()) {
 				continue
 			}
 			if _, guarded := st.slotOf(a); guarded {
@@ -2259,17 +2246,11 @@ func (st *state) propagateSharedToCallee(
 		if i >= len(callee.Params) {
 			break
 		}
-		if st.isAutoSyncType(a.Type()) {
-			continue
-		}
 		if root, ok := rootOf(a); ok {
 			add(callee, callee.Params[i], origins[root])
 		}
 	}
 	for j, b := range bindings {
-		if st.isAutoSyncType(b.Type()) {
-			continue
-		}
 		if root, ok := rootOf(b); ok && j < len(callee.FreeVars) {
 			add(callee, callee.FreeVars[j], origins[root])
 		}
@@ -2277,12 +2258,9 @@ func (st *state) propagateSharedToCallee(
 }
 
 func (st *state) sharedLoadRoot(v ssa.Value, roots map[ssa.Value]string) (ssa.Value, bool) {
-	// If v passes through an interface assertion/extraction to a shareable, AutoSync, or //gosree:imm
-	// type, stop here: shareable/AutoSync payloads are safe to use concurrently and checkImmStores
-	// already owns //gosree:imm field checks.
-	if v != nil && st.isAutoSyncType(v.Type()) {
-		return nil, false
-	}
+	// If v passes through an interface assertion/extraction to a shareable or //gosree:imm type,
+	// stop here: shareable payloads are safe to use concurrently and checkImmStores already owns
+	// //gosree:imm field checks.
 	cur := v
 	for range 16 {
 		if cur == nil {
@@ -2290,7 +2268,7 @@ func (st *state) sharedLoadRoot(v ssa.Value, roots map[ssa.Value]string) (ssa.Va
 		}
 		switch cur.(type) {
 		case *ssa.TypeAssert, *ssa.ChangeInterface, *ssa.Extract:
-			if st.cls.Shareable(cur.Type()) || st.isAutoSyncType(cur.Type()) {
+			if st.cls.Shareable(cur.Type()) {
 				return nil, false
 			}
 		}

@@ -188,24 +188,13 @@ func cancelNotJoin(ctx context.Context) {
 	j.ID = 1 // HIT(SAFE003)
 }
 
-// Loop: wg.Go in a loop, one Wait after it, is a join (one Wait covers every callback). When
-// the callback writes j, the second iteration's capture races with the first: one owner at a time.
+// Loop: wg.Go in a loop, one Wait after it, is a join (one Wait covers every callback). The
+// second iteration's capture is a use after the first move: one owner at a time, by design.
 func loopGoOneWait() {
 	var wg sync.WaitGroup
 	j := &Job{}
 	for i := 0; i < 3; i++ {
-		wg.Go(func() { j.ID = 2 }) // HIT(SAFE003)
-	}
-	wg.Wait()
-	j.ID = 1
-}
-
-// control: when the wg.Go callbacks only read j and Wait joins them before j is written, no race exists.
-func loopGoOneWaitReadOnly() {
-	var wg sync.WaitGroup
-	j := &Job{}
-	for i := 0; i < 3; i++ {
-		wg.Go(func() { _ = j.ID })
+		wg.Go(func() { _ = j.ID }) // HIT(SAFE003)
 	}
 	wg.Wait()
 	j.ID = 1

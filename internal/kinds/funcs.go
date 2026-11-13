@@ -35,16 +35,6 @@ var funcOverrides = []FuncOverride{
 		"returns the data it read in a slice it allocates; the reader is read, so it is written"},
 	{"encoding/json.Marshal", []bool{true}, []bool{true}, true,
 		"returns a copy of its encoder's buffer; the value may run MarshalJSON, so it stays leaked and written"},
-	{"(*net/http.Client).Do", []bool{false, true}, []bool{false, true}, true,
-		"documented: Client.Do is safe for concurrent use by multiple goroutines without mutating Client; returns a fresh Response"},
-	{"(*net/http.Client).Get", []bool{false, false}, []bool{false, false}, true,
-		"documented: Client.Get is safe for concurrent use by multiple goroutines without mutating Client; returns a fresh Response"},
-	{"(*net/http.Client).Head", []bool{false, false}, []bool{false, false}, true,
-		"documented: Client.Head is safe for concurrent use by multiple goroutines without mutating Client; returns a fresh Response"},
-	{"(*net/http.Client).Post", []bool{false, false, false, true}, []bool{false, false, false, true}, true,
-		"documented: Client.Post is safe for concurrent use by multiple goroutines without mutating Client; returns a fresh Response"},
-	{"(*net/http.Client).CloseIdleConnections", []bool{false}, []bool{false}, false,
-		"documented: Client.CloseIdleConnections is safe for concurrent use without mutating Client"},
 }
 
 // FuncOverrides returns the function override table, sorted by name.

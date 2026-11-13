@@ -66,7 +66,7 @@ func perElementGo(n int) []Item {
 	items := make([]Item, n)
 	var wg sync.WaitGroup
 	for i := range items {
-		it := &items[i]
+		it := &items[i] // FP(SAFE003): a different element each iteration; Wait below joins them all
 		wg.Go(func() { it.ID = i })
 	}
 	wg.Wait()
@@ -109,18 +109,19 @@ func askByValueFirst(reqs chan<- request, key string) int {
 	return <-reply
 }
 
-// the clone idiom: append to a nil slice copies the bytes.
+// the clone idiom: append to a nil slice copies the bytes. append is joined with every argument
+// (graph.go builtin "append"), so the copy is taken to alias the parameter.
 func sendClone(ch chan<- []byte, b []byte) {
-	ch <- append([]byte(nil), b...)
+	ch <- append([]byte(nil), b...) // FP(SAFE002): the bytes are copied into a new array; nothing aliases b
 }
 
-// bytes.Clone returns a freshly allocated byte slice.
+// the library clone has the same summary: its result is linked to its argument.
 func sendBytesClone(ch chan<- []byte, b []byte) {
-	ch <- bytes.Clone(b)
+	ch <- bytes.Clone(b) // FP(SAFE002): bytes.Clone returns a new array
 }
 
 func sendSlicesClone(ch chan<- []int, b []int) {
-	ch <- slices.Clone(b)
+	ch <- slices.Clone(b) // FP(SAFE002): slices.Clone of a pointer-free slice shares nothing
 }
 
 // control: cloning a slice of pointers does share the pointees.
