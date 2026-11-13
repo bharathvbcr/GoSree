@@ -4,8 +4,10 @@ import (
 	"cmp"
 	"encoding/binary"
 	"errors"
+	"go/token"
 	"go/types"
 	"slices"
+	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -41,6 +43,43 @@ type FuncFact struct {
 	// Unknown: gosree could not analyse the function (it has no body, or depends on one that could
 	// not be), so Leaks and Writes are all set by assumption, not because it was seen to do either.
 	Unknown bool
+
+	// Extension trailer fields (encoded only when flags & (1 << 2) != 0):
+	// WaitParamPlusOne is i+1 when parameter i (*sync.WaitGroup or *errgroup.Group) joins all
+	// goroutines spawned by this wrapper on non-nil paths; 0 means none.
+	WaitParamPlusOne int
+	// WaitKind: 1 = *sync.WaitGroup, 2 = *errgroup.Group.
+	WaitKind uint8
+	// ParamAutoSync[i] / ResAutoSync[k]: parameter i / result k has a proven AutoSync struct type
+	// declared in the callee's package (nil when none are AutoSync).
+	ParamAutoSync []bool
+	ResAutoSync   []bool
+	// SharedRead[i]: the function shares parameter i across concurrent readers (such as registered
+	// HTTP route handlers or proven read-only projections) and mutates nothing reachable from i
+	// after registration, so callers must own/shareRead i and never mutate it after the call.
+	SharedRead []bool
+	// RecvFirewall / RecvFrozen: per-field Firewall and Frozen Sync properties of an exported
+	// method's struct receiver, allowing cross-package disjoint field-projection checks without a
+	// separate type fact.
+	RecvFirewall []bool
+	RecvFrozen   []bool
+	// ProjSync[i]: parameter i is a struct pointer/value whose uses inside this function (and its
+	// callees) touch only proven Firewall or Frozen fields, so cross-package callers can project i
+	// across concurrent closures/handlers safely.
+	ProjSync []bool
+}
+
+func (f *FuncFact) hasExt() bool {
+	return f.WaitParamPlusOne > 0 || f.WaitKind != 0 || anyTrue(f.ParamAutoSync) || anyTrue(f.ResAutoSync)
+}
+
+func anyTrue(xs []bool) bool {
+	for _, v := range xs {
+		if v {
+			return true
+		}
+	}
+	return false
 }
 
 // AFact marks FuncFact as an analysis fact.
@@ -93,6 +132,18 @@ func (f *FuncFact) GobEncode() ([]byte, error) {
 	if f.Unknown {
 		flags |= 1 << 1
 	}
+	ext := f.hasExt()
+	if ext {
+		flags |= 1 << 2
+	}
+	sr := anyTrue(f.SharedRead)
+	if sr {
+		flags |= 1 << 3
+	}
+	rf := anyTrue(f.RecvFirewall) || anyTrue(f.RecvFrozen) || anyTrue(f.ProjSync)
+	if rf {
+		flags |= 1 << 4
+	}
 	buf := make([]byte, 0, 16+len(f.Links)*8+len(f.Acquires)*12)
 	buf = append(buf, flags)
 	buf = appendBoolBits(buf, f.Leaks)
@@ -115,6 +166,40 @@ func (f *FuncFact) GobEncode() ([]byte, error) {
 		buf = append(buf, a.Steps...)
 		buf = append(buf, byte(a.Mode))
 	}
+	if ext {
+		buf = binary.AppendUvarint(buf, uint64(f.WaitParamPlusOne))
+		buf = append(buf, f.WaitKind)
+		if anyTrue(f.ParamAutoSync) {
+			buf = appendBoolBits(buf, f.ParamAutoSync)
+		} else {
+			buf = appendBoolBits(buf, nil)
+		}
+		if anyTrue(f.ResAutoSync) {
+			buf = appendBoolBits(buf, f.ResAutoSync)
+		} else {
+			buf = appendBoolBits(buf, nil)
+		}
+	}
+	if sr {
+		buf = appendBoolBits(buf, f.SharedRead)
+	}
+	if rf {
+		if anyTrue(f.RecvFirewall) {
+			buf = appendBoolBits(buf, f.RecvFirewall)
+		} else {
+			buf = appendBoolBits(buf, nil)
+		}
+		if anyTrue(f.RecvFrozen) {
+			buf = appendBoolBits(buf, f.RecvFrozen)
+		} else {
+			buf = appendBoolBits(buf, nil)
+		}
+		if anyTrue(f.ProjSync) {
+			buf = appendBoolBits(buf, f.ProjSync)
+		} else {
+			buf = appendBoolBits(buf, nil)
+		}
+	}
 	return buf, nil
 }
 
@@ -124,6 +209,9 @@ func (f *FuncFact) GobDecode(data []byte) error {
 		return errors.New("empty FuncFact payload")
 	}
 	flags := data[0]
+	if (flags &^ 0x1f) != 0 {
+		return errors.New("unknown FuncFact flags")
+	}
 	f.Fresh = (flags & (1 << 0)) != 0
 	f.Unknown = (flags & (1 << 1)) != 0
 	rest := data[1:]
@@ -200,6 +288,80 @@ func (f *FuncFact) GobDecode(data []byte) error {
 	} else {
 		f.Acquires = nil
 	}
+	if (flags & (1 << 2)) != 0 {
+		wp, nr := binary.Uvarint(rest)
+		if nr <= 0 || wp > 1<<20 || len(rest)-nr < 1 {
+			return errors.New("corrupt FuncFact wait param")
+		}
+		rest = rest[nr:]
+		wk := rest[0]
+		if (wk&3) > 2 || (wk&^uint8(7)) != 0 {
+			return errors.New("corrupt FuncFact wait kind")
+		}
+		rest = rest[1:]
+		if f.ParamAutoSync, rest, err = readBoolBits(rest); err != nil {
+			return err
+		}
+		if len(f.ParamAutoSync) > 0 && !anyTrue(f.ParamAutoSync) {
+			return errors.New("non-canonical FuncFact ParamAutoSync")
+		}
+		if f.ResAutoSync, rest, err = readBoolBits(rest); err != nil {
+			return err
+		}
+		if len(f.ResAutoSync) > 0 && !anyTrue(f.ResAutoSync) {
+			return errors.New("non-canonical FuncFact ResAutoSync")
+		}
+		f.WaitParamPlusOne = int(wp)
+		f.WaitKind = wk
+		if !f.hasExt() {
+			return errors.New("empty FuncFact extension")
+		}
+	} else {
+		f.WaitParamPlusOne = 0
+		f.WaitKind = 0
+		f.ParamAutoSync = nil
+		f.ResAutoSync = nil
+	}
+	if (flags & (1 << 3)) != 0 {
+		if f.SharedRead, rest, err = readBoolBits(rest); err != nil {
+			return err
+		}
+		if len(f.SharedRead) == 0 || !anyTrue(f.SharedRead) {
+			return errors.New("non-canonical FuncFact SharedRead")
+		}
+	} else {
+		f.SharedRead = nil
+	}
+	if (flags & (1 << 4)) != 0 {
+		if f.RecvFirewall, rest, err = readBoolBits(rest); err != nil {
+			return err
+		}
+		if len(f.RecvFirewall) > 0 && !anyTrue(f.RecvFirewall) {
+			return errors.New("non-canonical FuncFact RecvFirewall")
+		}
+		if f.RecvFrozen, rest, err = readBoolBits(rest); err != nil {
+			return err
+		}
+		if len(f.RecvFrozen) > 0 && !anyTrue(f.RecvFrozen) {
+			return errors.New("non-canonical FuncFact RecvFrozen")
+		}
+		if f.ProjSync, rest, err = readBoolBits(rest); err != nil {
+			return err
+		}
+		if len(f.ProjSync) > 0 && !anyTrue(f.ProjSync) {
+			return errors.New("non-canonical FuncFact ProjSync")
+		}
+		if f.RecvFirewall == nil && f.RecvFrozen == nil && f.ProjSync == nil {
+			return errors.New("empty FuncFact RecvSync")
+		}
+	} else {
+		f.RecvFirewall = nil
+		f.RecvFrozen = nil
+		f.ProjSync = nil
+	}
+	if len(rest) != 0 {
+		return errors.New("trailing FuncFact bytes")
+	}
 	return nil
 }
 
@@ -236,16 +398,32 @@ type summary struct {
 	spawnParam  []bool
 	leakFree    []bool
 	// writeParam[i] / writeFree[j]: the function may write memory reachable from parameter i or free
-	// variable j.
-	writeParam  []bool
-	writeFree   []bool
-	fresh       bool
-	freshResult []bool
+	// variable j. nonRegWriteParam[i] omits writes charged solely by net/http handler registration
+	// calls so route-registrar helpers do not masquerade as post-registration mutators in Mode H.
+	writeParam       []bool
+	nonRegWriteParam []bool
+	writeFree        []bool
+	fresh            bool
+	freshResult      []bool
 	// links are the parameters and results the function joins (FuncFact.Links).
-	links    []Link
-	acquires []acquire
+	links         []Link
+	acquires      []acquire
+	waitParam     int
+	waitKind      uint8
+	paramAutoSync []bool
+	resAutoSync   []bool
+	sharedRead    []bool
 	// pessimistic marks a summary for a function gosree could not analyse.
 	pessimistic bool
+	projSync    []bool
+}
+
+func (s *summary) isSharedRead(i int) bool {
+	return !s.pessimistic && i >= 0 && i < len(s.sharedRead) && s.sharedRead[i]
+}
+
+func (s *summary) isProjSync(i int) bool {
+	return !s.pessimistic && i >= 0 && i < len(s.projSync) && s.projSync[i]
 }
 
 func (s *summary) leaks(i int) bool {
@@ -263,9 +441,15 @@ func (s *summary) leaksBesidesContract(i int) bool {
 	return i < len(s.leakBesides) && s.leakBesides[i]
 }
 
+const waitSingleSpawn uint8 = 1 << 2
+
 func (s *summary) isIso(i int) bool { return i < len(s.isoParam) && s.isoParam[i] }
 
 func (s *summary) spawns(i int) bool { return i < len(s.spawnParam) && s.spawnParam[i] }
+
+func (s *summary) waitGroupKind() uint8 { return s.waitKind & 3 }
+
+func (s *summary) singleSpawn() bool { return !s.pessimistic && (s.waitKind&waitSingleSpawn) != 0 }
 
 func (s *summary) freeLeaks(j int) bool {
 	if s.pessimistic || j >= len(s.leakFree) {
@@ -280,6 +464,16 @@ func (s *summary) writes(i int) bool {
 		return true
 	}
 	return s.writeParam[i]
+}
+
+func (s *summary) writesNonReg(i int) bool {
+	if s.pessimistic {
+		return true
+	}
+	if s.nonRegWriteParam != nil {
+		return i >= len(s.nonRegWriteParam) || s.nonRegWriteParam[i]
+	}
+	return s.writes(i)
 }
 
 func (s *summary) writesFree(j int) bool {
@@ -308,7 +502,7 @@ func (s *summary) unavailable() string {
 	return ""
 }
 
-var pessimistic = &summary{pessimistic: true}
+var pessimistic = &summary{pessimistic: true, waitParam: -1}
 
 func optimistic(fn *ssa.Function, st *state) *summary {
 	nRes := 0
@@ -327,10 +521,12 @@ func optimistic(fn *ssa.Function, st *state) *summary {
 		spawnParam:  make([]bool, len(fn.Params)),
 		leakFree:    make([]bool, len(fn.FreeVars)),
 
-		writeParam:  make([]bool, len(fn.Params)),
-		writeFree:   make([]bool, len(fn.FreeVars)),
-		fresh:       true,
-		freshResult: fr,
+		writeParam:       make([]bool, len(fn.Params)),
+		nonRegWriteParam: make([]bool, len(fn.Params)),
+		writeFree:        make([]bool, len(fn.FreeVars)),
+		fresh:            true,
+		freshResult:      fr,
+		waitParam:        -1,
 	}
 	for i, p := range fn.Params {
 		s.isoParam[i] = st.isIsoParam(p)
@@ -340,59 +536,50 @@ func optimistic(fn *ssa.Function, st *state) *summary {
 
 // summary returns what gosree knows about calling fn.
 func (st *state) summary(fn *ssa.Function) *summary {
+	if fn == nil {
+		return pessimistic
+	}
 	if o := fn.Origin(); o != nil {
 		fn = o
 	}
 	if s := st.summaryRead(fn); s != nil {
 		return s
 	}
-	obj, ok := fn.Object().(*types.Func)
-	if ok && (isBoundMethodWrapper(fn) || isMethodThunk(fn)) && obj.Signature().Recv() != nil && !types.IsInterface(obj.Signature().Recv().Type()) {
-		origObj := obj.Origin()
-		nParams := len(fn.Params)
-		nFree := len(fn.FreeVars)
-		if c, has := capContracts[origObj.FullName()]; has && c.freshResult {
-			leaks := make([]bool, nParams)
-			writes := make([]bool, nParams)
-			for i := range leaks {
-				leaks[i] = true
-				writes[i] = true
-			}
-			freeLeaks := make([]bool, nFree)
-			freeWrites := make([]bool, nFree)
-			for j := range freeLeaks {
-				freeLeaks[j] = true
-				freeWrites[j] = true
-			}
-			return &summary{leakParam: leaks, writeParam: writes, leakFree: freeLeaks, writeFree: freeWrites, fresh: true}
-		}
-		if origObj.Pkg() != nil && origObj.Pkg().Path() == atomicPkg {
-			leaks := make([]bool, nParams)
-			for i := range leaks {
-				leaks[i] = true
-			}
-			freeLeaks := make([]bool, nFree)
-			for j := range freeLeaks {
-				freeLeaks[j] = true
-			}
-			return &summary{leakParam: leaks, writeParam: make([]bool, nParams), leakFree: freeLeaks, writeFree: make([]bool, nFree)}
-		}
-	}
 	if m := methodBehind(fn); m != nil {
 		return wrapperSummary(fn, m, st.summary(m))
+	}
+	obj, ok := fn.Object().(*types.Func)
+	if ok && (isBoundMethodWrapper(fn) || isMethodThunk(fn)) && obj.Signature().Recv() != nil && !types.IsInterface(obj.Signature().Recv().Type()) {
+		if ms := st.summaryOfFuncObj(obj.Origin()); !ms.pessimistic {
+			return wrapperSummary(fn, nil, ms)
+		}
 	}
 	// Functions of other packages are built from type information; other synthetic functions
 	// have their own parameter layout and get no summary.
 	if !ok || (fn.Synthetic != "" && !strings.HasPrefix(fn.Synthetic, "from type information")) {
 		return pessimistic
 	}
+	return st.summaryOfFuncObj(obj)
+}
+
+func (st *state) summaryOfFuncObj(obj *types.Func) *summary {
+	if obj == nil {
+		return pessimistic
+	}
 	obj = obj.Origin()
-	if obj.Pkg() == st.pass.Pkg {
+	if st.ssa != nil && st.ssa.Pkg != nil && st.ssa.Pkg.Prog != nil {
+		if fn := st.ssa.Pkg.Prog.FuncValue(obj); fn != nil {
+			if s := st.summaryRead(fn); s != nil {
+				return s
+			}
+		}
+	}
+	if st.pass == nil || obj.Pkg() == nil || obj.Pkg() == st.pass.Pkg {
 		return pessimistic
 	}
 	if o, ok := kinds.FuncOverrideFor(obj.FullName()); ok {
 		// An assumption replaces the computed summary (internal/kinds/funcs.go).
-		return &summary{leakParam: o.Leaks, writeParam: o.Writes, fresh: o.Fresh}
+		return &summary{leakParam: o.Leaks, writeParam: o.Writes, fresh: o.Fresh, waitParam: -1}
 	}
 	var f FuncFact
 	if !st.pass.ImportObjectFact(obj, &f) || f.Unknown {
@@ -403,7 +590,7 @@ func (st *state) summary(fn *ssa.Function) *summary {
 				leaks[i] = true
 				writes[i] = true
 			}
-			return &summary{leakParam: leaks, writeParam: writes, fresh: true}
+			return &summary{leakParam: leaks, writeParam: writes, fresh: true, waitParam: -1}
 		}
 		if obj.Pkg().Path() == atomicPkg {
 			return atomicSummary(kinds.Params(obj))
@@ -411,14 +598,20 @@ func (st *state) summary(fn *ssa.Function) *summary {
 		return pessimistic
 	}
 	s := &summary{
-		leakParam:   f.Leaks,
-		isoParam:    f.Iso,
-		spawnParam:  f.Spawns,
-		writeParam:  f.Writes,
-		fresh:       f.Fresh,
-		freshResult: f.FreshResult,
-		links:       f.Links,
-		acquires:    f.Acquires,
+		leakParam:     f.Leaks,
+		isoParam:      f.Iso,
+		spawnParam:    f.Spawns,
+		writeParam:    f.Writes,
+		fresh:         f.Fresh,
+		freshResult:   f.FreshResult,
+		links:         f.Links,
+		acquires:      f.Acquires,
+		waitParam:     f.WaitParamPlusOne - 1,
+		waitKind:      f.WaitKind,
+		paramAutoSync: f.ParamAutoSync,
+		resAutoSync:   f.ResAutoSync,
+		sharedRead:    f.SharedRead,
+		projSync:      f.ProjSync,
 	}
 	if c, ok := capContracts[obj.FullName()]; ok && c.freshResult {
 		s.fresh = true
@@ -454,15 +647,17 @@ func wrapperSummary(w, method *ssa.Function, ms *summary) *summary {
 	}
 	n := len(w.Params)
 	s := &summary{
-		leakParam:   make([]bool, n),
-		leakBesides: make([]bool, n),
-		isoParam:    make([]bool, n),
-		spawnParam:  make([]bool, n),
-		writeParam:  make([]bool, n),
-		leakFree:    make([]bool, len(w.FreeVars)),
-		writeFree:   make([]bool, len(w.FreeVars)),
-		fresh:       ms.fresh,
-		freshResult: slices.Clone(ms.freshResult),
+		leakParam:        make([]bool, n),
+		leakBesides:      make([]bool, n),
+		isoParam:         make([]bool, n),
+		spawnParam:       make([]bool, n),
+		writeParam:       make([]bool, n),
+		nonRegWriteParam: make([]bool, n),
+		leakFree:         make([]bool, len(w.FreeVars)),
+		writeFree:        make([]bool, len(w.FreeVars)),
+		fresh:            ms.fresh,
+		freshResult:      slices.Clone(ms.freshResult),
+		waitParam:        -1,
 	}
 	for i := range n {
 		s.leakParam[i] = ms.leaks(i + shift)
@@ -470,6 +665,19 @@ func wrapperSummary(w, method *ssa.Function, ms *summary) *summary {
 		s.isoParam[i] = ms.isIso(i + shift)
 		s.spawnParam[i] = ms.spawns(i + shift)
 		s.writeParam[i] = ms.writes(i + shift)
+		s.nonRegWriteParam[i] = ms.writesNonReg(i + shift)
+		if ms.isSharedRead(i + shift) {
+			if s.sharedRead == nil {
+				s.sharedRead = make([]bool, n)
+			}
+			s.sharedRead[i] = true
+		}
+		if ms.isProjSync(i + shift) {
+			if s.projSync == nil {
+				s.projSync = make([]bool, n)
+			}
+			s.projSync[i] = true
+		}
 	}
 	keepReceiver := func() {
 		switch {
@@ -485,7 +693,18 @@ func wrapperSummary(w, method *ssa.Function, ms *summary) *summary {
 		s.leakFree[0] = ms.leaks(0) || ms.isIso(0) || ms.spawns(0)
 		s.writeFree[0] = ms.writes(0)
 	}
-	sameReceiver := shift == 0 && n > 0 && len(method.Params) > 0 && types.Identical(w.Params[0].Type(), method.Params[0].Type())
+	if ms.waitParam >= shift {
+		s.waitParam = ms.waitParam - shift
+		s.waitKind = ms.waitKind
+	}
+	sameReceiver := false
+	if shift == 0 && n > 0 {
+		if method != nil && len(method.Params) > 0 {
+			sameReceiver = types.Identical(w.Params[0].Type(), method.Params[0].Type())
+		} else if obj, ok := w.Object().(*types.Func); ok && obj.Origin().Signature().Recv() != nil {
+			sameReceiver = types.Identical(w.Params[0].Type(), obj.Origin().Signature().Recv().Type())
+		}
+	}
 	var links []Link
 	for _, l := range ms.links {
 		if l.A != 0 || sameReceiver {
@@ -506,6 +725,17 @@ func wrapperSummary(w, method *ssa.Function, ms *summary) *summary {
 		}
 	}
 	s.links = mergeLinks(nil, links)
+	for _, a := range ms.acquires {
+		if a.Param == 0 {
+			if shift == 1 && len(w.FreeVars) > 0 {
+				s.acquires = append(s.acquires, acquire{Param: -1, Free: 0, Steps: a.Steps, Mode: a.Mode})
+			} else if sameReceiver {
+				s.acquires = append(s.acquires, a)
+			}
+		} else if a.Param >= shift {
+			s.acquires = append(s.acquires, acquire{Param: a.Param - shift, Free: -1, Steps: a.Steps, Mode: a.Mode})
+		}
+	}
 	return s
 }
 
@@ -521,6 +751,9 @@ func (st *state) summaryRead(fn *ssa.Function) *summary {
 		return nil
 	}
 	if st.sumFor != nil && st.sumFor != fn {
+		if st.sumReaders == nil {
+			st.sumReaders = map[*ssa.Function]map[*ssa.Function]bool{}
+		}
 		readers := st.sumReaders[fn]
 		if readers == nil {
 			readers = map[*ssa.Function]bool{}
@@ -541,7 +774,7 @@ func atomicSummary(n int) *summary {
 	for i := range leaks {
 		leaks[i] = true
 	}
-	return &summary{leakParam: leaks, writeParam: make([]bool, n)}
+	return &summary{leakParam: leaks, writeParam: make([]bool, n), waitParam: -1}
 }
 
 func (st *state) isIsoParam(p *ssa.Parameter) bool {
@@ -584,7 +817,7 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 		}
 		return ok
 	}
-	isWrite := func(e event) bool { return e.kind == evWrite }
+	dirParam, dirNonRegParam, dirFree := computeDirectWrites(fn, st)
 	for i, p := range fn.Params {
 		if n := g.val(p); n != nil {
 			leak := func(e event) bool {
@@ -634,8 +867,9 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 				}
 				return true
 			})
-			s.writeParam[i] = fwdHas(g, n, isWrite)
-			if _, isSig := p.Type().Underlying().(*types.Signature); isSig && !s.isoParam[i] {
+			s.writeParam[i] = dirParam[i]
+			s.nonRegWriteParam[i] = dirNonRegParam[i]
+			if _, isSig := p.Type().Underlying().(*types.Signature); isSig {
 				s.spawnParam[i] = regionHas(g, n, func(e event) bool { return e.kind == evTransfer })
 			}
 		}
@@ -651,7 +885,7 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 				}
 				return true
 			})
-			s.writeFree[j] = fwdHas(g, n, isWrite)
+			s.writeFree[j] = dirFree[j]
 		}
 	}
 	for _, b := range fn.Blocks {
@@ -688,6 +922,10 @@ func summarise(fn *ssa.Function, g *graph, st *state) *summary {
 		}
 	}
 	s.links = mergeLinks(nil, links)
+	s.waitParam, s.waitKind = inferSpawnerWait(fn, s, st)
+	if inferSingleSpawn(fn, s, st) {
+		s.waitKind |= waitSingleSpawn
+	}
 	return s
 }
 
@@ -757,7 +995,10 @@ func sameSummary(a, b *summary) bool {
 		slices.Equal(a.leakParam, b.leakParam) && slices.Equal(a.spawnParam, b.spawnParam) &&
 		slices.Equal(a.leakBesides, b.leakBesides) &&
 		slices.Equal(a.leakFree, b.leakFree) &&
-		slices.Equal(a.writeParam, b.writeParam) && slices.Equal(a.writeFree, b.writeFree) && slices.Equal(a.links, b.links)
+		slices.Equal(a.writeParam, b.writeParam) && slices.Equal(a.nonRegWriteParam, b.nonRegWriteParam) &&
+		slices.Equal(a.writeFree, b.writeFree) &&
+		slices.Equal(a.links, b.links) &&
+		a.waitParam == b.waitParam && a.waitKind == b.waitKind
 }
 
 // orInto returns next with every flag prev set also set.
@@ -784,6 +1025,7 @@ func andInto(prev, next []bool) []bool {
 // post-order and re-queued when a summary changes: along intra-package caller edges, and to every
 // function that read the summary while its own was worked out (summaryRead).
 func (st *state) computeSummaries(fns []*ssa.Function) {
+	clear(st.sumReaders)
 	inPkg := make(map[*ssa.Function]bool, len(fns))
 	for _, fn := range fns {
 		inPkg[fn] = true
@@ -877,9 +1119,11 @@ func (st *state) computeSummaries(fns []*ssa.Function) {
 				}
 				// In the order they come in fns: the order of a map differs from run to run, and
 				// so would the order the summaries are worked out in.
-				for _, reader := range fns {
-					if st.sumReaders[fn][reader] {
-						again(reader)
+				if readers := st.sumReaders[fn]; len(readers) > 0 {
+					for _, reader := range fns {
+						if readers[reader] {
+							again(reader)
+						}
 					}
 				}
 			} else {
@@ -902,7 +1146,2011 @@ func mergePessimistic(prev, next *summary) *summary {
 	out.spawnParam = orInto(prev.spawnParam, next.spawnParam)
 	out.leakFree = orInto(prev.leakFree, next.leakFree)
 	out.writeParam = orInto(prev.writeParam, next.writeParam)
+	if prev.nonRegWriteParam != nil || next.nonRegWriteParam != nil {
+		out.nonRegWriteParam = orInto(prev.nonRegWriteParam, next.nonRegWriteParam)
+	}
 	out.writeFree = orInto(prev.writeFree, next.writeFree)
 	out.links = mergeLinks(prev.links, next.links)
+	if anyTrue(prev.spawnParam) {
+		if prev.waitParam == -1 {
+			out.waitParam = -1
+			out.waitKind &^= 3
+		}
+		if !prev.singleSpawn() {
+			out.waitKind &^= waitSingleSpawn
+		}
+	}
 	return &out
+}
+
+type originSet struct {
+	lo    uint64
+	extra []uint64
+}
+
+func (o *originSet) set(idx int) bool {
+	if idx < 0 {
+		return false
+	}
+	if idx < 64 {
+		bit := uint64(1) << uint(idx)
+		if (o.lo & bit) != 0 {
+			return false
+		}
+		o.lo |= bit
+		return true
+	}
+	word := (idx - 64) / 64
+	bit := uint64(1) << uint((idx-64)%64)
+	for len(o.extra) <= word {
+		o.extra = append(o.extra, 0)
+	}
+	if (o.extra[word] & bit) != 0 {
+		return false
+	}
+	o.extra[word] |= bit
+	return true
+}
+
+func (o originSet) has(idx int) bool {
+	if idx < 0 {
+		return false
+	}
+	if idx < 64 {
+		return (o.lo & (uint64(1) << uint(idx))) != 0
+	}
+	word := (idx - 64) / 64
+	if word >= len(o.extra) {
+		return false
+	}
+	return (o.extra[word] & (uint64(1) << uint((idx-64)%64))) != 0
+}
+
+func (o originSet) isEmpty() bool {
+	if o.lo != 0 {
+		return false
+	}
+	for _, w := range o.extra {
+		if w != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (o originSet) unionWith(other originSet) (originSet, bool) {
+	changed := (other.lo &^ o.lo) != 0
+	o.lo |= other.lo
+	if len(other.extra) > 0 {
+		if len(o.extra) < len(other.extra) {
+			cp := make([]uint64, len(other.extra))
+			copy(cp, o.extra)
+			o.extra = cp
+		} else {
+			o.extra = slices.Clone(o.extra)
+		}
+		for i, w := range other.extra {
+			if (w &^ o.extra[i]) != 0 {
+				changed = true
+			}
+			o.extra[i] |= w
+		}
+	}
+	return o, changed
+}
+
+func isValueStructOrArray(t types.Type) bool {
+	if t == nil {
+		return false
+	}
+	switch t.Underlying().(type) {
+	case *types.Struct, *types.Array:
+		return true
+	}
+	return false
+}
+
+func isStringByteRuneCopy(dst, src types.Type) bool {
+	if dst == nil || src == nil {
+		return false
+	}
+	isStr := func(t types.Type) bool {
+		b, ok := t.Underlying().(*types.Basic)
+		return ok && b.Info()&types.IsString != 0
+	}
+	isByteOrRuneSlice := func(t types.Type) bool {
+		sl, ok := t.Underlying().(*types.Slice)
+		if !ok {
+			return false
+		}
+		b, ok := sl.Elem().Underlying().(*types.Basic)
+		return ok && (b.Kind() == types.Byte || b.Kind() == types.Rune)
+	}
+	return (isStr(dst) && isByteOrRuneSlice(src)) || (isByteOrRuneSlice(dst) && isStr(src))
+}
+
+// computeDirectWrites computes directional 2-level (d1, dPlus) write summaries for fn's
+// parameters and free variables, eliminating symmetric Steensgaard pollution across unrelated
+// closure captures, slice/struct containers, and value-copied structs.
+func fieldVarOfFieldAddr(fa *ssa.FieldAddr) *types.Var {
+	if fa == nil || fa.X == nil {
+		return nil
+	}
+	_, s := derefNamedStruct(fa.X.Type())
+	if s == nil || fa.Field < 0 || fa.Field >= s.NumFields() {
+		return nil
+	}
+	return s.Field(fa.Field)
+}
+
+func calleeOriginPkgPath(fn *ssa.Function) string {
+	if fn == nil {
+		return ""
+	}
+	if fn.Pkg != nil && fn.Pkg.Pkg != nil {
+		return fn.Pkg.Pkg.Path()
+	}
+	if orig := fn.Origin(); orig != nil {
+		if orig.Pkg != nil && orig.Pkg.Pkg != nil {
+			return orig.Pkg.Pkg.Path()
+		}
+		if orig.Object() != nil && orig.Object().Pkg() != nil {
+			return orig.Object().Pkg().Path()
+		}
+	}
+	if fn.Object() != nil && fn.Object().Pkg() != nil {
+		return fn.Object().Pkg().Path()
+	}
+	return ""
+}
+
+func computeDirectWrites(fn *ssa.Function, st *state) ([]bool, []bool, []bool) {
+	np := len(fn.Params)
+	nf := len(fn.FreeVars)
+	writeParam := make([]bool, np)
+	nonRegWriteParam := make([]bool, np)
+	writeFree := make([]bool, nf)
+	if np+nf == 0 || len(fn.Blocks) == 0 {
+		return writeParam, nonRegWriteParam, writeFree
+	}
+
+	trackable := func(v ssa.Value) bool {
+		if v == nil {
+			return false
+		}
+		if _, guarded := st.localGuards[v]; guarded {
+			return false
+		}
+		switch x := v.(type) {
+		case *ssa.Const, *ssa.Function, *ssa.Builtin, *ssa.Global:
+			return false
+		case *ssa.Parameter, *ssa.FreeVar, *ssa.Alloc:
+			return !st.cls.Shareable(v.Type())
+		case *ssa.MakeInterface:
+			return (!st.cls.Shareable(x.Type()) && !st.isAutoSyncType(x.Type())) ||
+				(!st.cls.Shareable(x.X.Type()) && !st.isAutoSyncType(x.X.Type()))
+		default:
+			return !st.cls.Shareable(v.Type()) && !st.isAutoSyncType(v.Type())
+		}
+	}
+
+	d1 := map[ssa.Value]originSet{}
+	dPlus := map[ssa.Value]originSet{}
+
+	for i, p := range fn.Params {
+		if !trackable(p) {
+			continue
+		}
+		var o originSet
+		o.set(i)
+		if isValueStructOrArray(p.Type()) {
+			dPlus[p] = o
+		} else {
+			d1[p] = o
+			dPlus[p] = o
+		}
+	}
+	for j, fv := range fn.FreeVars {
+		if !trackable(fv) {
+			continue
+		}
+		var o originSet
+		o.set(np + j)
+		if isValueStructOrArray(fv.Type()) {
+			dPlus[fv] = o
+		} else {
+			d1[fv] = o
+			dPlus[fv] = o
+		}
+	}
+
+	addD1 := func(dst ssa.Value, bits originSet) bool {
+		if bits.isEmpty() || !trackable(dst) {
+			return false
+		}
+		next, ch := d1[dst].unionWith(bits)
+		if ch {
+			d1[dst] = next
+		}
+		return ch
+	}
+	addDPlus := func(dst ssa.Value, bits originSet) bool {
+		if bits.isEmpty() || !trackable(dst) {
+			return false
+		}
+		next, ch := dPlus[dst].unionWith(bits)
+		if ch {
+			dPlus[dst] = next
+		}
+		return ch
+	}
+	bothOf := func(v ssa.Value) originSet {
+		res, _ := d1[v].unionWith(dPlus[v])
+		return res
+	}
+	propSame := func(dst, src ssa.Value) bool {
+		c1 := addD1(dst, d1[src])
+		c2 := addDPlus(dst, dPlus[src])
+		return c1 || c2
+	}
+	propBaseDPlus := func(addr ssa.Value, bits originSet) bool {
+		if bits.isEmpty() {
+			return false
+		}
+		changed := false
+		cur := addr
+		for cur != nil {
+			if addDPlus(cur, bits) {
+				changed = true
+			}
+			switch x := cur.(type) {
+			case *ssa.FieldAddr:
+				cur = x.X
+			case *ssa.IndexAddr:
+				cur = x.X
+			case *ssa.Slice:
+				cur = x.X
+			case *ssa.ChangeType:
+				cur = x.X
+			default:
+				cur = nil
+			}
+		}
+		return changed
+	}
+
+	for changed := true; changed; {
+		changed = false
+		for _, b := range fn.Blocks {
+			for _, ins := range b.Instrs {
+				switch x := ins.(type) {
+				case *ssa.Phi:
+					for _, e := range x.Edges {
+						if propSame(x, e) {
+							changed = true
+						}
+					}
+				case *ssa.FieldAddr:
+					if st.autoGuardsVerified {
+						if sf := fieldVarOfFieldAddr(x); sf != nil && st.autoGuarded[sf.Origin()] != nil {
+							continue
+						}
+					}
+					if propSame(x, x.X) {
+						changed = true
+					}
+				case *ssa.IndexAddr:
+					if propSame(x, x.X) {
+						changed = true
+					}
+				case *ssa.Field:
+					if isValueStructOrArray(x.Type()) {
+						if addDPlus(x, bothOf(x.X)) {
+							changed = true
+						}
+					} else {
+						if addD1(x, bothOf(x.X)) {
+							changed = true
+						}
+						if addDPlus(x, dPlus[x.X]) {
+							changed = true
+						}
+					}
+				case *ssa.Index:
+					if isValueStructOrArray(x.Type()) {
+						if addDPlus(x, bothOf(x.X)) {
+							changed = true
+						}
+					} else {
+						if addD1(x, bothOf(x.X)) {
+							changed = true
+						}
+						if addDPlus(x, dPlus[x.X]) {
+							changed = true
+						}
+					}
+				case *ssa.Slice:
+					if propSame(x, x.X) {
+						changed = true
+					}
+				case *ssa.ChangeType:
+					if propSame(x, x.X) {
+						changed = true
+					}
+				case *ssa.SliceToArrayPointer:
+					if propSame(x, x.X) {
+						changed = true
+					}
+				case *ssa.Range:
+					if propSame(x, x.X) {
+						changed = true
+					}
+				case *ssa.MakeInterface:
+					if propSame(x, x.X) {
+						changed = true
+					}
+				case *ssa.ChangeInterface:
+					if propSame(x, x.X) {
+						changed = true
+					}
+				case *ssa.TypeAssert:
+					if x.CommaOk {
+						if addD1(x, d1[x.X]) {
+							changed = true
+						}
+						if addDPlus(x, dPlus[x.X]) {
+							changed = true
+						}
+					} else if isValueStructOrArray(x.Type()) {
+						if addDPlus(x, bothOf(x.X)) {
+							changed = true
+						}
+					} else if propSame(x, x.X) {
+						changed = true
+					}
+				case *ssa.Convert:
+					if !isStringByteRuneCopy(x.Type(), x.X.Type()) {
+						if propSame(x, x.X) {
+							changed = true
+						}
+					}
+				case *ssa.MultiConvert:
+					if !isStringByteRuneCopy(x.Type(), x.X.Type()) {
+						if propSame(x, x.X) {
+							changed = true
+						}
+					}
+				case *ssa.Extract:
+					if c, ok := x.Tuple.(*ssa.Call); ok && !c.Common().IsInvoke() && c.Common().StaticCallee() != nil {
+						continue
+					}
+					switch tup := x.Tuple.(type) {
+					case *ssa.Lookup, *ssa.Next:
+						if isValueStructOrArray(x.Type()) {
+							if addDPlus(x, bothOf(tup)) {
+								changed = true
+							}
+						} else {
+							if addD1(x, bothOf(tup)) {
+								changed = true
+							}
+							if addDPlus(x, dPlus[tup]) {
+								changed = true
+							}
+						}
+					case *ssa.TypeAssert:
+						if isValueStructOrArray(x.Type()) {
+							if addDPlus(x, bothOf(tup)) {
+								changed = true
+							}
+						} else if propSame(x, tup) {
+							changed = true
+						}
+					default:
+						if propSame(x, x.Tuple) {
+							changed = true
+						}
+					}
+				case *ssa.UnOp:
+					if x.Op == token.MUL {
+						if _, guarded := st.slotOf(x.X); !guarded {
+							if isValueStructOrArray(x.Type()) {
+								if addDPlus(x, bothOf(x.X)) {
+									changed = true
+								}
+							} else {
+								if addD1(x, bothOf(x.X)) {
+									changed = true
+								}
+								if addDPlus(x, dPlus[x.X]) {
+									changed = true
+								}
+							}
+						}
+					}
+				case *ssa.Lookup:
+					if _, guarded := st.slotOf(x.X); !guarded {
+						if x.CommaOk {
+							if propSame(x, x.X) {
+								changed = true
+							}
+						} else if isValueStructOrArray(x.Type()) {
+							if addDPlus(x, bothOf(x.X)) {
+								changed = true
+							}
+						} else {
+							if addD1(x, bothOf(x.X)) {
+								changed = true
+							}
+							if addDPlus(x, dPlus[x.X]) {
+								changed = true
+							}
+						}
+					}
+				case *ssa.Next:
+					if propSame(x, x.Iter) {
+						changed = true
+					}
+				case *ssa.Store:
+					if trackable(x.Val) {
+						if propBaseDPlus(x.Addr, bothOf(x.Val)) {
+							changed = true
+						}
+					}
+				case *ssa.MapUpdate:
+					for _, mv := range []ssa.Value{x.Key, x.Value} {
+						if trackable(mv) {
+							if propBaseDPlus(x.Map, bothOf(mv)) {
+								changed = true
+							}
+						}
+					}
+				case *ssa.MakeClosure:
+					mcFn, _ := x.Fn.(*ssa.Function)
+					if mcFn == nil {
+						for _, bind := range x.Bindings {
+							if addDPlus(x, bothOf(bind)) {
+								changed = true
+							}
+						}
+					} else {
+						cs := st.summary(mcFn)
+						for j, bind := range x.Bindings {
+							if cs.writesFree(j) {
+								if addDPlus(x, bothOf(bind)) {
+									changed = true
+								}
+							}
+						}
+					}
+				case *ssa.Call:
+					if propCallDirectFlow(x, &x.Call, x, st, dPlus, addD1, addDPlus, bothOf, propSame, propBaseDPlus) {
+						changed = true
+					}
+				case *ssa.Defer:
+					if propCallDirectFlow(x, &x.Call, nil, st, dPlus, addD1, addDPlus, bothOf, propSame, propBaseDPlus) {
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	var written originSet
+	var writtenNonReg originSet
+	markVal := func(v ssa.Value, deep bool) {
+		if v == nil {
+			return
+		}
+		if _, guarded := st.slotOf(v); guarded {
+			return
+		}
+		if deep {
+			written, _ = written.unionWith(bothOf(v))
+			writtenNonReg, _ = writtenNonReg.unionWith(bothOf(v))
+			return
+		}
+		bits := d1[v]
+		if bits.isEmpty() {
+			cur := v
+			for cur != nil && bits.isEmpty() {
+				if _, guarded := st.slotOf(cur); guarded {
+					return
+				}
+				switch x := cur.(type) {
+				case *ssa.FieldAddr:
+					cur = x.X
+				case *ssa.IndexAddr:
+					cur = x.X
+				default:
+					cur = nil
+				}
+				if cur != nil {
+					bits = d1[cur]
+				}
+			}
+		}
+		written, _ = written.unionWith(bits)
+		writtenNonReg, _ = writtenNonReg.unionWith(bits)
+	}
+	markCallArg := func(v ssa.Value, deep bool) {
+		if v == nil || st.cls.Shareable(v.Type()) || st.isAutoSyncType(v.Type()) {
+			return
+		}
+		markVal(v, deep)
+	}
+	markCallArgRegOnly := func(v ssa.Value) {
+		if v == nil || st.cls.Shareable(v.Type()) || st.isAutoSyncType(v.Type()) {
+			return
+		}
+		if _, guarded := st.slotOf(v); guarded {
+			return
+		}
+		written, _ = written.unionWith(bothOf(v))
+	}
+
+	markInteriorBases := func(v ssa.Value, nonReg bool) {
+		if v == nil {
+			return
+		}
+		seen := map[ssa.Value]bool{}
+		var walk func(cur ssa.Value, sawUntrackedInterior bool)
+		walk = func(cur ssa.Value, sawUntrackedInterior bool) {
+			if cur == nil || seen[cur] {
+				return
+			}
+			seen[cur] = true
+			if _, guarded := st.slotOf(cur); guarded {
+				return
+			}
+			if sawUntrackedInterior {
+				if bits := d1[cur]; !bits.isEmpty() {
+					written, _ = written.unionWith(bits)
+					if nonReg {
+						writtenNonReg, _ = writtenNonReg.unionWith(bits)
+					}
+					return
+				}
+			}
+			switch x := cur.(type) {
+			case *ssa.FieldAddr:
+				untracked := st.cls.Shareable(x.Type()) || st.isAutoSyncType(x.Type())
+				walk(x.X, sawUntrackedInterior || untracked)
+			case *ssa.IndexAddr:
+				untracked := st.cls.Shareable(x.Type()) || st.isAutoSyncType(x.Type())
+				walk(x.X, sawUntrackedInterior || untracked)
+			case *ssa.ChangeType:
+				walk(x.X, sawUntrackedInterior)
+			case *ssa.MakeInterface:
+				walk(x.X, sawUntrackedInterior)
+			case *ssa.ChangeInterface:
+				walk(x.X, sawUntrackedInterior)
+			case *ssa.Phi:
+				for _, edge := range x.Edges {
+					walk(edge, sawUntrackedInterior)
+				}
+			case *ssa.UnOp:
+				if x.Op == token.MUL {
+					if a, ok := x.X.(*ssa.Alloc); ok && a.Referrers() != nil {
+						for _, r := range *a.Referrers() {
+							if stIns, isStore := r.(*ssa.Store); isStore && stIns.Addr == a {
+								walk(stIns.Val, sawUntrackedInterior)
+							}
+						}
+					}
+				}
+			}
+		}
+		walk(v, false)
+	}
+	markInterior := func(v ssa.Value) {
+		markInteriorBases(v, true)
+	}
+	markInteriorRegOnly := func(v ssa.Value) {
+		markInteriorBases(v, false)
+	}
+
+	recvWriteOnceInit := st.isMutexWriteOnceInitMethod(fn)
+
+	for _, b := range fn.Blocks {
+		for _, ins := range b.Instrs {
+			if w, ok := writeOf(ins); ok {
+				if recvWriteOnceInit {
+					if fa, isFA := w.addr.(*ssa.FieldAddr); isFA && len(fn.Params) > 0 && fa.X == fn.Params[0] {
+						continue
+					}
+				}
+				markVal(w.addr, false)
+			}
+			switch x := ins.(type) {
+			case *ssa.Go:
+				cc := x.Common()
+				callee := cc.StaticCallee()
+				var gSum *summary
+				if callee != nil && !cc.IsInvoke() {
+					gSum = st.summary(callee)
+				}
+				for i, a := range cc.Args {
+					if gSum == nil || gSum.writes(i) {
+						markCallArg(a, true)
+						if callee == nil || !isEncapsulatedMethodRecvCall(st, callee, i, a) {
+							markInterior(a)
+						}
+					}
+				}
+				markCallArg(cc.Value, true)
+			case *ssa.Call:
+				collectCallWrites(fn, x, &x.Call, st, markCallArg, markCallArgRegOnly, markInterior, markInteriorRegOnly)
+			case *ssa.Defer:
+				collectCallWrites(fn, x, &x.Call, st, markCallArg, markCallArgRegOnly, markInterior, markInteriorRegOnly)
+			}
+		}
+	}
+
+	for i := range np {
+		writeParam[i] = written.has(i)
+		nonRegWriteParam[i] = writtenNonReg.has(i)
+	}
+	for j := range nf {
+		writeFree[j] = written.has(np + j)
+	}
+	return writeParam, nonRegWriteParam, writeFree
+}
+
+// isMutexWriteOnceInitMethod reports whether fn is an unexported mutex-serialized write-once lazy
+// initializer on *T (such as (*Client).ensureClient):
+//  1. T is a struct declared in this package with a value sync.Mutex/sync.RWMutex field mu and no
+//     struct-type conversions.
+//  2. Every write in fn is a Store to an unexported non-embedded field &recv.f dominated by
+//     recv.mu.Lock() (in lockWrite mode) AND reachable only along the nil/false branch of an
+//     early-return check on one of the written fields (`if recv.g != nil { return ... }`) also
+//     evaluated while holding recv.mu in lockWrite mode.
+//  3. Across the entire package, every store to any field written by fn is either pre-publication
+//     on a fresh struct allocation or holds that receiver's mu in lockWrite mode.
+func (st *state) isMutexWriteOnceInitMethod(fn *ssa.Function) bool {
+	if fn == nil || fn.Synthetic != "" || fn.Parent() != nil || len(fn.Blocks) == 0 || len(fn.Params) == 0 {
+		return false
+	}
+	if cached, ok := st.writeOnceInit[fn]; ok {
+		return cached
+	}
+	if st.writeOnceInit == nil {
+		st.writeOnceInit = map[*ssa.Function]bool{}
+	}
+	res := st.computeMutexWriteOnceInitMethod(fn)
+	st.writeOnceInit[fn] = res
+	return res
+}
+
+func (st *state) computeMutexWriteOnceInitMethod(fn *ssa.Function) bool {
+	if token.IsExported(fn.Name()) || fn.Signature == nil || fn.Signature.Recv() == nil {
+		return false
+	}
+	if st.pass == nil || st.pass.Pkg == nil || st.contracts == nil || len(st.allFns) == 0 {
+		return false
+	}
+	recv := fn.Params[0]
+	named, s := derefNamedStruct(recv.Type())
+	if named == nil || s == nil || named.Origin().Obj() == nil || named.Origin().Obj().Pkg() != st.pass.Pkg {
+		return false
+	}
+	if len(st.contracts.structConv[types.TypeString(named.Origin(), nil)]) > 0 {
+		return false
+	}
+	var muIdxs []int
+	for i := range s.NumFields() {
+		sf := s.Field(i)
+		if !sf.Exported() && !sf.Embedded() && isSyncMutexType(sf.Type()) {
+			muIdxs = append(muIdxs, i)
+		}
+	}
+	if len(muIdxs) == 0 {
+		return false
+	}
+
+	writtenFields := map[*types.Var]bool{}
+	var storeInstrs []*ssa.Store
+	for _, b := range fn.Blocks {
+		for _, ins := range b.Instrs {
+			if _, isGo := ins.(*ssa.Go); isGo {
+				return false
+			}
+			w, ok := writeOf(ins)
+			if !ok {
+				continue
+			}
+			stIns, isStore := ins.(*ssa.Store)
+			if !isStore {
+				return false
+			}
+			fa, isFA := w.addr.(*ssa.FieldAddr)
+			if !isFA || fa.X != recv || fa.Field < 0 || fa.Field >= s.NumFields() {
+				return false
+			}
+			sf := s.Field(fa.Field)
+			if sf.Exported() || sf.Embedded() || isSyncMutexType(sf.Type()) {
+				return false
+			}
+			writtenFields[sf.Origin()] = true
+			storeInstrs = append(storeInstrs, stIns)
+		}
+	}
+	if len(storeInstrs) == 0 {
+		return false
+	}
+
+	gs := st.ensureGuardSummaries(st.allFns)
+	fnBefore := st.locksOf(gs, fn)
+	if fnBefore == nil {
+		return false
+	}
+	recvPath, ok := pathOf(recv)
+	if !ok {
+		return false
+	}
+
+	scanFns := st.allFns
+	if st.ssa != nil && st.ssa.Pkg != nil {
+		if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil && !slices.Contains(scanFns, pkgInit) {
+			scanFns = append(append([]*ssa.Function(nil), scanFns...), pkgInit)
+		}
+	}
+
+	for _, muIdx := range muIdxs {
+		wantLock := guardPath{root: recvPath.root, steps: recvPath.steps + "." + strconv.Itoa(muIdx)}
+		allStoresLocked := true
+		for _, stIns := range storeInstrs {
+			at, reach := fnBefore[stIns]
+			if !reach {
+				continue
+			}
+			if at[wantLock] < lockWrite {
+				allStoresLocked = false
+				break
+			}
+		}
+		if !allStoresLocked {
+			continue
+		}
+		if !hasLockedMonotonicFieldGuard(fn, recv, s, writtenFields, wantLock, fnBefore, storeInstrs) {
+			continue
+		}
+		if !st.allPackageFieldStoresHoldMutex(scanFns, writtenFields, muIdx, gs) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func hasLockedMonotonicFieldGuard(
+	fn *ssa.Function,
+	recv ssa.Value,
+	s *types.Struct,
+	writtenFields map[*types.Var]bool,
+	wantLock guardPath,
+	fnBefore map[ssa.Instruction]lockset,
+	storeInstrs []*ssa.Store,
+) bool {
+	for _, b := range fn.Blocks {
+		if len(b.Instrs) == 0 || len(b.Succs) != 2 {
+			continue
+		}
+		br, ok := b.Instrs[len(b.Instrs)-1].(*ssa.If)
+		if !ok {
+			continue
+		}
+		at, reach := fnBefore[br]
+		if !reach || at[wantLock] < lockWrite {
+			continue
+		}
+		uninitSucc := lockedFieldUninitSuccIdx(br.Cond, recv, s, writtenFields)
+		if uninitSucc < 0 {
+			continue
+		}
+		initSucc := b.Succs[1-uninitSucc]
+		if !blockAlwaysReturnsWithoutStore(initSucc, storeInstrs, map[*ssa.BasicBlock]bool{}) {
+			continue
+		}
+		// Every store in fn must be unreachable from entry without passing through b -> b.Succs[uninitSucc].
+		allGuarded := true
+		for _, stIns := range storeInstrs {
+			if blockReachableAvoidingEdge(fn.Blocks[0], stIns.Block(), b, b.Succs[uninitSucc]) {
+				allGuarded = false
+				break
+			}
+		}
+		if allGuarded {
+			return true
+		}
+	}
+	return false
+}
+
+func lockedFieldUninitSuccIdx(cond ssa.Value, recv ssa.Value, s *types.Struct, writtenFields map[*types.Var]bool) int {
+	base, neg := unwrapBoolCond(cond)
+	isWrittenRecvFieldLoad := func(v ssa.Value) bool {
+		load, ok := v.(*ssa.UnOp)
+		if !ok || load.Op != token.MUL {
+			return false
+		}
+		fa, ok := load.X.(*ssa.FieldAddr)
+		if !ok || fa.X != recv || fa.Field < 0 || fa.Field >= s.NumFields() {
+			return false
+		}
+		return writtenFields[s.Field(fa.Field).Origin()]
+	}
+	if isWrittenRecvFieldLoad(base) {
+		// `if recv.inited { return }` -> true (0) is initialized, false (1) is uninitialized.
+		if neg {
+			return 0
+		}
+		return 1
+	}
+	bin, ok := base.(*ssa.BinOp)
+	if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
+		return -1
+	}
+	var other ssa.Value
+	if isWrittenRecvFieldLoad(bin.X) {
+		other = bin.Y
+	} else if isWrittenRecvFieldLoad(bin.Y) {
+		other = bin.X
+	} else {
+		return -1
+	}
+	c, ok := other.(*ssa.Const)
+	if !ok || !c.IsNil() {
+		return -1
+	}
+	// `bin` compares recv.f with nil.
+	uninitWhenTrue := bin.Op == token.EQL
+	if neg {
+		uninitWhenTrue = !uninitWhenTrue
+	}
+	if uninitWhenTrue {
+		return 0
+	}
+	return 1
+}
+
+func blockAlwaysReturnsWithoutStore(b *ssa.BasicBlock, storeInstrs []*ssa.Store, seen map[*ssa.BasicBlock]bool) bool {
+	if b == nil {
+		return false
+	}
+	if seen[b] {
+		return false
+	}
+	seen[b] = true
+	for _, stIns := range storeInstrs {
+		if stIns.Block() == b {
+			return false
+		}
+	}
+	if len(b.Instrs) == 0 {
+		return false
+	}
+	switch b.Instrs[len(b.Instrs)-1].(type) {
+	case *ssa.Return:
+		return true
+	case *ssa.Jump, *ssa.If:
+		if len(b.Succs) == 0 {
+			return false
+		}
+		for _, succ := range b.Succs {
+			if !blockAlwaysReturnsWithoutStore(succ, storeInstrs, seen) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func blockReachableAvoidingEdge(entry, target, guardBlk, requiredSucc *ssa.BasicBlock) bool {
+	visited := map[*ssa.BasicBlock]bool{}
+	var dfs func(cur *ssa.BasicBlock) bool
+	dfs = func(cur *ssa.BasicBlock) bool {
+		if cur == target {
+			return true
+		}
+		if visited[cur] {
+			return false
+		}
+		visited[cur] = true
+		for _, succ := range cur.Succs {
+			if cur == guardBlk && succ == requiredSucc {
+				continue
+			}
+			if dfs(succ) {
+				return true
+			}
+		}
+		return false
+	}
+	return dfs(entry)
+}
+
+func (st *state) allPackageFieldStoresHoldMutex(scanFns []*ssa.Function, fields map[*types.Var]bool, muIdx int, gs *guardState) bool {
+	muStep := "." + strconv.Itoa(muIdx)
+	for _, fn := range scanFns {
+		if len(fn.Blocks) == 0 {
+			continue
+		}
+		var fnBefore map[ssa.Instruction]lockset
+		for _, b := range fn.Blocks {
+			for _, ins := range b.Instrs {
+				stIns, ok := ins.(*ssa.Store)
+				if !ok {
+					continue
+				}
+				fa, ok := stIns.Addr.(*ssa.FieldAddr)
+				if !ok {
+					continue
+				}
+				_, s := derefNamedStruct(fa.X.Type())
+				if s == nil || fa.Field < 0 || fa.Field >= s.NumFields() {
+					continue
+				}
+				if !fields[s.Field(fa.Field).Origin()] {
+					continue
+				}
+				if st.autoPrePub(fn, stIns, fa.X) {
+					continue
+				}
+				bp, ok := pathOf(fa.X)
+				if !ok {
+					return false
+				}
+				if fnBefore == nil {
+					fnBefore = st.locksOf(gs, fn)
+				}
+				at, reach := fnBefore[stIns]
+				if !reach {
+					continue
+				}
+				if at[guardPath{root: bp.root, steps: bp.steps + muStep}] < lockWrite {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func propCallDirectFlow(
+	ins ssa.Instruction,
+	cc *ssa.CallCommon,
+	result ssa.Value,
+	st *state,
+	dPlus map[ssa.Value]originSet,
+	addD1 func(ssa.Value, originSet) bool,
+	addDPlus func(ssa.Value, originSet) bool,
+	bothOf func(ssa.Value) originSet,
+	propSame func(ssa.Value, ssa.Value) bool,
+	propBaseDPlus func(ssa.Value, originSet) bool,
+) bool {
+	if cc.IsInvoke() {
+		return false
+	}
+	if b, ok := cc.Value.(*ssa.Builtin); ok {
+		changed := false
+		switch b.Name() {
+		case "append":
+			if result != nil && len(cc.Args) >= 1 {
+				if propSame(result, cc.Args[0]) {
+					changed = true
+				}
+				if len(cc.Args) == 2 && !st.cls.Shareable(elemType(cc.Args[0].Type())) && !st.isAutoSyncType(elemType(cc.Args[0].Type())) {
+					if addDPlus(result, bothOf(cc.Args[1])) {
+						changed = true
+					}
+				}
+			}
+		case "copy":
+			if len(cc.Args) == 2 && !st.cls.Shareable(elemType(cc.Args[0].Type())) && !st.isAutoSyncType(elemType(cc.Args[0].Type())) {
+				if propBaseDPlus(cc.Args[0], bothOf(cc.Args[1])) {
+					changed = true
+				}
+			}
+		case "ssa:wrapnilchk":
+			if result != nil && len(cc.Args) > 0 {
+				if propSame(result, cc.Args[0]) {
+					changed = true
+				}
+			}
+		}
+		return changed
+	}
+	callee := cc.StaticCallee()
+	if callee == nil {
+		return false
+	}
+	if isCapBorrowHelper(callee) && result != nil && len(cc.Args) > 0 {
+		return propSame(result, cc.Args[0])
+	}
+	if isStdlibCloneCall(callee, cc) {
+		if result != nil && !isShareableStdlibCloneCall(st, callee, cc) {
+			return addDPlus(result, bothOf(cc.Args[0]))
+		}
+		return false
+	}
+	sum := st.summary(callee)
+	if len(sum.links) == 0 {
+		return false
+	}
+	spawned := -1
+	if sp, ok := spawnOf(ins); ok && sp.via != "" {
+		spawned = sp.arg
+	}
+	nArgs := len(cc.Args)
+	nTotal := nArgs + cc.Signature().Results().Len()
+	valAt := func(pos int) ssa.Value {
+		if pos == spawned || pos < 0 || pos >= nTotal || (pos < nArgs && sum.spawns(pos)) {
+			return nil
+		}
+		if pos < nArgs {
+			return cc.Args[pos]
+		}
+		if result == nil {
+			return nil
+		}
+		if cc.Signature().Results().Len() > 1 {
+			return extractOfResult(result, pos-nArgs)
+		}
+		return result
+	}
+	changed := false
+	for _, l := range sum.links {
+		va, vb := valAt(l.A), valAt(l.B)
+		if va == nil || vb == nil {
+			continue
+		}
+		switch {
+		case l.A < nArgs && l.B >= nArgs:
+			// Argument linked into result (e.g. s.clone(), s.First(), append-like wrapper).
+			srcA := bothOf(va)
+			if l.DepthA >= 1 {
+				srcA = dPlus[va]
+			}
+			if l.DepthB >= 1 || isValueStructOrArray(vb.Type()) {
+				if addDPlus(vb, srcA) {
+					changed = true
+				}
+			} else {
+				if addD1(vb, srcA) {
+					changed = true
+				}
+				if addDPlus(vb, srcA) {
+					changed = true
+				}
+			}
+		case l.A < nArgs && l.B < nArgs:
+			if l.DepthA == 0 && l.DepthB == 0 {
+				if propSame(va, vb) {
+					changed = true
+				}
+				if propSame(vb, va) {
+					changed = true
+				}
+			} else {
+				srcB := bothOf(vb)
+				if l.DepthB >= 1 {
+					srcB = dPlus[vb]
+				}
+				srcA := bothOf(va)
+				if l.DepthA >= 1 {
+					srcA = dPlus[va]
+				}
+				if l.DepthA >= 1 {
+					if propBaseDPlus(va, srcB) {
+						changed = true
+					}
+				} else {
+					if addD1(va, srcB) {
+						changed = true
+					}
+					if addDPlus(va, srcB) {
+						changed = true
+					}
+				}
+				if l.DepthB >= 1 {
+					if propBaseDPlus(vb, srcA) {
+						changed = true
+					}
+				} else {
+					if addD1(vb, srcA) {
+						changed = true
+					}
+					if addDPlus(vb, srcA) {
+						changed = true
+					}
+				}
+			}
+		case l.A >= nArgs && l.B >= nArgs:
+			if propSame(va, vb) {
+				changed = true
+			}
+			if propSame(vb, va) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func collectCallWrites(
+	caller *ssa.Function,
+	ins ssa.Instruction,
+	cc *ssa.CallCommon,
+	st *state,
+	markVal func(ssa.Value, bool),
+	markValRegOnly func(ssa.Value),
+	markInterior func(ssa.Value),
+	markInteriorRegOnly func(ssa.Value),
+) {
+	if _, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
+		return
+	}
+	if cc.IsInvoke() {
+		// Try resolving concrete receiver types first (either in-function or closed struct field).
+		if methodSums, resolved := st.resolveInvokeMethodSummaries(caller, cc); resolved {
+			for _, ms := range methodSums {
+				if ms.writes(0) {
+					markVal(cc.Value, true)
+				}
+				for i, a := range cc.Args {
+					if ms.writes(i + 1) {
+						markVal(a, true)
+						markInterior(a)
+					}
+				}
+			}
+			return
+		}
+		rc, hasContract, cut := st.resolveCallContractCut(caller, cc)
+		_ = cut
+		markVal(cc.Value, true)
+		if !hasContract || !rc.suppressWrite {
+			for _, a := range cc.Args {
+				markVal(a, true)
+				markInterior(a)
+			}
+		}
+		return
+	}
+	callee := cc.StaticCallee()
+	if callee == nil {
+		if mc := rangeOverFuncClosure(caller, ins, cc); mc != nil {
+			if mcFn, ok := mc.Fn.(*ssa.Function); ok && mcFn != nil {
+				ys := st.summary(mcFn)
+				for j, b := range mc.Bindings {
+					if ys.writesFree(j) {
+						markVal(b, true)
+					}
+				}
+			}
+			markVal(cc.Value, true)
+			return
+		}
+		targets, rest := callTargets(cc.Value)
+		if len(targets) == 0 && len(rest) == 1 && rest[0] == cc.Value {
+			if fvTargets, ok := st.resolveFreeVarCallables(cc.Value); ok {
+				targets = fvTargets
+				rest = nil
+			}
+		}
+		if len(rest) > 0 || len(targets) == 0 {
+			if known, all := st.calledFunctions(caller, cc.Value); all {
+				targets = make([]callTarget, len(known))
+				for k, kf := range known {
+					targets[k] = callTarget{fn: kf.fn, mc: kf.mc}
+				}
+				rest = nil
+			}
+		}
+		if len(rest) == 0 && len(targets) > 0 {
+			writesCalledVal := false
+			for _, t := range targets {
+				ts := st.summary(t.fn)
+				if mfn, recv := methodValue(t); mfn != nil {
+					ms := st.summary(mfn)
+					if ms.writes(0) {
+						writesCalledVal = true
+						if t.mc != nil && t.mc.Parent() == caller {
+							markVal(recv, true)
+							if !isEncapsulatedMethodRecvCall(st, mfn, 0, recv) {
+								markInterior(recv)
+							}
+						}
+					}
+					for i, a := range cc.Args {
+						if ms.writes(i + 1) {
+							markVal(a, true)
+							markInterior(a)
+						}
+					}
+					continue
+				}
+				if t.mc != nil {
+					for j, b := range t.mc.Bindings {
+						if ts.writesFree(j) {
+							writesCalledVal = true
+							if t.mc.Parent() == caller {
+								markVal(b, true)
+							}
+						}
+					}
+				}
+				for i, a := range cc.Args {
+					if ts.writes(i) {
+						markVal(a, true)
+						if !isEncapsulatedMethodRecvCall(st, t.fn, i, a) {
+							markInterior(a)
+						}
+					}
+				}
+			}
+			if writesCalledVal {
+				markVal(cc.Value, true)
+			}
+			return
+		}
+		if fTargets, ok := st.resolveLoadedFieldCallables(cc.Value); ok {
+			for _, tfn := range fTargets {
+				ts := st.summary(tfn)
+				for i, a := range cc.Args {
+					if ts.writes(i) {
+						markVal(a, true)
+						if !isEncapsulatedMethodRecvCall(st, tfn, i, a) {
+							markInterior(a)
+						}
+					}
+				}
+			}
+			return
+		}
+		rc, hasContract, cut := st.resolveCallContractCut(caller, cc)
+		_ = cut
+		if !hasContract || !rc.suppressWrite {
+			for _, a := range cc.Args {
+				markVal(a, true)
+				markInterior(a)
+			}
+		}
+		markVal(cc.Value, true)
+		return
+	}
+	if isCapMove(callee) || isCapBorrowHelper(callee) || isStdlibCloneCall(callee, cc) {
+		return
+	}
+	rc, hasContract, cut := st.resolveCallContractCut(caller, cc)
+	_ = cut
+	if hasContract && rc.suppressWrite {
+		return
+	}
+	spawned := -1
+	isHTTPReg := false
+	if sp, ok := spawnOf(ins); ok && sp.via != "" {
+		spawned = sp.arg
+		isHTTPReg = sp.repeated && strings.Contains(sp.via, "net/http.")
+	}
+	sum := st.summary(callee)
+	if fname := calleeFullName(callee); formatCallees[fname] {
+		for i, a := range cc.Args {
+			if i == spawned || sum.spawns(i) {
+				markVal(a, true)
+				continue
+			}
+			if !sum.writes(i) {
+				continue
+			}
+			if i == 0 && strings.HasPrefix(fname, "fmt.Append") {
+				markVal(a, true)
+				markInterior(a)
+				continue
+			}
+			for _, op := range formatOperands(a, ins) {
+				if typeCallsFormatMethod(op.Type(), map[types.Type]bool{}) {
+					markVal(op, true)
+				}
+			}
+		}
+		return
+	}
+	for i, a := range cc.Args {
+		if i == spawned {
+			if isHTTPReg {
+				markValRegOnly(a)
+			} else {
+				markVal(a, true)
+			}
+			continue
+		}
+		encapRecv := isEncapsulatedMethodRecvCall(st, callee, i, a)
+		if sum.spawns(i) || sum.writesNonReg(i) {
+			markVal(a, true)
+			if !encapRecv {
+				markInterior(a)
+			}
+		} else if sum.writes(i) {
+			markValRegOnly(a)
+			if !encapRecv {
+				markInteriorRegOnly(a)
+			}
+		}
+	}
+}
+
+// inferSpawnerWait detects wrapper spawners such as SafeGoWG(ctx, wg, name, fn) that take a
+// *sync.WaitGroup (waitKind=1) or *errgroup.Group (waitKind=2) parameter w and run every spawned
+// goroutine on w!=nil paths under w's Wait() join contract.
+func inferSpawnerWait(fn *ssa.Function, s *summary, st *state) (int, uint8) {
+	if !anyTrue(s.spawnParam) || len(fn.Blocks) == 0 {
+		return -1, 0
+	}
+	for wIdx, wp := range fn.Params {
+		wk := waitGroupParamKind(wp.Type())
+		if wk == 0 {
+			continue
+		}
+		nilBlocks := nilGuardedBlocks(fn, wp)
+		joinedSpawns := 0
+		allJoined := true
+		for _, b := range fn.Blocks {
+			if nilBlocks[b.Index] {
+				continue
+			}
+			for _, ins := range b.Instrs {
+				switch x := ins.(type) {
+				case *ssa.Go:
+					allJoined = false
+				case *ssa.Call:
+					if sp, ok := spawnOf(x); ok && sp.via != "" {
+						if isDirectGroupSpawnOn(x, wp, wk) {
+							joinedSpawns++
+						} else {
+							allJoined = false
+						}
+						continue
+					}
+					if callee := x.Call.StaticCallee(); callee != nil && !x.Call.IsInvoke() {
+						cs := st.summary(callee)
+						if anyTrue(cs.spawnParam) {
+							if cs.waitParam >= 0 && cs.waitParam < len(x.Call.Args) && cs.waitGroupKind() == wk && x.Call.Args[cs.waitParam] == wp {
+								joinedSpawns++
+							} else {
+								allJoined = false
+							}
+						}
+					}
+				}
+			}
+			if !allJoined {
+				break
+			}
+		}
+		if allJoined && joinedSpawns > 0 {
+			return wIdx, wk
+		}
+	}
+	return -1, 0
+}
+
+// inferSingleSpawn reports whether fn starts each of its spawned callback parameters at most once
+// per call to fn (never in a loop, never twice on one path, and never via a repeated spawner).
+func inferSingleSpawn(fn *ssa.Function, s *summary, st *state) bool {
+	if len(fn.Blocks) == 0 || !anyTrue(s.spawnParam) {
+		return false
+	}
+	var sites []ssa.Instruction
+	for _, b := range fn.Blocks {
+		for _, ins := range b.Instrs {
+			switch x := ins.(type) {
+			case *ssa.Go:
+				sites = append(sites, x)
+			case *ssa.Call:
+				if sp, ok := spawnOf(x); ok && sp.via != "" {
+					if sp.repeated {
+						return false
+					}
+					sites = append(sites, x)
+					continue
+				}
+				if callee := x.Call.StaticCallee(); callee != nil && !x.Call.IsInvoke() {
+					cs := st.summary(callee)
+					if anyTrue(cs.spawnParam) {
+						if !cs.singleSpawn() {
+							return false
+						}
+						sites = append(sites, x)
+					}
+				}
+			}
+		}
+	}
+	if len(sites) == 0 {
+		return false
+	}
+	for _, a := range sites {
+		after := reachableAfter(a)
+		for _, b := range sites {
+			if after(b) {
+				return false
+			}
+		}
+	}
+	isSite := func(ins ssa.Instruction) bool {
+		return slices.Contains(sites, ins)
+	}
+	for cbIdx, isSp := range s.spawnParam {
+		if !isSp {
+			continue
+		}
+		if cbIdx >= len(fn.Params) || !paramSpawnedAtMostOnce(fn.Params[cbIdx], isSite, st) {
+			return false
+		}
+	}
+	return true
+}
+
+func paramSpawnedAtMostOnce(param *ssa.Parameter, isSite func(ssa.Instruction) bool, st *state) bool {
+	if param.Referrers() == nil {
+		return false
+	}
+	if cell := singleStoreValueCell(param.Parent(), param); cell != nil {
+		return cellSpawnedAtMostOnce(cell, param, isSite, st)
+	}
+	return valSpawnedAtMostOnce(param, isSite, st)
+}
+
+func singleStoreValueCell(fn *ssa.Function, v ssa.Value) *ssa.Alloc {
+	if fn == nil || v == nil || v.Referrers() == nil {
+		return nil
+	}
+	var store *ssa.Store
+	for _, r := range *v.Referrers() {
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Store:
+			if store != nil || x.Val != v {
+				return nil
+			}
+			store = x
+		default:
+			return nil
+		}
+	}
+	if store == nil {
+		return nil
+	}
+	alloc, ok := store.Addr.(*ssa.Alloc)
+	if !ok || alloc.Parent() != fn || alloc.Referrers() == nil {
+		return nil
+	}
+	for _, r := range *alloc.Referrers() {
+		if r == store {
+			continue
+		}
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.UnOp:
+			if x.Op != token.MUL || x.X != alloc {
+				return nil
+			}
+		case *ssa.MakeClosure:
+			found := false
+			for _, b := range x.Bindings {
+				if b == alloc {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil
+			}
+		default:
+			return nil
+		}
+	}
+	return alloc
+}
+
+func cellSpawnedAtMostOnce(cell *ssa.Alloc, initVal ssa.Value, isSite func(ssa.Instruction) bool, st *state) bool {
+	sawUse := false
+	for _, r := range *cell.Referrers() {
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Store:
+			if x.Addr != cell || x.Val != initVal {
+				return false
+			}
+		case *ssa.UnOp:
+			if x.Op != token.MUL || x.X != cell || !valSpawnedAtMostOnce(x, isSite, st) {
+				return false
+			}
+			sawUse = true
+		case *ssa.MakeClosure:
+			if !singleSpawnClosureOK(x, cell, true, isSite, st) {
+				return false
+			}
+			sawUse = true
+		default:
+			return false
+		}
+	}
+	return sawUse
+}
+
+func valSpawnedAtMostOnce(val ssa.Value, isSite func(ssa.Instruction) bool, st *state) bool {
+	if val.Referrers() == nil {
+		return false
+	}
+	for _, r := range *val.Referrers() {
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.BinOp:
+			if x.Op != token.EQL && x.Op != token.NEQ {
+				return false
+			}
+		case *ssa.Go:
+			if !isSite(x) {
+				return false
+			}
+			if x.Call.Value == val {
+				if usedAsArg(x, val, -1) {
+					return false
+				}
+				continue
+			}
+			callee := x.Call.StaticCallee()
+			if callee == nil || x.Call.IsInvoke() {
+				return false
+			}
+			nPassed := 0
+			for k, a := range x.Call.Args {
+				if a == val {
+					if !synchronousCallsAtMostOnce(callee, k, st, map[*ssa.Function]bool{}) {
+						return false
+					}
+					nPassed++
+				}
+			}
+			if nPassed != 1 {
+				return false
+			}
+		case *ssa.Call:
+			if !isSite(x) {
+				return false
+			}
+			if sp, ok := spawnOf(x); ok && sp.via != "" {
+				if sp.fn != val || usedAsArg(x, val, sp.arg) {
+					return false
+				}
+				continue
+			}
+			callee := x.Call.StaticCallee()
+			if callee == nil {
+				return false
+			}
+			cs := st.summary(callee)
+			nPassed := 0
+			for k, a := range x.Call.Args {
+				if a == val {
+					if !cs.spawns(k) {
+						return false
+					}
+					nPassed++
+				}
+			}
+			if nPassed != 1 || x.Call.Value == val {
+				return false
+			}
+		case *ssa.MakeClosure:
+			if !singleSpawnClosureOK(x, val, false, isSite, st) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func singleSpawnClosureOK(mc *ssa.MakeClosure, target ssa.Value, targetIsCell bool, isSite func(ssa.Instruction) bool, st *state) bool {
+	if mc.Referrers() == nil {
+		return false
+	}
+	var start ssa.Instruction
+	for _, r := range *mc.Referrers() {
+		if _, dbg := r.(*ssa.DebugRef); dbg {
+			continue
+		}
+		if start != nil || !isSite(r) {
+			return false
+		}
+		switch x := r.(type) {
+		case *ssa.Go:
+			if x.Call.Value != mc || usedAsArg(x, mc, -1) {
+				return false
+			}
+		case *ssa.Call:
+			if sp, ok := spawnOf(x); ok && sp.via != "" {
+				if sp.fn != mc || usedAsArg(x, mc, sp.arg) {
+					return false
+				}
+			} else {
+				callee := x.Call.StaticCallee()
+				if callee == nil {
+					return false
+				}
+				cs := st.summary(callee)
+				nPassed := 0
+				for k, a := range x.Call.Args {
+					if a == mc {
+						if !cs.spawns(k) {
+							return false
+						}
+						nPassed++
+					}
+				}
+				if nPassed != 1 || x.Call.Value == mc {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+		start = r
+	}
+	if start == nil {
+		return false
+	}
+	subFn, ok := mc.Fn.(*ssa.Function)
+	if !ok || len(subFn.Blocks) == 0 {
+		return false
+	}
+	for j, bind := range mc.Bindings {
+		if bind != target {
+			continue
+		}
+		if j >= len(subFn.FreeVars) {
+			return false
+		}
+		fv := subFn.FreeVars[j]
+		if targetIsCell {
+			if !freeVarCellCalledSyncAtMostOnce(subFn, fv, st, map[*ssa.Function]bool{}) {
+				return false
+			}
+		} else if !valCalledSyncAtMostOnce(subFn, fv, st, map[*ssa.Function]bool{}) {
+			return false
+		}
+	}
+	return true
+}
+
+func freeVarCellCalledSyncAtMostOnce(fn *ssa.Function, fv *ssa.FreeVar, st *state, seen map[*ssa.Function]bool) bool {
+	if fv == nil || fv.Referrers() == nil {
+		return false
+	}
+	var loads []ssa.Value
+	for _, r := range *fv.Referrers() {
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.UnOp:
+			if x.Op != token.MUL || x.X != fv {
+				return false
+			}
+			loads = append(loads, x)
+		default:
+			return false
+		}
+	}
+	return valsCalledSyncAtMostOnce(fn, loads, st, seen)
+}
+
+func synchronousCallsAtMostOnce(fn *ssa.Function, paramIdx int, st *state, seen map[*ssa.Function]bool) bool {
+	if fn == nil || len(fn.Blocks) == 0 || paramIdx < 0 || paramIdx >= len(fn.Params) || seen[fn] {
+		return false
+	}
+	seen[fn] = true
+	defer delete(seen, fn)
+	return valCalledSyncAtMostOnce(fn, fn.Params[paramIdx], st, seen)
+}
+
+func valCalledSyncAtMostOnce(fn *ssa.Function, v ssa.Value, st *state, seen map[*ssa.Function]bool) bool {
+	if v == nil || v.Referrers() == nil {
+		return false
+	}
+	if cell := singleStoreValueCell(fn, v); cell != nil {
+		return allocCellCalledSyncAtMostOnce(fn, cell, v, st, seen)
+	}
+	return valsCalledSyncAtMostOnce(fn, []ssa.Value{v}, st, seen)
+}
+
+func allocCellCalledSyncAtMostOnce(fn *ssa.Function, cell *ssa.Alloc, initVal ssa.Value, st *state, seen map[*ssa.Function]bool) bool {
+	var vals []ssa.Value
+	for _, r := range *cell.Referrers() {
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.Store:
+			if x.Addr != cell || x.Val != initVal {
+				return false
+			}
+		case *ssa.UnOp:
+			if x.Op != token.MUL || x.X != cell {
+				return false
+			}
+			vals = append(vals, x)
+		case *ssa.MakeClosure:
+			vals = append(vals, cell)
+		default:
+			return false
+		}
+	}
+	return valsCalledSyncAtMostOnce(fn, vals, st, seen)
+}
+
+func valsCalledSyncAtMostOnce(fn *ssa.Function, vals []ssa.Value, st *state, seen map[*ssa.Function]bool) bool {
+	if len(vals) == 0 {
+		return false
+	}
+	for _, b := range fn.Blocks {
+		for _, ins := range b.Instrs {
+			switch x := ins.(type) {
+			case *ssa.Go:
+				return false
+			case *ssa.Call:
+				if _, ok := spawnOf(x); ok {
+					return false
+				}
+				if callee := x.Call.StaticCallee(); callee != nil && !x.Call.IsInvoke() && anyTrue(st.summary(callee).spawnParam) {
+					return false
+				}
+			}
+		}
+	}
+	var actionSites []ssa.Instruction
+	seenMC := map[*ssa.MakeClosure]bool{}
+	for _, v := range vals {
+		_, vIsCell := v.(*ssa.Alloc)
+		if v.Referrers() == nil {
+			continue
+		}
+		for _, r := range *v.Referrers() {
+			switch x := r.(type) {
+			case *ssa.DebugRef:
+			case *ssa.Store:
+				if !vIsCell || x.Addr != v {
+					return false
+				}
+			case *ssa.UnOp:
+				if !vIsCell || x.Op != token.MUL || x.X != v {
+					return false
+				}
+			case *ssa.BinOp:
+				if vIsCell || (x.Op != token.EQL && x.Op != token.NEQ) {
+					return false
+				}
+			case *ssa.Call:
+				if vIsCell {
+					return false
+				}
+				if x.Call.Value == v {
+					if usedAsArg(x, v, -1) {
+						return false
+					}
+					actionSites = append(actionSites, x)
+					continue
+				}
+				callee := x.Call.StaticCallee()
+				if callee == nil || x.Call.IsInvoke() {
+					return false
+				}
+				nPassed := 0
+				for k, a := range x.Call.Args {
+					if a == v {
+						if !synchronousCallsAtMostOnce(callee, k, st, seen) {
+							return false
+						}
+						nPassed++
+					}
+				}
+				if nPassed != 1 {
+					return false
+				}
+				actionSites = append(actionSites, x)
+			case *ssa.Defer:
+				if vIsCell {
+					return false
+				}
+				if x.Call.Value == v {
+					if usedAsArg(x, v, -1) {
+						return false
+					}
+					actionSites = append(actionSites, x)
+					continue
+				}
+				callee := x.Call.StaticCallee()
+				if callee == nil || x.Call.IsInvoke() {
+					return false
+				}
+				nPassed := 0
+				for k, a := range x.Call.Args {
+					if a == v {
+						if !synchronousCallsAtMostOnce(callee, k, st, seen) {
+							return false
+						}
+						nPassed++
+					}
+				}
+				if nPassed != 1 {
+					return false
+				}
+				actionSites = append(actionSites, x)
+			case *ssa.MakeClosure:
+				if seenMC[x] {
+					continue
+				}
+				seenMC[x] = true
+				if x.Referrers() == nil {
+					return false
+				}
+				var callSite ssa.Instruction
+				for _, cr := range *x.Referrers() {
+					if _, dbg := cr.(*ssa.DebugRef); dbg {
+						continue
+					}
+					if callSite != nil {
+						return false
+					}
+					switch cx := cr.(type) {
+					case *ssa.Call:
+						if cx.Call.Value != x || usedAsArg(cx, x, -1) {
+							return false
+						}
+						callSite = cx
+					case *ssa.Defer:
+						if cx.Call.Value != x || usedAsArg(cx, x, -1) {
+							return false
+						}
+						callSite = cx
+					default:
+						return false
+					}
+				}
+				subFn, ok := x.Fn.(*ssa.Function)
+				if callSite == nil || !ok || len(subFn.Blocks) == 0 || seen[subFn] {
+					return false
+				}
+				seen[subFn] = true
+				for j, bind := range x.Bindings {
+					if bind == v {
+						if j >= len(subFn.FreeVars) {
+							delete(seen, subFn)
+							return false
+						}
+						var okSub bool
+						if vIsCell {
+							okSub = freeVarCellCalledSyncAtMostOnce(subFn, subFn.FreeVars[j], st, seen)
+						} else {
+							okSub = valCalledSyncAtMostOnce(subFn, subFn.FreeVars[j], st, seen)
+						}
+						if !okSub {
+							delete(seen, subFn)
+							return false
+						}
+					}
+				}
+				delete(seen, subFn)
+				actionSites = append(actionSites, callSite)
+			default:
+				return false
+			}
+		}
+	}
+	if len(actionSites) == 0 {
+		return false
+	}
+	for _, a := range actionSites {
+		after := reachableAfter(a)
+		for _, b := range actionSites {
+			if after(b) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func waitGroupParamKind(t types.Type) uint8 {
+	ptr, ok := t.Underlying().(*types.Pointer)
+	if !ok {
+		return 0
+	}
+	named, ok := types.Unalias(ptr.Elem()).(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return 0
+	}
+	pkgPath := named.Obj().Pkg().Path()
+	name := named.Obj().Name()
+	if pkgPath == "sync" && name == "WaitGroup" {
+		return 1
+	}
+	if pkgPath == "golang.org/x/sync/errgroup" && name == "Group" {
+		return 2
+	}
+	return 0
+}
+
+func isDirectGroupSpawnOn(call *ssa.Call, wp *ssa.Parameter, wk uint8) bool {
+	callee := call.Call.StaticCallee()
+	if callee == nil || call.Call.IsInvoke() || len(call.Call.Args) < 2 || call.Call.Args[0] != wp {
+		return false
+	}
+	obj, ok := callee.Object().(*types.Func)
+	if !ok {
+		return false
+	}
+	switch obj.Origin().FullName() {
+	case "(*sync.WaitGroup).Go":
+		return wk == 1
+	case "(*golang.org/x/sync/errgroup.Group).Go", "(*golang.org/x/sync/errgroup.Group).TryGo":
+		return wk == 2
+	}
+	return false
+}
+
+// nilGuardedBlocks marks blocks reachable ONLY when param == nil (`if wg == nil { ...; return }`).
+func nilGuardedBlocks(fn *ssa.Function, param *ssa.Parameter) []bool {
+	nonNilReach := make([]bool, len(fn.Blocks))
+	var walk func(b *ssa.BasicBlock)
+	walk = func(b *ssa.BasicBlock) {
+		if nonNilReach[b.Index] {
+			return
+		}
+		nonNilReach[b.Index] = true
+		if len(b.Instrs) > 0 && len(b.Succs) == 2 {
+			if br, ok := b.Instrs[len(b.Instrs)-1].(*ssa.If); ok {
+				if nilSucc := nilBranchSuccIdx(br.Cond, param); nilSucc >= 0 {
+					walk(b.Succs[1-nilSucc])
+					return
+				}
+			}
+		}
+		for _, succ := range b.Succs {
+			walk(succ)
+		}
+	}
+	walk(fn.Blocks[0])
+	onlyNil := make([]bool, len(fn.Blocks))
+	for i := range onlyNil {
+		onlyNil[i] = !nonNilReach[i]
+	}
+	return onlyNil
+}
+
+func nilBranchSuccIdx(cond ssa.Value, param *ssa.Parameter) int {
+	base, neg := unwrapBoolCond(cond)
+	bin, ok := base.(*ssa.BinOp)
+	if !ok || (bin.Op != token.EQL && bin.Op != token.NEQ) {
+		return -1
+	}
+	isNilConst := func(v ssa.Value) bool {
+		c, ok := v.(*ssa.Const)
+		return ok && c.IsNil()
+	}
+	matched := (bin.X == param && isNilConst(bin.Y)) || (bin.Y == param && isNilConst(bin.X))
+	if !matched {
+		return -1
+	}
+	isEq := bin.Op == token.EQL
+	if neg {
+		isEq = !isEq
+	}
+	if isEq {
+		return 0 // Succs[0] is true branch (`param == nil`)
+	}
+	return 1 // Succs[1] is false branch (`param == nil`)
 }

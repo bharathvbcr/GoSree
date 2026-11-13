@@ -279,12 +279,16 @@ func useAfterForGraph(g *graph, s ssa.Instruction, cb *ssa.BasicBlock, w ssa.Val
 		if killed {
 			continue
 		}
+		live := liveSuccs(it.b)
 		for si, succ := range it.b.Succs {
 			if iff, ok := lastInstr(it.b).(*ssa.If); ok && joins[iff] {
 				_, negated := unwrapBoolCond(iff.Cond)
 				if (si == 0) != negated {
 					continue
 				}
+			}
+			if len(live) == 1 && live[0] != succ {
+				continue
 			}
 			// A phi in the successor reads w on the edge from this block.
 			for pi, pred := range succ.Preds {

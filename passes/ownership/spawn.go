@@ -19,6 +19,8 @@ type spawnSite struct {
 	args []ssa.Value
 	// via names the spawning function, or is "" for a go statement.
 	via string
+	// waitRecv overrides the wait receiver for custom WaitGroup/errgroup spawner wrappers.
+	waitRecv ssa.Value
 	spawner
 }
 
@@ -80,8 +82,75 @@ func spawnOf(ins ssa.Instruction) (spawnSite, bool) {
 	return spawnSite{}, false
 }
 
+// spawnSiteOf returns the spawn site ins is, consulting callee summaries in st for custom spawner
+// wrappers (SafeGo, SafeGoWG, etc.) in addition to the built-in spawners table.
+func (st *state) spawnSiteOf(ins ssa.Instruction) (spawnSite, bool) {
+	return st.spawnSiteAt(ins, -1)
+}
+
+func (st *state) spawnSiteAt(ins ssa.Instruction, argHint int) (spawnSite, bool) {
+	if sp, ok := spawnOf(ins); ok {
+		return sp, true
+	}
+	if st == nil {
+		return spawnSite{}, false
+	}
+	call, ok := ins.(*ssa.Call)
+	if !ok || call.Call.IsInvoke() {
+		return spawnSite{}, false
+	}
+	callee := call.Call.StaticCallee()
+	if callee == nil {
+		return spawnSite{}, false
+	}
+	sum := st.summary(callee)
+	cbIdx := -1
+	if argHint >= 0 && argHint < len(call.Call.Args) && sum.spawns(argHint) {
+		cbIdx = argHint
+	} else if argHint < 0 {
+		for i := range call.Call.Args {
+			if sum.spawns(i) {
+				if c, isConst := call.Call.Args[i].(*ssa.Const); isConst && c.IsNil() {
+					continue
+				}
+				cbIdx = i
+			}
+		}
+	}
+	if cbIdx < 0 {
+		return spawnSite{}, false
+	}
+	sp := spawnSite{
+		ins: call,
+		fn:  call.Call.Args[cbIdx],
+		arg: cbIdx,
+		via: calleeName(callee),
+		spawner: spawner{
+			arg:      cbIdx,
+			repeated: !sum.singleSpawn(),
+		},
+	}
+	if sum.waitParam >= 0 && sum.waitParam < len(call.Call.Args) {
+		warg := call.Call.Args[sum.waitParam]
+		if c, isConst := warg.(*ssa.Const); !isConst || !c.IsNil() {
+			switch sum.waitGroupKind() {
+			case 1:
+				sp.wait = "(*sync.WaitGroup).Wait"
+				sp.waitRecv = warg
+			case 2:
+				sp.wait = "(*golang.org/x/sync/errgroup.Group).Wait"
+				sp.waitRecv = warg
+			}
+		}
+	}
+	return sp, true
+}
+
 // receiver returns the value a method spawner was called on.
 func (sp spawnSite) receiver() ssa.Value {
+	if sp.waitRecv != nil {
+		return sp.waitRecv
+	}
 	if c, ok := sp.ins.(*ssa.Call); ok && sp.wait != "" && len(c.Call.Args) > 0 {
 		return c.Call.Args[0]
 	}
@@ -109,8 +178,12 @@ func (sp spawnSite) what(v ssa.Value) string {
 // closure returns the function literal this site starts and its closure value, when the closure is
 // used by this site alone (as the function to run, not as an argument too).
 func (sp spawnSite) closure() (*ssa.Function, *ssa.MakeClosure) {
+	return sp.closureWithState(nil)
+}
+
+func (sp spawnSite) closureWithState(st *state) (*ssa.Function, *ssa.MakeClosure) {
 	mc, ok := sp.fn.(*ssa.MakeClosure)
-	if !ok || soleSpawn(mc, false) != sp.ins {
+	if !ok || soleSpawnWithState(st, mc, false) != sp.ins {
 		return nil, nil
 	}
 	return mc.Fn.(*ssa.Function), mc
@@ -119,13 +192,29 @@ func (sp spawnSite) closure() (*ssa.Function, *ssa.MakeClosure) {
 // soleSpawn returns the spawn site that starts mc when that is mc's only use. With once set it also
 // requires the site to be outside any loop, so each run of the parent starts exactly one instance.
 func soleSpawn(mc *ssa.MakeClosure, once bool) ssa.Instruction {
+	return soleSpawnWithState(nil, mc, once)
+}
+
+func soleSpawnWithState(st *state, mc *ssa.MakeClosure, once bool) ssa.Instruction {
 	var start ssa.Instruction
 	for _, r := range *mc.Referrers() {
 		if _, dbg := r.(*ssa.DebugRef); dbg {
 			continue
 		}
-		sp, ok := spawnOf(r)
+		argHint := -1
+		if callIns, isCall := r.(*ssa.Call); isCall {
+			for i, a := range callIns.Call.Args {
+				if a == mc {
+					argHint = i
+					break
+				}
+			}
+		}
+		sp, ok := st.spawnSiteAt(r, argHint)
 		if !ok || start != nil || sp.fn != mc || usedAsArg(r, mc, sp.arg) {
+			return nil
+		}
+		if once && sp.repeated {
 			return nil
 		}
 		start = r
