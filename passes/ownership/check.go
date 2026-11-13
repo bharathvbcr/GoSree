@@ -45,10 +45,14 @@ func (st *state) checkTransfers(g *graph) {
 
 func (st *state) checkTransfer(g *graph, t transfer) {
 	borrowEscaped := st.checkBorrowEscape(g, t)
+	handlerFlagged := false
 	if sp, ok := spawnOf(t.instr); ok && sp.repeated && t.v == sp.fn && !borrowEscaped {
-		st.checkHandlerWrites(sp, t.pos)
+		handlerFlagged = st.checkHandlerWrites(sp, t.pos)
 	}
 	if borrowEscaped && t.what != "captured by a goroutine" {
+		return
+	}
+	if !borrowEscaped && (st.isSpawnTransfer(t) || isSharedContainerPublish(t)) && st.isAutoSyncType(unwrapTransferVal(t.v).Type()) {
 		return
 	}
 	n := g.val(t.v)
@@ -58,6 +62,16 @@ func (st *state) checkTransfer(g *graph, t transfer) {
 	reg := g.region(n)
 	reachMask := reachableBlocksForTransfer(t)
 	after := reachableAfterTransferWithMask(g, t, reachMask)
+
+	if !borrowEscaped && st.isVerifiedHandlerReg(g, t, reg, after, handlerFlagged) {
+		return
+	}
+	if !borrowEscaped && st.isVerifiedScopedForkJoin(g, t, after, reachMask) {
+		return
+	}
+	if !borrowEscaped && st.isSpawnTransfer(t) && !handlerFlagged && st.isProjectedSyncTransfer(g, t, after) {
+		return
+	}
 
 	var foreign, escape []event
 	for c := range reg {
@@ -86,17 +100,7 @@ func (st *state) checkTransfer(g *graph, t transfer) {
 		}
 	}
 	what := describe(t.v)
-	isForwardedCallback := false
-	if param, ok := t.v.(*ssa.Parameter); ok {
-		if _, isSig := param.Type().Underlying().(*types.Signature); isSig && param.Parent() != nil {
-			for i, p := range param.Parent().Params {
-				if p == param && st.summary(param.Parent()).spawns(i) {
-					isForwardedCallback = true
-					break
-				}
-			}
-		}
-	}
+	isForwardedCallback := st.isForwardedSpawnerTransfer(g, t, foreign)
 	// A variable published by a closure that captured it (t.held): whether it was the closure's
 	// to publish is said in the closure, where the publish is, and not a second time here.
 	if !borrowEscaped && !isForwardedCallback && !t.held && len(foreign) > 0 {
@@ -135,12 +139,35 @@ func (st *state) checkUseAfter(g *graph, t transfer, root *node, reg map[*node]b
 		}
 	}
 	joins := st.joins(g, t)
+	type found struct {
+		w ssa.Value
+		u use
+	}
+	var uses []found
 	for _, w := range vals {
 		if t.freezesToImm && st.directInitOnlyGlobal(w) {
 			continue
 		}
-		u, ok := useAfterForGraph(g, t.instr, t.caseBlock, w, joins, reachMask)
+		wj := joins
+		if len(wj) == 0 {
+			wj = st.joinsForValue(g, t, w)
+		}
+		u, ok := useAfterForGraph(g, t.instr, t.caseBlock, w, wj, reachMask)
 		if !ok {
+			continue
+		}
+		uses = append(uses, found{w, u})
+	}
+	// A use after the move races with the goroutine only if the two touch an overlapping place,
+	// one of them writes, and no mutex both hold excludes them (footprint.go). When that is proved
+	// for every access the sender makes, a use of memory the proof followed is not reported.
+	var verdict moveVerdict
+	if len(uses) > 0 || len(g.defers) > 0 {
+		verdict = st.refineMove(g, t, joins, vals)
+	}
+	for _, f := range uses {
+		w, u := f.w, f.u
+		if verdict.benign && verdict.covered[w] {
 			continue
 		}
 		cat := UseAfter
@@ -152,7 +179,887 @@ func (st *state) checkUseAfter(g *graph, t transfer, root *node, reg map[*node]b
 		st.report(u.pos, cat, fmt.Sprintf("%s is used after it was %s%s%s",
 			describe(w), t.what, st.at(t.pos), note))
 	}
-	st.checkDeferredUse(g, t, reg, after)
+	st.checkDeferredUse(g, t, reg, after, verdict)
+}
+
+func (st *state) isSpawnTransfer(t transfer) bool {
+	if _, isGo := t.instr.(*ssa.Go); isGo {
+		return true
+	}
+	_, ok := st.spawnSiteAt(t.instr, t.index)
+	return ok
+}
+
+func isSharedContainerPublish(t transfer) bool {
+	return strings.HasPrefix(t.what, "published via ") || strings.HasPrefix(t.what, "stored in shared ")
+}
+
+func unwrapTransferVal(v ssa.Value) ssa.Value {
+	for v != nil {
+		switch x := v.(type) {
+		case *ssa.MakeInterface:
+			v = x.X
+		case *ssa.ChangeInterface:
+			v = x.X
+		default:
+			return v
+		}
+	}
+	return nil
+}
+
+func pointsToSet(g *graph, n *node) map[*node]bool {
+	out := map[*node]bool{}
+	if n == nil {
+		return out
+	}
+	for _, p := range g.pointsTo(n) {
+		out[p] = true
+	}
+	return out
+}
+
+func pointsToIntersects(g *graph, c *node, targetPts map[*node]bool) bool {
+	if c == nil {
+		return false
+	}
+	for _, p := range g.pointsTo(c) {
+		if targetPts[p] {
+			return true
+		}
+	}
+	return false
+}
+
+func (st *state) nodeWriteMayTouchTarget(g *graph, targetPts map[*node]bool, c *node, ins ssa.Instruction, allowSiblingRepeatedReg bool) bool {
+	if allowSiblingRepeatedReg {
+		if sp2, ok := spawnOf(ins); ok && sp2.repeated && strings.Contains(sp2.via, "net/http.") {
+			return false
+		}
+		if call, isCall := ins.(*ssa.Call); isCall && !call.Call.IsInvoke() {
+			if callee := call.Call.StaticCallee(); callee != nil {
+				sum := st.summary(callee)
+				if !sum.pessimistic {
+					mayNonReg := false
+					for ai, arg := range call.Call.Args {
+						if an := g.nodes[arg]; an != nil && pointsToIntersects(g, an.find(), targetPts) && sum.writesNonReg(ai) {
+							mayNonReg = true
+							break
+						}
+					}
+					if !mayNonReg {
+						return false
+					}
+				}
+			}
+		}
+	}
+	if targetPts[c] {
+		return true
+	}
+	if !pointsToIntersects(g, c, targetPts) {
+		return false
+	}
+	if _, isDirect := writeOf(ins); isDirect {
+		return false
+	}
+	return true
+}
+
+func (st *state) deferMayWriteTarget(g *graph, d *ssa.Defer, targetPts map[*node]bool) bool {
+	cc := d.Common()
+	if !cc.IsInvoke() {
+		if callee := cc.StaticCallee(); callee != nil {
+			sum := st.summary(callee)
+			if !sum.pessimistic {
+				for ai, arg := range cc.Args {
+					if an := g.nodes[arg]; an != nil && pointsToIntersects(g, an.find(), targetPts) && (sum.writes(ai) || sum.spawns(ai)) {
+						return true
+					}
+				}
+				return false
+			}
+		}
+		if mc, isMC := cc.Value.(*ssa.MakeClosure); isMC {
+			if fn, ok := mc.Fn.(*ssa.Function); ok && len(fn.Blocks) > 0 {
+				sum := st.summary(fn)
+				if !sum.pessimistic {
+					fg := st.graphOf(fn)
+					for bi, bnd := range mc.Bindings {
+						if bn := g.nodes[bnd]; bn != nil && pointsToIntersects(g, bn.find(), targetPts) {
+							if sum.writesFree(bi) || (bi < len(fn.FreeVars) && st.childLeaksOrTransfersFreeVar(fg, fn.FreeVars[bi])) {
+								return true
+							}
+						}
+					}
+					for ai, arg := range cc.Args {
+						if an := g.nodes[arg]; an != nil && pointsToIntersects(g, an.find(), targetPts) && (sum.writes(ai) || sum.spawns(ai)) {
+							return true
+						}
+					}
+					return false
+				}
+			}
+		}
+	}
+	var opBuf [8]*ssa.Value
+	for _, op := range d.Operands(opBuf[:0]) {
+		if op != nil && *op != nil {
+			if dn := g.nodes[*op]; dn != nil && pointsToIntersects(g, dn.find(), targetPts) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (st *state) isForwardedSpawnerTransfer(g *graph, t transfer, foreign []event) bool {
+	if !st.isSpawnTransfer(t) || len(foreign) == 0 || g == nil || g.fn == nil {
+		return false
+	}
+	sum := st.summary(g.fn)
+	for _, e := range foreign {
+		if e.param < 0 || !sum.spawns(e.param) {
+			return false
+		}
+	}
+	return true
+}
+
+func (st *state) isGuardedGlobal(gl *ssa.Global) bool {
+	if gl == nil {
+		return false
+	}
+	v, ok := gl.Object().(*types.Var)
+	if !ok {
+		return false
+	}
+	return st.ix.Guarded[v] != nil || st.autoGuarded[v] != nil
+}
+
+func (st *state) handlerHasUnguardedHiddenWrite(hb handlerBody) bool {
+	seen := map[*ssa.Function]bool{}
+	var visit func(fn *ssa.Function, isAnonInHandler bool) bool
+	visit = func(fn *ssa.Function, isAnonInHandler bool) bool {
+		if fn == nil || len(fn.Blocks) == 0 || seen[fn] {
+			return false
+		}
+		seen[fn] = true
+		if len(seen) > 128 {
+			return true
+		}
+		for _, b := range fn.Blocks {
+			for _, ins := range b.Instrs {
+				if _, isGo := ins.(*ssa.Go); isGo {
+					fg := st.graphOf(fn)
+					for _, tr := range fg.transfers {
+						if tr.instr != ins {
+							continue
+						}
+						if st.isAutoSyncType(unwrapTransferVal(tr.v).Type()) {
+							continue
+						}
+						rm := reachableBlocksForTransfer(tr)
+						af := reachableAfterTransferWithMask(fg, tr, rm)
+						if !st.isVerifiedScopedForkJoin(fg, tr, af, rm) {
+							return true
+						}
+					}
+					continue
+				}
+				if sp2, isSp := st.spawnSiteOf(ins); isSp {
+					if sp2.repeated {
+						if !strings.Contains(sp2.via, "net/http.") {
+							return true
+						}
+						continue
+					}
+					fg := st.graphOf(fn)
+					for _, tr := range fg.transfers {
+						if tr.instr != ins {
+							continue
+						}
+						if st.isAutoSyncType(unwrapTransferVal(tr.v).Type()) {
+							continue
+						}
+						rm := reachableBlocksForTransfer(tr)
+						af := reachableAfterTransferWithMask(fg, tr, rm)
+						if !st.isVerifiedScopedForkJoin(fg, tr, af, rm) {
+							return true
+						}
+					}
+					continue
+				}
+				if isAnonInHandler {
+					if w, isW := writeOf(ins); isW {
+						if _, guarded := st.slotOf(w.addr); !guarded && !isFreshInFn(fn, w.addr) {
+							return true
+						}
+					}
+				}
+				if mc, isMC := ins.(*ssa.MakeClosure); isMC {
+					if anon, ok := mc.Fn.(*ssa.Function); ok && st.isAnalyzableClosureFn(anon) && !st.isProjectedSyncClosureInFn(fn, mc) {
+						hasSharedBind := false
+						for _, bnd := range mc.Bindings {
+							if !st.cls.Shareable(bnd.Type()) && !st.isAutoSyncType(bnd.Type()) && !isFreshInFn(fn, bnd) {
+								hasSharedBind = true
+								break
+							}
+						}
+						if hasSharedBind && visit(anon, true) {
+							return true
+						}
+					}
+				}
+				if call, isCall := ins.(ssa.CallInstruction); isCall && !call.Common().IsInvoke() {
+					if callee := call.Common().StaticCallee(); callee != nil && callee.Pkg == st.ssa.Pkg && len(callee.Blocks) > 0 {
+						if visit(callee, isAnonInHandler) {
+							return true
+						}
+					} else if callee != nil {
+						cs := st.summary(callee)
+						if isAnonInHandler {
+							for ai, arg := range call.Common().Args {
+								if !st.cls.Shareable(arg.Type()) && !st.isAutoSyncType(arg.Type()) && !isFreshInFn(fn, arg) && cs.writes(ai) {
+									return true
+								}
+							}
+						} else if callee.Pkg != st.ssa.Pkg {
+							for ai, arg := range call.Common().Args {
+								if !st.cls.Shareable(arg.Type()) && !st.isAutoSyncType(arg.Type()) && !isFreshInFn(fn, arg) && (cs.pessimistic || cs.spawns(ai)) {
+									return true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		return false
+	}
+	return visit(hb.fn, false)
+}
+
+func isFreshInFn(fn *ssa.Function, v ssa.Value) bool {
+	for depth := 0; depth < 8 && v != nil; depth++ {
+		switch x := v.(type) {
+		case *ssa.Alloc:
+			if x.Parent() != fn {
+				return false
+			}
+			// A heap box for a parameter (`t0 = new T (param); *t0 = param`) holds caller memory, not fresh memory.
+			if x.Referrers() != nil {
+				for _, r := range *x.Referrers() {
+					if s, isStore := r.(*ssa.Store); isStore && s.Addr == x {
+						if _, isParam := s.Val.(*ssa.Parameter); isParam {
+							return false
+						}
+						if _, isFV := s.Val.(*ssa.FreeVar); isFV {
+							return false
+						}
+					}
+				}
+			}
+			return true
+		case *ssa.MakeSlice, *ssa.MakeMap:
+			return x.Parent() == fn
+		case *ssa.FieldAddr:
+			v = x.X
+		case *ssa.IndexAddr:
+			v = x.X
+		case *ssa.Slice:
+			v = x.X
+		case *ssa.ChangeType:
+			v = x.X
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+func (st *state) handlerForeignCallersClean(g *graph, reg map[*node]bool, targetPts map[*node]bool) bool {
+	var hasForeignParam bool
+	paramSet := map[int]bool{}
+	for c := range reg {
+		for _, e := range c.events {
+			if e.global != nil && (st.isInitOnlyImmutableGlobal(e.global) || st.isGuardedGlobal(e.global)) {
+				continue
+			}
+			if e.kind == evReturn && pointsToIntersects(g, c, targetPts) && !st.isSafeReturnEvent(g, e, targetPts) {
+				return false
+			}
+			if e.kind == evForeign {
+				if e.param < 0 {
+					return false
+				}
+				hasForeignParam = true
+				paramSet[e.param] = true
+			}
+		}
+	}
+	if !hasForeignParam {
+		return true
+	}
+	if st.allParamsSharedRead(g.fn, paramSet) {
+		return true
+	}
+	if g.fn == nil || g.fn.Synthetic != "" {
+		return false
+	}
+	if obj, ok := g.fn.Object().(*types.Func); ok && obj.Exported() && st.pass.Pkg.Name() != "main" {
+		return false
+	}
+	// g.fn is unexported or in package main: verify all callers in st.allFns.
+	if g.fn.Parent() != nil {
+		return false
+	}
+	for _, caller := range st.allFns {
+		if len(caller.Blocks) == 0 {
+			continue
+		}
+		for _, b := range caller.Blocks {
+			for _, ins := range b.Instrs {
+				if mc, isMC := ins.(*ssa.MakeClosure); isMC && mc.Fn == g.fn {
+					return false
+				}
+				if _, isGo := ins.(*ssa.Go); isGo && ins.(*ssa.Go).Call.StaticCallee() == g.fn {
+					return false
+				}
+				if df, isDef := ins.(*ssa.Defer); isDef && df.Call.StaticCallee() == g.fn {
+					return false
+				}
+				call, isCall := ins.(*ssa.Call)
+				if !isCall || call.Call.IsInvoke() {
+					continue
+				}
+				if call.Call.StaticCallee() != g.fn {
+					for _, a := range call.Call.Args {
+						if a == g.fn {
+							return false
+						}
+					}
+					continue
+				}
+				cg := st.graphOf(caller)
+				afterCall := reachableAfter(call)
+				for pIdx := range paramSet {
+					if pIdx >= len(call.Call.Args) {
+						return false
+					}
+					arg := call.Call.Args[pIdx]
+					if st.cls.Shareable(arg.Type()) || cg.isAutoSyncCapture(call, arg) {
+						continue
+					}
+					an := cg.val(arg)
+					if an == nil {
+						continue
+					}
+					aReg := cg.region(an)
+					aPts := pointsToSet(cg, an)
+					for cc := range aReg {
+						for _, ce := range cc.events {
+							if ce.global != nil && (st.isInitOnlyImmutableGlobal(ce.global) || st.isGuardedGlobal(ce.global)) {
+								continue
+							}
+							if ce.kind == evForeign && pointsToIntersects(cg, cc, aPts) {
+								if ce.param >= 0 && st.sums[caller] != nil && st.sums[caller].isSharedRead(ce.param) {
+									continue
+								}
+								return false
+							}
+							if ce.kind == evReturn && pointsToIntersects(cg, cc, aPts) && !st.isSafeReturnEvent(cg, ce, aPts) {
+								return false
+							}
+							if ce.kind == evWrite && ce.instr != nil && st.nodeWriteMayTouchTarget(cg, aPts, cc, ce.instr, true) {
+								if afterCall(ce.instr) {
+									return false
+								}
+								if _, isDefer := ce.instr.(*ssa.Defer); isDefer {
+									return false
+								}
+								if st.isUnjoinedConcurrentSpawnBefore(cg, ce.instr, call) {
+									return false
+								}
+							}
+						}
+					}
+					for _, df := range cg.defers {
+						if st.deferMayWriteTarget(cg, df, aPts) {
+							return false
+						}
+					}
+				}
+			}
+		}
+	}
+	return true
+}
+
+// isVerifiedHandlerReg (Mode H) reports whether t is a repeated HTTP handler registration whose
+// handler bodies are completely resolved in this program, raised zero SAFE008 / incomplete
+// findings, perform zero unguarded writes to their shared roots, and whose registering function
+// performs no concurrent or post-registration writes to the shared region.
+func (st *state) isVerifiedHandlerReg(g *graph, t transfer, reg map[*node]bool, after func(ssa.Instruction) bool, handlerFlagged bool) bool {
+	if handlerFlagged || g == nil {
+		return false
+	}
+	sp, ok := spawnOf(t.instr)
+	if !ok || !sp.repeated || t.v != sp.fn {
+		return false
+	}
+	prog := st.ssa.Pkg.Prog
+	if !hasCompleteHandlerRoots(prog, sp) {
+		return false
+	}
+	roots := handlerRoots(prog, sp)
+	for _, hb := range roots {
+		if len(hb.fn.Blocks) == 0 {
+			return false
+		}
+		hbSum := st.summary(hb.fn)
+		if hbSum.pessimistic {
+			return false
+		}
+		if st.handlerRootsHaveCutCall(hb.fn, hb.roots) {
+			return false
+		}
+		if st.handlerHasUnguardedHiddenWrite(hb) {
+			return false
+		}
+	}
+	targetPts := pointsToSet(g, g.val(t.v))
+	if g.hasCutCallTouching(targetPts) {
+		return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
+	}
+	if !st.handlerForeignCallersClean(g, reg, targetPts) {
+		return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
+	}
+	for c := range reg {
+		for _, e := range c.events {
+			if e.global != nil && st.mutatedGlobals[e.global] && !st.isGuardedGlobal(e.global) {
+				return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
+			}
+			if e.kind == evWrite && e.instr != nil && st.nodeWriteMayTouchTarget(g, targetPts, c, e.instr, true) {
+				if after(e.instr) {
+					return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
+				}
+				if _, isDefer := e.instr.(*ssa.Defer); isDefer {
+					return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
+				}
+				if st.isUnjoinedConcurrentSpawnBefore(g, e.instr, t.instr) {
+					return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
+				}
+			}
+		}
+	}
+	for _, d := range g.defers {
+		if st.deferMayWriteTarget(g, d, targetPts) {
+			return st.isPerBindingVerifiedHandlerReg(g, t, sp, after)
+		}
+	}
+	return true
+}
+
+func (st *state) isUnjoinedConcurrentSpawnBefore(g *graph, spawnIns, beforeIns ssa.Instruction) bool {
+	_, isGo := spawnIns.(*ssa.Go)
+	if !isGo {
+		if _, ok := st.spawnSiteOf(spawnIns); !ok {
+			return false
+		}
+	}
+	for _, other := range g.transfers {
+		if other.instr != spawnIns {
+			continue
+		}
+		joins := st.joins(g, other)
+		if !everyPathReachesJoinBefore(g, spawnIns, beforeIns, joins) {
+			return true
+		}
+	}
+	return false
+}
+
+func everyPathReachesJoinBefore(g *graph, startIns, targetIns ssa.Instruction, joins map[ssa.Instruction]bool) bool {
+	if len(joins) == 0 || startIns.Parent() == nil || startIns.Parent() != targetIns.Parent() {
+		return false
+	}
+	fn := startIns.Parent()
+	visited := make([]bool, len(fn.Blocks))
+	type item struct {
+		b    *ssa.BasicBlock
+		from int
+	}
+	queue := []item{{startIns.Block(), g.idxOf(startIns) + 1}}
+	for len(queue) > 0 {
+		it := queue[0]
+		queue = queue[1:]
+		stopped := false
+		for i := it.from; i < len(it.b.Instrs); i++ {
+			ins := it.b.Instrs[i]
+			if ins == targetIns {
+				return false
+			}
+			if joins[ins] {
+				if _, isIf := ins.(*ssa.If); !isIf {
+					stopped = true
+					break
+				}
+			}
+		}
+		if stopped {
+			continue
+		}
+		live := liveSuccs(it.b)
+		for si, succ := range it.b.Succs {
+			if iff, ok := lastInstr(it.b).(*ssa.If); ok && joins[iff] {
+				_, negated := unwrapBoolCond(iff.Cond)
+				if (si == 0) != negated {
+					continue
+				}
+			}
+			if len(live) == 1 && live[0] != succ {
+				continue
+			}
+			if succ.Index >= 0 && succ.Index < len(visited) {
+				if visited[succ.Index] {
+					continue
+				}
+				visited[succ.Index] = true
+			}
+			queue = append(queue, item{succ, 0})
+		}
+	}
+	return true
+}
+
+func everyPathJoinsBeforeReturn(g *graph, t transfer, joins map[ssa.Instruction]bool) bool {
+	if len(joins) == 0 || g == nil || g.fn == nil {
+		return false
+	}
+	inWindow := instrsAfter(g, t, joins, nil)
+	hasReturn := false
+	for _, b := range g.fn.Blocks {
+		if len(b.Instrs) == 0 {
+			continue
+		}
+		if ret, ok := b.Instrs[len(b.Instrs)-1].(*ssa.Return); ok {
+			hasReturn = true
+			if inWindow[ret] {
+				return false
+			}
+		}
+	}
+	return hasReturn
+}
+
+// isVerifiedScopedForkJoin (Mode J) proves structured-concurrency safety for a single-shot
+// goroutine closure whose parent joins it on every path before returning (WaitGroup.Go,
+// errgroup.Group.Go, SafeGoWG, or channel join), checking each captured binding individually as
+// either Shareable/AutoSync, scoped read-only, or scoped fresh-owned.
+func (st *state) isVerifiedScopedForkJoin(g *graph, t transfer, after func(ssa.Instruction) bool, reachMask []bool) bool {
+	if g == nil {
+		return false
+	}
+	if goIns, isGo := t.instr.(*ssa.Go); isGo && (t.index >= 0 || len(goIns.Call.Args) > 0) {
+		return false
+	}
+	sp, ok := st.spawnSiteAt(t.instr, t.index)
+	if !ok || sp.repeated || t.v != sp.fn {
+		return false
+	}
+	mc, ok := t.v.(*ssa.MakeClosure)
+	if !ok {
+		return false
+	}
+	fn, ok := mc.Fn.(*ssa.Function)
+	if !ok || len(fn.Blocks) == 0 {
+		return false
+	}
+	joins := st.joins(g, t)
+	if len(joins) == 0 {
+		joins = st.spawnerWaitJoins(g, t)
+	}
+	if !everyPathJoinsBeforeReturn(g, t, joins) {
+		return false
+	}
+	cs := st.summary(fn)
+	if cs.pessimistic {
+		return false
+	}
+	fg := st.graphOf(fn)
+	inWindow := instrsAfter(g, t, joins, nil)
+	inWinFn := func(ins ssa.Instruction) bool { return inWindow[ins] }
+	for j, b := range mc.Bindings {
+		if j >= len(fn.FreeVars) {
+			return false
+		}
+		fv := fn.FreeVars[j]
+		if st.cls.Shareable(b.Type()) || g.isAutoSyncCapture(t.instr, b) {
+			continue
+		}
+		if bn := g.val(b); bn != nil && g.hasCutCallTouching(pointsToSet(g, bn)) {
+			return false
+		}
+		if fvn := fg.val(fv); fvn != nil && fg.hasCutCallTouching(pointsToSet(fg, fvn)) {
+			return false
+		}
+		if st.isProjectedSyncBinding(g, t, fn, j, b, inWinFn, -1) {
+			continue
+		}
+		if !st.childNonFormatLeaksFreeVar(fg, fv, j) {
+			if !cs.writesFree(j) && st.isScopedReadOnlyInParent(g, t, b, inWindow) {
+				continue
+			}
+			if st.isSingleRootMoveBenign(g, t, fn, mc, j, b, joins, after, reachMask) {
+				continue
+			}
+		}
+		if helperMC, isMC := b.(*ssa.MakeClosure); isMC && helperMC.Parent() == g.fn && freeVarOnlyCalledDirectly(fv) {
+			if st.isHelperClosureBindingBenign(g, t, helperMC, joins, after, reachMask) {
+				continue
+			}
+		}
+		return false
+	}
+	return true
+}
+
+func (st *state) childLeaksOrTransfersFreeVar(fg *graph, fv *ssa.FreeVar) bool {
+	n := fg.val(fv)
+	if n == nil {
+		return false
+	}
+	reg := fg.region(n)
+	for c := range reg {
+		for _, e := range c.events {
+			if e.kind == evTransfer {
+				return true
+			}
+			if e.kind == evEscape && !fg.formatsOnly(e, reg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (st *state) childNonFormatLeaksFreeVar(fg *graph, fv *ssa.FreeVar, fvIdx int) bool {
+	n := fg.val(fv)
+	if n == nil {
+		return false
+	}
+	reg := fg.region(n)
+	for c := range reg {
+		for _, e := range c.events {
+			switch e.kind {
+			case evWrite:
+				continue
+			case evForeign:
+				if e.free != fvIdx {
+					return true
+				}
+			case evEscape:
+				if !fg.formatsOnly(e, reg) {
+					return true
+				}
+			default:
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (st *state) isScopedReadOnlyInParent(g *graph, t transfer, b ssa.Value, inWindow map[ssa.Instruction]bool) bool {
+	bn := g.val(b)
+	if bn == nil {
+		return true
+	}
+	bReg := g.region(bn)
+	targetPts := pointsToSet(g, bn)
+	for c := range bReg {
+		for _, e := range c.events {
+			if e.global != nil && st.mutatedGlobals[e.global] && !st.isGuardedGlobal(e.global) {
+				return false
+			}
+			if e.kind == evWrite && e.instr != nil && st.nodeWriteMayTouchTarget(g, targetPts, c, e.instr, false) {
+				if inWindow[e.instr] {
+					return false
+				}
+				if _, isDefer := e.instr.(*ssa.Defer); isDefer {
+					return false
+				}
+				if e.instr != t.instr && st.isUnjoinedConcurrentSpawnBefore(g, e.instr, t.instr) {
+					return false
+				}
+			}
+		}
+	}
+	for _, d := range g.defers {
+		if st.deferMayWriteTarget(g, d, targetPts) {
+			return false
+		}
+	}
+	return true
+}
+
+func (st *state) isHelperClosureBindingBenign(g *graph, t transfer, helperMC *ssa.MakeClosure, joins map[ssa.Instruction]bool, after func(ssa.Instruction) bool, reachMask []bool) bool {
+	helperFn, ok := helperMC.Fn.(*ssa.Function)
+	if !ok || len(helperFn.Blocks) == 0 {
+		return false
+	}
+	hs := st.summary(helperFn)
+	if hs.pessimistic {
+		return false
+	}
+	hg := st.graphOf(helperFn)
+	inWindow := instrsAfter(g, t, joins, nil)
+	for k, hb := range helperMC.Bindings {
+		if k >= len(helperFn.FreeVars) {
+			return false
+		}
+		if st.cls.Shareable(hb.Type()) || g.isAutoSyncCapture(t.instr, hb) {
+			continue
+		}
+		hfv := helperFn.FreeVars[k]
+		if hbn := g.val(hb); hbn != nil && g.hasCutCallTouching(pointsToSet(g, hbn)) {
+			return false
+		}
+		if hfvn := hg.val(hfv); hfvn != nil && hg.hasCutCallTouching(pointsToSet(hg, hfvn)) {
+			return false
+		}
+		if st.childLeaksOrTransfersFreeVar(hg, hfv) || hs.freeLeaks(k) {
+			return false
+		}
+		if !hs.writesFree(k) && st.isScopedReadOnlyInParent(g, t, hb, inWindow) {
+			continue
+		}
+		if st.isSingleRootMoveBenign(g, t, helperFn, helperMC, k, hb, joins, after, reachMask) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func (st *state) isSingleRootMoveBenign(g *graph, t transfer, fn *ssa.Function, mc *ssa.MakeClosure, bindIdx int, b ssa.Value, joins map[ssa.Instruction]bool, after func(ssa.Instruction) bool, reachMask []bool) bool {
+	if bn := g.val(b); bn != nil {
+		for c := range g.region(bn) {
+			for _, e := range c.events {
+				if e.kind == evForeign {
+					return false
+				}
+			}
+		}
+	}
+	loopHdrs := map[int64]*ssa.BasicBlock{}
+	fv := fn.FreeVars[bindIdx]
+	d, cellLoads, unwrappedCell := unwrapDerivedPlaceCell(fv, b, t.instr, joins, loopHdrs)
+	if !unwrappedCell {
+		var ok bool
+		d, ok = moveRootAt(b, t.instr, joins, loopHdrs)
+		if !ok || d.root.Parent() != g.fn {
+			return false
+		}
+	} else if d.root.Parent() != g.fn {
+		return false
+	}
+	parent := &fpFrame{fn: g.fn}
+	var gs *guardState
+	if st.hasLockOps(st.allFns) {
+		gs = st.ensureGuardSummaries(st.allFns)
+	}
+	child := &fpWalker{st: st, gs: gs, budget: fpBudget, spawnSite: t.instr, joins: joins, loopHdrs: loopHdrs, covered: map[ssa.Value]bool{}, seen: map[fpSeenKey]bool{}}
+	inner := &fpFrame{fn: fn, parent: parent, mc: mc, site: t.instr}
+	if ci, ok := t.instr.(ssa.CallInstruction); ok {
+		inner.call = ci
+	}
+	if unwrappedCell {
+		for _, ld := range cellLoads {
+			child.walk(inner, ld, d)
+			if child.top {
+				return false
+			}
+		}
+	} else {
+		child.walk(inner, fv, d)
+	}
+	if child.top {
+		return false
+	}
+	sender := &fpWalker{st: st, gs: gs, budget: fpBudget, allowReturn: true, spawnSite: t.instr, joins: joins, loopHdrs: loopHdrs, covered: map[ssa.Value]bool{}, seen: map[fpSeenKey]bool{}}
+	sender.walk(parent, d.root, desig{root: d.root})
+	if sender.top {
+		return false
+	}
+	def, _ := d.root.(ssa.Instruction)
+	afterRoot := instrsAfter(g, t, joins, def)
+	if afterRoot[t.instr] {
+		var selfLoopDisjoint func(int64) bool
+		if len(loopHdrs) > 0 {
+			selfLoopDisjoint = func(loopID int64) bool {
+				hdr := loopHdrs[loopID]
+				return hdr != nil && !canReachInstrWithoutBlockOrJoins(g.fn, t.instr, t.instr, hdr, joins)
+			}
+		}
+		for _, c1 := range child.acc {
+			for _, c2 := range child.acc {
+				if conflictsWithLoop(c1, c2, selfLoopDisjoint) {
+					return false
+				}
+			}
+		}
+	}
+	for _, a := range sender.acc {
+		if !a.exit && !afterRoot[a.site] && !(a.site != t.instr && st.isUnjoinedConcurrentSpawnBefore(g, a.site, t.instr)) {
+			continue
+		}
+		var loopDisjoint func(int64) bool
+		if !a.exit && a.site != nil && len(loopHdrs) > 0 &&
+			!(a.site != t.instr && st.isUnjoinedConcurrentSpawnBefore(g, a.site, t.instr)) {
+			loopDisjoint = func(loopID int64) bool {
+				hdr := loopHdrs[loopID]
+				return hdr != nil && !canReachInstrWithoutBlockOrJoins(g.fn, t.instr, a.site, hdr, joins)
+			}
+		}
+		for _, c := range child.acc {
+			if conflictsWithLoop(a, c, loopDisjoint) {
+				return false
+			}
+		}
+	}
+	if bn := g.val(b); bn != nil {
+		bReg := g.region(bn)
+		for w, n := range g.nodes {
+			if n == nil || !bReg[n.find()] {
+				continue
+			}
+			switch w.(type) {
+			case *ssa.Global, *ssa.Const, *ssa.Function:
+				continue
+			}
+			if _, used := useAfterForGraph(g, t.instr, t.caseBlock, w, joins, reachMask); used && !sender.covered[w] {
+				return false
+			}
+		}
+		if len(g.defers) > 0 {
+			var opBuf [8]*ssa.Value
+			for _, df := range g.defers {
+				if after(df) {
+					continue
+				}
+				for _, op := range df.Operands(opBuf[:0]) {
+					if op != nil && *op != nil {
+						if dn := g.nodes[*op]; dn != nil && bReg[dn.find()] && !sender.covered[*op] {
+							return false
+						}
+					}
+				}
+			}
+		}
+	}
+	return true
 }
 
 func compareSSAValOrder(g *graph, a, b ssa.Value) int {
@@ -192,7 +1099,7 @@ func compareSSAValOrder(g *graph, a, b ssa.Value) int {
 // checkDeferredUse reports deferred calls registered before a move that touch the moved memory: they
 // run when the function returns, which is after the move. (A defer registered after the move is an
 // ordinary use and checkUseAfter reports it.)
-func (st *state) checkDeferredUse(g *graph, t transfer, reg map[*node]bool, after func(ssa.Instruction) bool) {
+func (st *state) checkDeferredUse(g *graph, t transfer, reg map[*node]bool, after func(ssa.Instruction) bool, verdict moveVerdict) {
 	if len(g.defers) == 0 {
 		return
 	}
@@ -203,6 +1110,11 @@ func (st *state) checkDeferredUse(g *graph, t transfer, reg map[*node]bool, afte
 		}
 		for _, op := range d.Operands(opBuf[:0]) {
 			if op == nil || *op == nil {
+				continue
+			}
+			// A deferred access the footprint followed was checked against the goroutine, as
+			// running at exit.
+			if verdict.benign && verdict.covered[*op] {
 				continue
 			}
 			if n := g.nodes[*op]; n != nil && reg[n.find()] {

@@ -24,7 +24,10 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"slices"
 	"strings"
 
 	"golang.org/x/tools/go/analysis"
@@ -155,7 +158,7 @@ type state struct {
 	// graphs caches the alias graph of each function once summaries are final; the fork-join rule
 	// reads a goroutine body's graph while checking its parent.
 	graphs    map[*ssa.Function]*graph
-	joinCache map[ssa.Instruction]map[ssa.Instruction]bool
+	joinCache map[joinCacheKey]map[ssa.Instruction]bool
 	// localGuards maps the cells of guarded local variables (their Alloc, and the free variables of
 	// closures that capture them) to their guard.
 	localGuards    map[ssa.Value]localGuard
@@ -186,6 +189,34 @@ type state struct {
 	// enclosing function is walked once, not once per identifier.
 	litBindings map[ast.Node]map[*types.Var][]*ast.FuncLit
 	litBorrows  map[litKey][]capturedBorrow
+
+	// allFns are the functions of the package the pass checks (sourceFuncs); the access footprints
+	// of moves (footprint.go) read their lock summaries.
+	allFns []*ssa.Function
+
+	// autoGuarded, autoHolds, and cancelSafeVars hold proven mutex-encapsulated unexported fields
+	// and package variables inferred from SSA lockset dominance (autoguard.go).
+	autoGuarded          map[*types.Var]*types.Var
+	paramAutoGuarded     map[*types.Var]*types.Var
+	autoHolds            map[*types.Func]autoHoldInfo
+	cancelSafeVars       map[*types.Var]bool
+	autoSyncTypes        map[*types.TypeName]bool
+	valueAutoSyncTypes   map[*types.TypeName]bool
+	genericAutoSyncTypes map[*types.TypeName]bool
+	roLocalFields        map[*types.Var]bool
+	exposedLocalTypes    map[*types.TypeName]bool
+	firewallFields       map[*types.Var]bool
+	frozenFields         map[*types.Var]bool
+	firstClassFuncs      map[*ssa.Function]bool
+	importedAutoSync     map[importedSyncKey]bool
+	writeOnceInit        map[*ssa.Function]bool
+	autoGuardsVerified   bool
+	dryRun               bool
+}
+
+type importedSyncKey struct {
+	tn      *types.TypeName
+	wantPtr bool
 }
 
 // graphOf returns fn's alias graph. Call it only after computeSummaries: graphs built during the
@@ -219,7 +250,7 @@ func run(pass *analysis.Pass) (any, error) {
 		suppressed: map[reportKey]bool{},
 
 		graphs:    map[*ssa.Function]*graph{},
-		joinCache: map[ssa.Instruction]map[ssa.Instruction]bool{},
+		joinCache: map[joinCacheKey]map[ssa.Instruction]bool{},
 	}
 	if err := checkCallTables(pass.Pkg); err != nil {
 		return nil, err
@@ -237,11 +268,46 @@ func run(pass *analysis.Pass) (any, error) {
 	st.cls = st.newClassifier()
 
 	fns := sourceFuncs(st.ssa)
+	st.allFns = fns
 	st.localGuards = st.guardedCells(fns)
 	st.contracts = st.buildContractIndex(fns)
+	if isGOROOTPkg(pass) {
+		if len(pass.Analyzer.FactTypes) > 0 {
+			st.computeSummaries(fns)
+			st.exportFacts(fns)
+		}
+		return st.stats, nil
+	}
+	st.inferAutoGuards(fns)
 	st.computeSummaries(fns)
-	st.exportFacts(fns)
+	st.refineAutoGuardsPostSummaries(fns)
+	st.autoGuardsVerified = true
+	clear(st.writeOnceInit)
+	clear(st.graphs)
+	if len(st.autoGuarded)+len(st.paramAutoGuarded)+len(st.autoHolds)+len(st.cancelSafeVars) > 0 {
+		st.computeSummaries(fns)
+	}
+	st.inferAutoSyncTypes(fns)
+	for {
+		prevCount := len(st.autoSyncTypes) + len(st.valueAutoSyncTypes) + len(st.genericAutoSyncTypes)
+		if prevCount == 0 {
+			break
+		}
+		st.refineAutoGuardsPostSummaries(fns)
+		clear(st.writeOnceInit)
+		clear(st.graphs)
+		st.computeSummaries(fns)
+		st.inferAutoSyncTypes(fns)
+		newCount := len(st.autoSyncTypes) + len(st.valueAutoSyncTypes) + len(st.genericAutoSyncTypes)
+		if newCount == prevCount {
+			break
+		}
+	}
+	clear(st.graphs)
+	st.computeLocalFieldSyncFacts(fns)
 	st.collectGlobalMutations(fns)
+	st.inferSharedReadSummaries(fns)
+	st.exportFacts(fns)
 
 	for _, fn := range fns {
 		if len(fn.Blocks) == 0 {
@@ -249,12 +315,38 @@ func run(pass *analysis.Pass) (any, error) {
 		}
 		g := st.graphOf(fn)
 		st.checkTransfers(g)
+		st.checkSharedReadCalls(g)
+		st.checkAutoSyncInterfaceConversions(fn)
 		st.checkImmStores(fn)
 	}
+	if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil && len(pkgInit.Blocks) > 0 && !slices.Contains(fns, pkgInit) {
+		st.checkAutoSyncInterfaceConversions(pkgInit)
+	}
+	st.checkAutoSyncGenericInstances()
+	st.checkAutoSyncGenericFuncBodies()
 	st.checkSharedLoadWrites(fns)
 	st.checkGlobals()
 	st.checkGuarded(fns)
 	return st.stats, nil
+}
+
+var cleanGOROOTSrc = func() string {
+	r := runtime.GOROOT()
+	if r == "" {
+		return ""
+	}
+	return filepath.Clean(r) + string(filepath.Separator) + "src" + string(filepath.Separator)
+}()
+
+func isGOROOTPkg(pass *analysis.Pass) bool {
+	if cleanGOROOTSrc == "" || pass == nil || pass.Fset == nil || len(pass.Files) == 0 {
+		return false
+	}
+	tf := pass.Fset.File(pass.Files[0].Pos())
+	if tf == nil {
+		return false
+	}
+	return strings.HasPrefix(filepath.Clean(tf.Name()), cleanGOROOTSrc)
 }
 
 func (st *state) newClassifier() *kinds.Classifier {
@@ -351,6 +443,62 @@ func (st *state) exportFacts(fns []*ssa.Function) {
 			f.FreshResult = append([]bool(nil), s.freshResult...)
 			if acq != nil {
 				f.Acquires = append([]acquire(nil), acq[fn]...)
+			}
+			if s.waitParam >= 0 && s.waitGroupKind() != 0 {
+				f.WaitParamPlusOne = s.waitParam + 1
+			}
+			f.WaitKind = s.waitKind
+			if len(fn.Params) > 0 {
+				pa := make([]bool, len(fn.Params))
+				for i, p := range fn.Params {
+					if !st.cls.Shareable(p.Type()) && st.isExportableAutoSyncSigType(p.Type()) {
+						pa[i] = true
+					}
+				}
+				if anyTrue(pa) {
+					f.ParamAutoSync = pa
+				}
+			}
+			if fn.Signature != nil && fn.Signature.Results() != nil && fn.Signature.Results().Len() > 0 {
+				ra := make([]bool, fn.Signature.Results().Len())
+				for k := range ra {
+					rt := fn.Signature.Results().At(k).Type()
+					if !st.cls.Shareable(rt) && (st.isExportableAutoSyncSigType(rt) || st.isAutoSyncInterfaceReturn(fn, k, rt)) {
+						ra[k] = true
+					}
+				}
+				if anyTrue(ra) {
+					f.ResAutoSync = ra
+				}
+			}
+			if anyTrue(s.sharedRead) {
+				f.SharedRead = append([]bool(nil), s.sharedRead...)
+			}
+			if anyTrue(s.projSync) {
+				f.ProjSync = append([]bool(nil), s.projSync...)
+			}
+			if fn.Signature != nil && fn.Signature.Recv() != nil {
+				recvType := types.Unalias(fn.Signature.Recv().Type())
+				if p, isPtr := recvType.(*types.Pointer); isPtr {
+					recvType = types.Unalias(p.Elem())
+				}
+				if rn, isNamed := recvType.(*types.Named); isNamed && rn.Origin().TypeParams() == nil {
+					if stStruct, isStruct := rn.Origin().Underlying().(*types.Struct); isStruct && stStruct.NumFields() > 0 {
+						fw := make([]bool, stStruct.NumFields())
+						fr := make([]bool, stStruct.NumFields())
+						for fi := range stStruct.NumFields() {
+							fv := stStruct.Field(fi).Origin()
+							fw[fi] = st.firewallFields[fv]
+							fr[fi] = st.frozenFields[fv]
+						}
+						if anyTrue(fw) {
+							f.RecvFirewall = fw
+						}
+						if anyTrue(fr) {
+							f.RecvFrozen = fr
+						}
+					}
+				}
 			}
 		}
 		st.pass.ExportObjectFact(obj, f)

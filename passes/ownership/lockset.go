@@ -195,11 +195,12 @@ func stableLoad(load *ssa.UnOp) bool {
 // slot is guarded memory: the field or package variable an access reaches, and the guard path of
 // its mutex at that access (unknown when the base has no path).
 type slot struct {
-	v      *types.Var
-	mu     *types.Var
-	muPath guardPath
-	known  bool
-	base   guardPath // the guarded object's path; root only for package variables
+	v        *types.Var
+	mu       *types.Var
+	muPath   guardPath
+	known    bool
+	base     guardPath // the guarded object's path; root only for package variables
+	inferred bool      // true when proven by inferAutoGuards rather than explicit //gosree:guarded_by
 }
 
 func (s slot) name() string {
@@ -234,10 +235,15 @@ func (st *state) guardedAt(v ssa.Value) (slot, bool) {
 			return slot{}, false
 		}
 		mu := st.ix.Guarded[gv]
+		inferred := false
+		if mu == nil {
+			mu = st.autoGuarded[gv]
+			inferred = mu != nil
+		}
 		if mu == nil {
 			return slot{}, false
 		}
-		out := slot{v: gv, mu: mu, base: guardPath{root: x}}
+		out := slot{v: gv, mu: mu, base: guardPath{root: x}, inferred: inferred}
 		if mg, ok := st.ssa.Pkg.Members[mu.Name()].(*ssa.Global); ok {
 			out.muPath, out.known = guardPath{root: mg}, true
 		}
@@ -251,10 +257,15 @@ func (st *state) guardedAt(v ssa.Value) (slot, bool) {
 func (st *state) fieldSlot(s *types.Struct, i int, base ssa.Value) (slot, bool) {
 	f := s.Field(i).Origin()
 	mu := st.ix.Guarded[f]
+	inferred := false
+	if mu == nil {
+		mu = st.autoGuarded[f]
+		inferred = mu != nil
+	}
 	if mu == nil {
 		return slot{}, false
 	}
-	out := slot{v: f, mu: mu}
+	out := slot{v: f, mu: mu, inferred: inferred}
 	j := -1
 	for k := range s.NumFields() {
 		if s.Field(k).Origin() == mu {
@@ -369,7 +380,7 @@ func lockTargetOp(t lockTarget) (lockOpKind, ssa.Value) {
 		return 0, nil
 	}
 	obj, ok := t.fn.Object().(*types.Func)
-	if !ok {
+	if !ok || obj.Pkg() == nil || obj.Pkg().Path() != "sync" {
 		return 0, nil
 	}
 	return lockOps[obj.FullName()], t.args[0]
@@ -805,6 +816,20 @@ func (st *state) holdsEntry(fn *ssa.Function) lockset {
 // in place, what its caller holds at every such call.
 func (st *state) entryLocks(gs *guardState, fn *ssa.Function) lockset {
 	entry := st.holdsEntry(fn)
+	if obj, ok := fn.Object().(*types.Func); ok && len(fn.Params) > 0 {
+		if ah, ok := st.autoHolds[obj.Origin()]; ok {
+			if s, ok := derefStruct(fn.Params[0].Type()); ok {
+				if bp, ok := pathOf(fn.Params[0]); ok {
+					for k := range s.NumFields() {
+						if s.Field(k).Origin() == ah.mu {
+							p := guardPath{bp.root, bp.steps + "." + strconv.Itoa(k)}
+							entry[p] = max(entry[p], ah.mode)
+						}
+					}
+				}
+			}
+		}
+	}
 	parent := fn.Parent()
 	if parent == nil || len(parent.Blocks) == 0 {
 		return entry
@@ -1691,12 +1716,12 @@ func (st *state) checkGuardedFunc(gs *guardState, fn *ssa.Function) {
 		}
 		// Accesses.
 		if w, ok := writeOf(ins); ok {
-			if s, ok := st.slotOf(w.addr); ok && !st.guardExempt(gs, fn, ins, s) && !held(ins, s, lockWrite) {
+			if s, ok := st.slotOf(w.addr); ok && !s.inferred && !st.guardExempt(gs, fn, ins, s) && !held(ins, s, lockWrite) {
 				note(ins, s, true)
 			}
 		}
 		if u, ok := ins.(*ssa.UnOp); ok && u.Op == token.MUL {
-			if s, ok := st.slotOf(u.X); ok && !st.guardExempt(gs, fn, ins, s) && !held(ins, s, lockRead) {
+			if s, ok := st.slotOf(u.X); ok && !s.inferred && !st.guardExempt(gs, fn, ins, s) && !held(ins, s, lockRead) {
 				note(ins, s, false)
 			}
 		}
@@ -1863,7 +1888,7 @@ func (st *state) checkLeaves(ins ssa.Instruction) {
 			return
 		}
 		s, ok := st.slotOf(v)
-		if !ok {
+		if !ok || s.inferred {
 			return
 		}
 		st.report(posOf(ins, ins), GuardViolation, fmt.Sprintf(
@@ -1879,7 +1904,7 @@ func (st *state) checkLeaves(ins ssa.Instruction) {
 		leaves(x.X, "sent on a channel")
 	case *ssa.Store:
 		src, ok := st.slotOf(x.Val)
-		if !ok || st.cls.Shareable(x.Val.Type()) {
+		if !ok || src.inferred || st.cls.Shareable(x.Val.Type()) {
 			return
 		}
 		if a, ok := x.Addr.(*ssa.Alloc); ok && !a.Heap {

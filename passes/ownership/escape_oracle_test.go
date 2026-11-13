@@ -336,6 +336,7 @@ var reviewedLeaks = map[string]string{
 	"net/http.ServeFile#1":                      "serveFile reads r's header and URL strings",
 	"net/http.ServeFileFS#1":                    "serveFile reads r's header and URL strings",
 	"net/http.SetCookie#1":                      "(*Cookie).String formats the cookie's strings",
+	"strings.NewReplacer#0":                     "append([]string(nil), oldnew...) copies oldnew's strings",
 }
 
 func btoi(b bool) int {

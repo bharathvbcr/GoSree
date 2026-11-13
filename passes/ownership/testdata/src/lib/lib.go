@@ -21,6 +21,9 @@ func Keep(t *Thing) { kept = append(kept, t) }
 // Size only reads its argument.
 func Size(t *Thing) int { return t.n + len(t.data) }
 
+// Bump writes its argument.
+func Bump(t *Thing) { t.n++ }
+
 // Consume takes ownership of its argument.
 //
 //gosree:iso t

@@ -205,7 +205,12 @@ Done:
      - The refuter still does not fire (18 of 261).
      - 264 of 324 hatches (81.5%) reach a post-construction write, against 257 (79.3%) before.
 
-     The 53.2% and 11.6% bounds were derived by hand from census v2 and have not been re-derived.
+     Re-derived from the unmodified census at `bb60b53` (2026-11-12): the 53.2% bound becomes 57.6%
+     when content writes alone block (71 of 306 resolved hatches clear; 59.2%, 63 of 306, when
+     every post-construction write blocks), and the 11.6% bound after exempting `ADKRuntime` and
+     `endpointBreaker` becomes 57.1% (73 of 306 clear), because 199 hatches still reach
+     content-written `BeliefState`/`Belief` via `BeliefStateManager.state`, which `GetState` returns
+     without the lock.
    - **B9:** `guarded_by` on 50 of the 51 mutex-protected package variables. SAFE006 went from 73 to
      23 and SAFE009 from 8 to 36, with the ratio unchanged at 72.5%. Of the 28 new SAFE009, 23 are
      values read under a lock that leave it, reported by design, and 5 are lockset false positives.
@@ -229,6 +234,16 @@ Done:
      walk finds a write, or cannot rule one out, through 118, at a callee's summary (55), a direct
      write (30), a dynamic call (17) or an interface method (16)
      ([the triage log](../cmd/gosree-corpus/refservice/scholarlm-bb60b53.md#item-4-reopened-as-one-experiment-a-parameter-shared-for-reading-2026-11-12)).
+   - **Place-footprint, AutoSync, and SharedRead rework (2026-11-12).** Replacing symmetric
+     Steensgaard write propagation with directional 2-level write summaries, automatic
+     read-only and mutex-encapsulated type inference (`AutoSync`/`AutoGuard`), `SharedRead` call
+     contracts, projection-path sync facts, and happens-before join/once rules moves the Go race
+     corpus from 37/129 (28.7%) to 78/129 (60.5%) clean on `TestNoRace*` (79/129, 61.2% annotated)
+     while keeping `TestRace*` recall at 229/234 (97.9%). On ScholarLM `bb60b53` (578 production
+     transfers), unannotated flagged transfers drop from 427 (73.9%) to 400 (69.2%, 178 clean);
+     with the annotation table, 330 need `//gosree:unsafe` (57.1%, matching the 57.1% B1 bound,
+     with SAFE008 reduced from 75 to 2); with `-tests` (4,805 transfers), 421 need `//gosree:unsafe`
+     (8.8% annotated; 2,486 flagged, 2,319 clean unannotated).
 5. Open:
    - ownership of the channel's send end; joins through `select`;
    - `SafeGoWG`'s join (43 SAFE003-forkjoin findings);
@@ -249,6 +264,6 @@ Done:
 The project should be abandoned if a `net/http` reference service has a hatch ratio above 20% (see
 [Measuring the escape hatch](../README.md#measuring-the-escape-hatch-on-a-module)) once the type and function
 override tables together hold 100 entries. Item 4 applied a sharper test to the reference service: it
-fails if census v2's fully annotated bound cannot reach 20% in production. At `bb60b53` the bound is
-53.2%, so it fails at that pin with 42 of the 100 entries used.
+fails if census v2's fully annotated bound cannot reach 20% in production. At `bb60b53` the re-derived bound is
+57.6% (57.1% after exempting the two race-free write types), so it fails at that pin with 65 of the 100 entries used.
 

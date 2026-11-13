@@ -32,16 +32,22 @@ import (
 
 // joins returns the parent instructions that end the moves made at t, or nil when t is not a spawn
 // site or the goroutine cannot hand anything back.
+type joinCacheKey struct {
+	ins   ssa.Instruction
+	index int
+}
+
 func (st *state) joins(g *graph, t transfer) map[ssa.Instruction]bool {
-	sp, ok := spawnOf(t.instr)
+	sp, ok := st.spawnSiteAt(t.instr, t.index)
 	if !ok {
 		return nil
 	}
-	if j, ok := st.joinCache[t.instr]; ok {
+	key := joinCacheKey{ins: t.instr, index: sp.arg}
+	if j, ok := st.joinCache[key]; ok {
 		return j
 	}
 	j := st.computeJoins(g, sp)
-	st.joinCache[t.instr] = j
+	st.joinCache[key] = j
 	return j
 }
 
@@ -50,24 +56,32 @@ func (st *state) computeJoins(g *graph, sp spawnSite) map[ssa.Instruction]bool {
 		// A handler runs again on the next request: it never hands anything back.
 		return nil
 	}
-	f, mc := sp.closure()
+	f, mc := sp.closureWithState(st)
 	if f == nil {
 		return nil
 	}
 	// The moved memory as F sees it: every captured variable and argument that carries memory in the
 	// parent. This is wider than any one transfer's region, which only makes the check stricter.
 	var roots []ssa.Value
+	var shareableCellRoots []*ssa.FreeVar
+	hadMovedInput := false
 	for j, b := range mc.Bindings {
 		if g.val(b) != nil {
+			hadMovedInput = true
+			if st.isShareableCellBinding(b, f.FreeVars[j]) {
+				shareableCellRoots = append(shareableCellRoots, f.FreeVars[j])
+				continue
+			}
 			roots = append(roots, f.FreeVars[j])
 		}
 	}
 	for i, a := range sp.args {
 		if g.val(a) != nil {
+			hadMovedInput = true
 			roots = append(roots, f.Params[i])
 		}
 	}
-	if len(roots) == 0 {
+	if !hadMovedInput {
 		return nil
 	}
 	fg := st.graphOf(f)
@@ -87,6 +101,10 @@ func (st *state) computeJoins(g *graph, sp spawnSite) map[ssa.Instruction]bool {
 			}
 		}
 	}
+	shareableCellSet := map[ssa.Value]bool{}
+	for _, fv := range shareableCellRoots {
+		shareableCellSet[fv] = true
+	}
 	var accesses []ssa.Instruction
 	var defers []*ssa.Defer
 	forEachInstr(f, func(ins ssa.Instruction) {
@@ -96,6 +114,13 @@ func (st *state) computeJoins(g *graph, sp spawnSite) map[ssa.Instruction]bool {
 		for _, op := range ins.Operands(nil) {
 			if op == nil || *op == nil {
 				continue
+			}
+			if shareableCellSet[*op] {
+				accesses = append(accesses, ins)
+				if d, ok := ins.(*ssa.Defer); ok {
+					defers = append(defers, d)
+				}
+				return
 			}
 			if n := fg.nodes[*op]; n != nil && region[n.find()] {
 				accesses = append(accesses, ins)
@@ -120,7 +145,7 @@ func (st *state) computeJoins(g *graph, sp spawnSite) map[ssa.Instruction]bool {
 			join(w)
 		}
 	}
-	if soleSpawn(mc, true) == nil {
+	if soleSpawnWithState(st, mc, true) == nil {
 		// In a loop, a receive or Done does not say which instance of F it synchronised with.
 		return out
 	}
@@ -130,7 +155,7 @@ func (st *state) computeJoins(g *graph, sp spawnSite) map[ssa.Instruction]bool {
 		}
 	}
 	for _, b := range mc.Bindings {
-		so := syncObject(g.fn, b)
+		so := syncObjectWithState(st, g.fn, b)
 		if so == nil {
 			continue
 		}
@@ -139,13 +164,302 @@ func (st *state) computeJoins(g *graph, sp spawnSite) map[ssa.Instruction]bool {
 			continue
 		}
 		if so.isChan && len(so.releases) != 1 {
-			// Another goroutine (or the parent) also sends on or closes the channel, so a receive
-			// does not say which sender it synchronised with.
+			if acq := sequentialChanAcquire(st, g, sp.ins, so); acq != nil {
+				join(acq)
+			}
 			continue
 		}
 		for _, a := range so.acquires {
 			join(a)
 		}
+	}
+	for j, b := range mc.Bindings {
+		for _, a := range st.helperClosureJoins(g, sp, f, mc, j, b, accesses, defers) {
+			join(a)
+		}
+	}
+	return out
+}
+
+func (st *state) isShareableCellBinding(b ssa.Value, fv *ssa.FreeVar) bool {
+	if b == nil || fv == nil || fv.Referrers() == nil {
+		return false
+	}
+	switch b.(type) {
+	case *ssa.Alloc, *ssa.Phi:
+	default:
+		return false
+	}
+	ptr, ok := b.Type().Underlying().(*types.Pointer)
+	if !ok || (!st.cls.Shareable(ptr.Elem()) && !st.isAutoSyncType(ptr.Elem())) {
+		return false
+	}
+	for _, r := range *fv.Referrers() {
+		switch x := r.(type) {
+		case *ssa.DebugRef:
+		case *ssa.UnOp:
+			if x.Op != token.MUL || x.X != fv {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (st *state) spawnerWaitJoins(g *graph, t transfer) map[ssa.Instruction]bool {
+	sp, ok := st.spawnSiteAt(t.instr, t.index)
+	if !ok || sp.repeated {
+		return nil
+	}
+	recv := sp.receiver()
+	if recv == nil {
+		return nil
+	}
+	waits := waitCalls(g.fn, recv, sp.wait)
+	if len(waits) == 0 {
+		return nil
+	}
+	out := make(map[ssa.Instruction]bool, len(waits))
+	for _, w := range waits {
+		out[w] = true
+	}
+	return out
+}
+
+func (st *state) joinsForValue(g *graph, t transfer, w ssa.Value) map[ssa.Instruction]bool {
+	if j := st.joins(g, t); len(j) > 0 {
+		return j
+	}
+	sp, ok := st.spawnSiteAt(t.instr, t.index)
+	if !ok || sp.repeated || sp.receiver() == nil || len(sp.args) > 0 {
+		return nil
+	}
+	f, mc := sp.closureWithState(st)
+	if f == nil || mc == nil {
+		return nil
+	}
+	wn := g.val(w)
+	if wn == nil {
+		return nil
+	}
+	cs := st.summary(f)
+	if cs.pessimistic {
+		return nil
+	}
+	wReg := g.region(wn)
+	fg := st.graphOf(f)
+	for idx, b := range mc.Bindings {
+		if idx >= len(f.FreeVars) {
+			return nil
+		}
+		if st.cls.Shareable(b.Type()) || g.isAutoSyncCapture(t.instr, b) || st.isShareableCellBinding(b, f.FreeVars[idx]) {
+			continue
+		}
+		if bn := g.val(b); bn != nil && wReg[bn.find()] {
+			if st.childLeaksOrTransfersFreeVar(fg, f.FreeVars[idx]) || cs.freeLeaks(idx) {
+				return nil
+			}
+		}
+	}
+	return st.spawnerWaitJoins(g, t)
+}
+
+// sequentialChanAcquire handles sequential single-goroutine channel handoffs (`go G1(); <-ch; go G2(); <-ch`)
+// where G1 and G2 cannot overlap in time because each spawn dominates its matching receive, which in turn
+// strictly dominates the next spawn with no loop back-edge.
+func sequentialChanAcquire(st *state, g *graph, spawnIns ssa.Instruction, so *syncObj) ssa.Instruction {
+	if !so.isChan || len(so.releases[g.fn]) > 0 || len(so.acquires) != len(so.releases) {
+		return nil
+	}
+	var starts []ssa.Instruction
+	for cf, rels := range so.releases {
+		if cf == g.fn || len(rels) == 0 {
+			return nil
+		}
+		cmc := so.closures[cf]
+		if cmc == nil {
+			return nil
+		}
+		start := soleSpawnWithState(st, cmc, true)
+		if start == nil {
+			return nil
+		}
+		for _, r := range rels {
+			if _, isSend := r.(*ssa.Send); !isSend {
+				return nil
+			}
+		}
+		for _, r1 := range rels {
+			after := reachableAfter(r1)
+			for _, r2 := range rels {
+				if after(r2) {
+					return nil
+				}
+			}
+		}
+		starts = append(starts, start)
+	}
+	acqs := append([]ssa.Instruction(nil), so.acquires...)
+	for _, a := range acqs {
+		u, ok := a.(*ssa.UnOp)
+		if !ok || u.Op != token.ARROW || a.Parent() != g.fn || reachableAfter(a)(a) {
+			return nil
+		}
+	}
+	slices.SortFunc(starts, func(a, b ssa.Instruction) int {
+		if a == b {
+			return 0
+		}
+		if dominates(a, b) {
+			return -1
+		}
+		if dominates(b, a) {
+			return 1
+		}
+		return 0
+	})
+	slices.SortFunc(acqs, func(a, b ssa.Instruction) int {
+		if a == b {
+			return 0
+		}
+		if dominates(a, b) {
+			return -1
+		}
+		if dominates(b, a) {
+			return 1
+		}
+		return 0
+	})
+	matchIdx := -1
+	for k := range starts {
+		s, a := starts[k], acqs[k]
+		if !dominates(s, a) || reachableAfter(a)(s) {
+			return nil
+		}
+		if k+1 < len(starts) {
+			nextS := starts[k+1]
+			if !dominates(a, nextS) || reachableAfter(nextS)(a) {
+				return nil
+			}
+		}
+		if s == spawnIns {
+			matchIdx = k
+		}
+	}
+	if matchIdx < 0 {
+		return nil
+	}
+	return acqs[matchIdx]
+}
+
+// helperClosureJoins recognises a local helper closure `sub := func() { ...; c <- 0 }` captured
+// solely by F and called once by F with no accesses in F after that call (e.g. `go func() { <-t.C; f() }()`).
+func (st *state) helperClosureJoins(g *graph, sp spawnSite, f *ssa.Function, mc *ssa.MakeClosure, bindIdx int, b ssa.Value, fAccesses []ssa.Instruction, fDefers []*ssa.Defer) []ssa.Instruction {
+	if len(fDefers) > 0 || bindIdx >= len(f.FreeVars) {
+		return nil
+	}
+	subMC, ok := b.(*ssa.MakeClosure)
+	if !ok || subMC.Referrers() == nil {
+		return nil
+	}
+	for _, r := range *subMC.Referrers() {
+		if _, dbg := r.(*ssa.DebugRef); dbg {
+			continue
+		}
+		if r != mc {
+			return nil
+		}
+	}
+	bindCount := 0
+	for _, mb := range mc.Bindings {
+		if mb == b {
+			bindCount++
+		}
+	}
+	if bindCount != 1 {
+		return nil
+	}
+	fv := f.FreeVars[bindIdx]
+	if fv.Referrers() == nil {
+		return nil
+	}
+	var subCall *ssa.Call
+	for _, r := range *fv.Referrers() {
+		if _, dbg := r.(*ssa.DebugRef); dbg {
+			continue
+		}
+		c, isCall := r.(*ssa.Call)
+		if !isCall || subCall != nil || c.Call.Value != fv || usedAsArg(c, fv, -1) {
+			return nil
+		}
+		subCall = c
+	}
+	if subCall == nil || reachableAfter(subCall)(subCall) {
+		return nil
+	}
+	afterCall := reachableAfter(subCall)
+	for _, acc := range fAccesses {
+		if acc != subCall && afterCall(acc) {
+			return nil
+		}
+	}
+	subFn, ok := subMC.Fn.(*ssa.Function)
+	if !ok || len(subFn.Blocks) == 0 {
+		return nil
+	}
+	subG := st.graphOf(subFn)
+	subRegion := map[*node]bool{}
+	for k, sb := range subMC.Bindings {
+		if g.val(sb) != nil && k < len(subFn.FreeVars) {
+			if n := subG.val(subFn.FreeVars[k]); n != nil {
+				for c := range subG.region(n) {
+					subRegion[c] = true
+				}
+			}
+		}
+	}
+	for c := range subRegion {
+		for _, e := range c.events {
+			if e.kind == evEscape || e.kind == evTransfer {
+				return nil
+			}
+		}
+	}
+	var subAccesses []ssa.Instruction
+	var subDefers []*ssa.Defer
+	forEachInstr(subFn, func(ins ssa.Instruction) {
+		if _, dbg := ins.(*ssa.DebugRef); dbg {
+			return
+		}
+		for _, op := range ins.Operands(nil) {
+			if op == nil || *op == nil {
+				continue
+			}
+			if n := subG.nodes[*op]; n != nil && subRegion[n.find()] {
+				subAccesses = append(subAccesses, ins)
+				if d, ok := ins.(*ssa.Defer); ok {
+					subDefers = append(subDefers, d)
+				}
+				return
+			}
+		}
+	})
+	var out []ssa.Instruction
+	for _, sb := range subMC.Bindings {
+		so := syncObjectWithState(st, g.fn, sb)
+		if so == nil {
+			continue
+		}
+		rels := so.releases[subFn]
+		if len(rels) == 0 || !releasedClean(rels, subAccesses, subDefers) {
+			continue
+		}
+		if so.isChan && len(so.releases) != 1 {
+			continue
+		}
+		out = append(out, so.acquires...)
 	}
 	return out
 }
@@ -153,6 +467,9 @@ func (st *state) computeJoins(g *graph, sp spawnSite) map[ssa.Instruction]bool {
 // waitCalls returns the non-deferred calls to the wait method on recv in fn. The receiver must be
 // the very value the spawner was called on, so both calls reach the same object.
 func waitCalls(fn *ssa.Function, recv ssa.Value, wait string) []ssa.Instruction {
+	if recv == nil || recv.Referrers() == nil {
+		return nil
+	}
 	var out []ssa.Instruction
 	for _, r := range *recv.Referrers() {
 		c, ok := r.(*ssa.Call)
@@ -251,6 +568,7 @@ func releasedClean(rels, accesses []ssa.Instruction, defers []*ssa.Defer) bool {
 
 // syncObj records every operation on one channel or WaitGroup made in the parent.
 type syncObj struct {
+	st        *state
 	isChan    bool
 	acquires  []ssa.Instruction                   // parent receives / Wait calls
 	releases  map[*ssa.Function][]ssa.Instruction // sends, closes, Done calls (incl. deferred)
@@ -262,7 +580,11 @@ type syncObj struct {
 // syncObject returns o's operations when o is a channel or WaitGroup the parent creates and every
 // use of it is one the join rule understands; otherwise nil.
 func syncObject(parent *ssa.Function, o ssa.Value) *syncObj {
-	so := &syncObj{releases: map[*ssa.Function][]ssa.Instruction{}, closures: map[*ssa.Function]*ssa.MakeClosure{}}
+	return syncObjectWithState(nil, parent, o)
+}
+
+func syncObjectWithState(st *state, parent *ssa.Function, o ssa.Value) *syncObj {
+	so := &syncObj{st: st, releases: map[*ssa.Function][]ssa.Instruction{}, closures: map[*ssa.Function]*ssa.MakeClosure{}}
 	ok := false
 	switch o := o.(type) {
 	case *ssa.MakeChan:
@@ -468,7 +790,7 @@ func (so *syncObj) waitGroupOK() bool {
 		if mc == nil {
 			return false
 		}
-		start := soleSpawn(mc, true)
+		start := soleSpawnWithState(so.st, mc, true)
 		if start == nil {
 			return false
 		}
