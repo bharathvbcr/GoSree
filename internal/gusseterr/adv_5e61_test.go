@@ -48,7 +48,7 @@ func oldPhase1(ctx context.Context, funcsIn []FuncIR, maxIters int) oldPhase1Res
 	callers := make([][]uint32, n)
 	unit := make([]uint64, n)
 	for idx := range funcs {
-		unit[idx] = uint64(len(funcs[idx].Blocks))
+		unit[idx] = uint64(len(funcs[idx].Blocks)) * max(uint64(len(funcs[idx].SlotFlags)), 1) // the phase-1 work unit since the slot-aware unit (B)
 		for bi := range funcs[idx].Blocks {
 			unit[idx] += uint64(len(funcs[idx].Blocks[bi].Ops))
 			for _, op := range funcs[idx].Blocks[bi].Ops {
@@ -268,6 +268,7 @@ func TestAdv5e61FixpointEquivalence(t *testing.T) {
 	rng := rand.New(rand.NewPCG(0x5e61, 0xadd))
 	const trials = 1500
 	flips, findingsSeen, moreWork := 0, 0, 0
+	var totalNew, totalOld uint64
 	for trial := range trials {
 		pkg := adv5Graph(rng)
 		want, err := naiveSolve(ctx, pkg)
@@ -292,9 +293,16 @@ func TestAdv5e61FixpointEquivalence(t *testing.T) {
 		if !sameResult(got, want) {
 			t.Fatalf("trial %d (%d funcs): oracle != naive\nsummaries got  %v\nsummaries want %v\nfindings got %v\nfindings want %v", trial, len(pkg), got.MayReturnNil, want.MayReturnNil, got.Findings, want.Findings)
 		}
-		if st.work > old.work || st.solves > old.solves {
+		// EXPECTATION CHANGED (ft-5e61 fix A): inside a cycle the sweep order is now the reverse
+		// finish order of the search over callers, a heuristic that is not guaranteed to beat
+		// function-index order on every graph (6 of these 1,500 do slightly more work, at most
+		// 1.3x). Between components callee-first still never loses. So the per-graph bound is 2x
+		// the scan's work, and the total over all graphs must not exceed the scan's.
+		totalNew += st.work
+		totalOld += old.work
+		if st.work > 2*old.work+16 {
 			moreWork++
-			t.Errorf("trial %d: callee-first did MORE phase-1 work than the index-order scan: %d solves/%d units vs %d/%d", trial, st.solves, st.work, old.solves, old.work)
+			t.Errorf("trial %d: callee-first did MORE than twice the phase-1 work of the index-order scan: %d solves/%d units vs %d/%d", trial, st.solves, st.work, old.solves, old.work)
 		}
 		native, err := Solve(ctx, pkg)
 		if err != nil {
@@ -313,7 +321,10 @@ func TestAdv5e61FixpointEquivalence(t *testing.T) {
 			t.Fatalf("trial %d: engines differ: native len %d err %v, oracle len %d err %v", trial, len(nb), nerr, len(ob), oerr)
 		}
 	}
-	t.Logf("%d graphs, %d may-nil summaries, %d findings, native active = %v", trials, flips, findingsSeen, NativeActive())
+	t.Logf("%d graphs, %d may-nil summaries, %d findings, native active = %v; phase-1 work %d units vs %d for the index-order scan", trials, flips, findingsSeen, NativeActive(), totalNew, totalOld)
+	if totalNew > totalOld {
+		t.Errorf("over %d graphs callee-first did %d units of phase-1 work against the scan's %d", trials, totalNew, totalOld)
+	}
 	if flips < trials || findingsSeen < trials/10 {
 		t.Fatalf("generator too tame: %d summaries true, %d findings", flips, findingsSeen)
 	}
@@ -394,13 +405,25 @@ func TestAdv5e61PerSCCCapNeverOptimisticNorStricter(t *testing.T) {
 		pkg := adv5Graph(rng)
 		want, _ := naiveSolve(ctx, pkg)
 		old := oldPhase1(ctx, pkg, len(pkg)+1)
-		limit := old.sweeps + 2
+		// EXPECTATION CHANGED (ft-5e61 fix A): the cap is per component and the order inside a
+		// component is no longer the scan's, so a component can need more sweeps than the scan's
+		// global count (a cap of 3 where the scan needed 2). What must hold is the proven bound: a
+		// component needs at most one sweep per summary that flips in it plus one confirming
+		// sweep, so a cap of flips+1 always succeeds, and every cap that succeeds gives the exact
+		// fixpoint (minCap checks that).
+		flips := 0
+		for _, b := range want.MayReturnNil {
+			if b {
+				flips++
+			}
+		}
+		limit := flips + 2
 		m, err := minCap(ctx, pkg, limit, want)
 		if err != nil {
 			t.Fatalf("trial %d: %v", trial, err)
 		}
-		if m == 0 || m > old.sweeps {
-			t.Fatalf("trial %d: the old scan needs %d sweeps but the callee-first solver needs a cap of %d (0 = never within %d): a package the old cap accepted is now refused", trial, old.sweeps, m, limit)
+		if m == 0 || m > flips+1 {
+			t.Fatalf("trial %d: %d summaries flip but the callee-first solver needs a cap of %d (0 = never within %d): over the proven bound", trial, flips, m, limit)
 		}
 		if m < old.sweeps {
 			relaxed++
@@ -447,12 +470,15 @@ func TestAdv5e61CapManySmallSCCsAndExactSCC(t *testing.T) {
 	if m >= old.sweeps {
 		t.Fatalf("expected the chained SCCs to relax the cap (old %d, new %d)", old.sweeps, m)
 	}
-	// An SCC that needs exactly cap sweeps: callCycle(9) needs 10 (nine changing, one confirming).
+	// An SCC that needs exactly cap sweeps. EXPECTATION CHANGED (ft-5e61 fix A): callCycle(9) used
+	// to need 10 (nine changing sweeps, one confirming) in index order; in the callee-first order
+	// inside the cycle the nil reaches every function in sweep 1 but function 0, which flips in
+	// sweep 2, so it needs 3. The hub ladder (TestOracleCallgraphCapFailsClosed) keeps a many-sweep shape.
 	cyc := callCycle(9)
-	if _, err := solveOracle(ctx, cyc, 10); err != nil {
+	if _, err := solveOracle(ctx, cyc, 3); err != nil {
 		t.Fatalf("cap exactly the sweeps needed: %v", err)
 	}
-	if _, err := solveOracle(ctx, cyc, 9); err == nil || !strings.Contains(err.Error(), "did not converge within 9 iterations") {
+	if _, err := solveOracle(ctx, cyc, 2); err == nil || !strings.Contains(err.Error(), "did not converge within 2 iterations") {
 		t.Fatalf("cap one under: %v", err)
 	}
 	// Production cap is len+1 and the oracle matches it on a worst-case cycle.
@@ -499,7 +525,7 @@ func TestAdv5e61BudgetBoundariesAndOverflow(t *testing.T) {
 func TestAdv5e61FloorDominatesOnTinyFunctions(t *testing.T) {
 	ctx := context.Background()
 	const n = 1500
-	closed := hubChain(n, true, true, true)
+	closed := hubLadder(n) // was a closed hubChain: linear since fix A
 	size := packageSize(closed)
 	if size*Phase1WorkFactor >= Phase1WorkFloor {
 		t.Skipf("floor does not dominate for n=%d", n)
@@ -521,7 +547,7 @@ func TestAdv5e61EnginesRefuseTheSameClosedHubs(t *testing.T) {
 	ctx := context.Background()
 	lastOK, firstRefused := 0, 0
 	for _, n := range []int{300, 600, 800, 900, 1000, 1024, 1100, 1200, 1500, 2000} {
-		pkg := hubChain(n, true, true, true)
+		pkg := hubLadder(n) // was a closed hubChain: linear since fix A
 		frame, err := EncodePackage(pkg)
 		if err != nil {
 			t.Fatal(err)
@@ -551,7 +577,7 @@ func TestAdv5e61EnginesRefuseTheSameClosedHubs(t *testing.T) {
 // what it is, and whether errors.Is can classify it.
 func TestAdv5e61RefusalErrorShape(t *testing.T) {
 	ctx := context.Background()
-	pkg := hubChain(4096, true, true, true)
+	pkg := hubLadder(4096) // was a closed hubChain: linear since fix A
 	_, nerr := Solve(ctx, pkg)
 	_, oerr := SolveOracle(ctx, pkg)
 	if nerr == nil || oerr == nil {
@@ -876,7 +902,7 @@ func TestAdv5e61CancellationInBudgetedLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("cycle of %d: %d polls, %d solves, %d sweeps, largest gap of solves between polls %d", len(cyc), probe.calls, st.solves, st.sweeps, probe.maxGap)
-	closed := hubChain(4096, true, true, true)
+	closed := hubLadder(4096) // was a closed hubChain: linear since fix A
 	var cst phase1Stats
 	cp := &pollRec{Context: context.Background(), st: &cst}
 	_, err := solveOracleLimited(cp, closed, 4097, Phase1WorkFactor, Phase1WorkFloor, &cst)
@@ -934,14 +960,22 @@ func TestAdv5e61WorkUnitIgnoresSlots(t *testing.T) {
 	}
 	narrow, nu := timeSolve(shapeFunc(2048, 1))
 	wide, wu := timeSolve(shapeFunc(2048, 4096))
-	if nu != wu {
-		t.Fatalf("units differ: %d vs %d", nu, wu)
+	// EXPECTATION CHANGED (ft-5e61 fix B): the unit used to ignore slots, so both functions had the
+	// same count and the wide one cost ~100x more per unit. The unit is now ops plus blocks x
+	// max(slots, 1), the state cells MaxStateCells bounds, so the wide function counts 4096x more
+	// units. What must hold is that a unit costs about the same on both: the per-unit cost ratio
+	// is bounded (it is below 1 here: fixed per-solve costs make a unit of the narrow function
+	// dearer).
+	if wu < 1000*nu {
+		t.Fatalf("units: narrow %d, wide %d; the unit does not see the 4096 slots", nu, wu)
 	}
-	ratio := float64(wide) / float64(narrow)
-	t.Logf("same %d work units; wide/narrow solve time ratio %.0fx (min of 3, under load, indicative)", nu, ratio)
-	if ratio > 50 {
-		t.Errorf("one work unit costs %.0fx more on a 4096-slot function than on a 1-slot one: the budget of %d units admits %d solves of the wide function, about %.0f s of phase 1", ratio, Phase1WorkFloor, Phase1WorkFloor/nu, float64(Phase1WorkFloor/nu)*float64(wide)/1e9)
+	perUnit := (float64(wide) / float64(wu)) / (float64(narrow) / float64(nu))
+	t.Logf("narrow %d units in %d ns, wide %d units in %d ns; a unit costs %.2fx as much on the wide function (min of 3, under load, indicative)", nu, narrow, wu, wide, perUnit)
+	if perUnit > 50 {
+		t.Errorf("one work unit costs %.0fx more on a 4096-slot function than on a 1-slot one: the unit still misses what a solve costs", perUnit)
 	}
+	budget := max(uint64(Phase1WorkFloor), wu*Phase1WorkFactor)
+	t.Logf("a package of only the wide function is solved at most %d times by its budget of %d units", budget/wu, budget)
 }
 
 // A package f0dea98 solved in a fraction of a second, from real source (see the closed hub in the

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"runtime"
@@ -254,5 +255,133 @@ func TestOracleResponseCap(t *testing.T) {
 	}
 	if MaxResponseBytes != 1<<30 {
 		t.Fatalf("MaxResponseBytes = %d, want gusset's MaxBufferBytes (1 GiB)", MaxResponseBytes)
+	}
+}
+
+// modelGolden is the decoded-size cost, the frame length and the phase-1 package size of
+// hubChain(100, true, true, false). The Rust unit test model_matches_the_go_golden pins the same
+// numbers for the same package, so both engines charge and refuse at exactly the same modelled
+// byte count (the bound check itself is exact in each: TestDecodedBoundExactAndOneOver and
+// decoded_bound_exact_and_one_over).
+const (
+	modelGoldenCost  = 30389
+	modelGoldenFrame = 5785
+	modelGoldenSize  = 299
+)
+
+func TestDecodedModelGoldenMatchesRust(t *testing.T) {
+	p := hubChain(100, true, true, false)
+	frame, err := EncodePackage(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodedBytesOf(p); got != modelGoldenCost || len(frame) != modelGoldenFrame || packageSize(p) != modelGoldenSize {
+		t.Fatalf("cost %d, frame %d, size %d; the Rust golden is %d, %d, %d", got, len(frame), packageSize(p), modelGoldenCost, modelGoldenFrame, modelGoldenSize)
+	}
+	if _, err := decodePackage(frame, modelGoldenCost); err != nil {
+		t.Fatalf("at the golden cost: %v", err)
+	}
+	if _, err := decodePackage(frame, modelGoldenCost-1); !errors.Is(err, ErrDecodedBytesExceeded) {
+		t.Fatalf("one byte under the golden cost: %v", err)
+	}
+}
+
+// TestRefusalsNameTheirBoundAndSentinel: every limit a decoder or the solver refuses on says what
+// the bound was, and wraps the sentinel a caller classifies it with.
+func TestRefusalsNameTheirBoundAndSentinel(t *testing.T) {
+	for name, c := range map[string]struct {
+		frame []byte
+		bound uint64
+		kind  error
+	}{
+		"num_funcs":   {rawFrame(MaxFuncs + 1), MaxFuncs, ErrLimitExceeded},
+		"num_slots":   {rawFrame(1, []byte{0}, le32(MaxSlots+1, 0, 0)), MaxSlots, ErrLimitExceeded},
+		"num_tuples":  {rawFrame(1, []byte{0}, le32(0, MaxTuples+1, 0)), MaxTuples, ErrLimitExceeded},
+		"num_blocks":  {rawFrame(1, []byte{0}, le32(0, 0, MaxBlocks+1)), MaxBlocks, ErrLimitExceeded},
+		"num_phis":    {rawFrame(1, []byte{0}, le32(0, 0, 1), []byte{TermStop}, le32(MaxPhisPerBlock+1), make([]byte, 16)), MaxPhisPerBlock, ErrLimitExceeded},
+		"num_ops":     {rawFrame(1, []byte{0}, le32(0, 0, 1), []byte{TermStop}, le32(0, MaxOpsPerBlock+1), make([]byte, 16)), MaxOpsPerBlock, ErrLimitExceeded},
+		"state cells": {rawFrame(1, []byte{0}, le32(4096, 0, 2049)), MaxStateCells, ErrLimitExceeded},
+	} {
+		_, err := decodePackage(c.frame, MaxDecodedBytes)
+		want := fmt.Sprintf("over the bound of %d", c.bound)
+		if err == nil || !strings.Contains(err.Error(), want) || !errors.Is(err, c.kind) {
+			t.Errorf("%s: err = %v, want it to name %q and wrap %v", name, err, want, c.kind)
+		}
+	}
+	_, err := decodePackage(make([]byte, MaxFrameBytes+1), MaxDecodedBytes)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("over the bound of %d", MaxFrameBytes)) || !errors.Is(err, ErrLimitExceeded) {
+		t.Errorf("frame_bytes: %v", err)
+	}
+	fn := FuncIR{SlotFlags: []uint8{0}, Blocks: []BlockIR{{Ops: make([]OpIR, 4), Term: Terminator{Kind: TermStop}}}}
+	for i := range fn.Blocks[0].Ops {
+		fn.Blocks[0].Ops[i] = OpIR{Kind: OpUnhandledErr}
+	}
+	frame, _ := EncodePackage([]FuncIR{fn})
+	_, err = decodePackage(frame, 100)
+	if err == nil || !errors.Is(err, ErrDecodedBytesExceeded) || !strings.Contains(err.Error(), "decoded_bytes over the bound of") {
+		t.Errorf("decoded_bytes: %v", err)
+	}
+	_, err = solveOracle(context.Background(), callCycle(9), 2)
+	if !errors.Is(err, ErrCallgraphBudgetExceeded) {
+		t.Errorf("call-graph cap: %v", err)
+	}
+	if _, err := solveFrameOracle(context.Background(), mustEncode(t, callChain(10)), 5); !errors.Is(err, ErrResponseTooLarge) {
+		t.Errorf("response cap: %v", err)
+	}
+}
+
+func mustEncode(t *testing.T, funcs []FuncIR) []byte {
+	t.Helper()
+	f, err := EncodePackage(funcs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// TestEngineRefusalMapsCodeToSentinelWithOracleText: the message the Rust engine hands gusset
+// ("<code>: <text>") becomes an error whose text is the text alone (what the oracle prints for
+// the same refusal) and which matches the code's sentinel and the transport error.
+func TestEngineRefusalMapsCodeToSentinelWithOracleText(t *testing.T) {
+	transport := errors.New("gusset error [1]: carrier")
+	for code, kind := range map[string]error{
+		"work_budget_exceeded":      ErrWorkBudgetExceeded,
+		"decoded_bytes_exceeded":    ErrDecodedBytesExceeded,
+		"callgraph_budget_exceeded": ErrCallgraphBudgetExceeded,
+		"iteration_budget_exceeded": ErrIterationBudgetExceeded,
+		"response_too_large":        ErrResponseTooLarge,
+		"limit_exceeded":            ErrLimitExceeded,
+	} {
+		err := engineRefusal(code+": the text: with a colon", transport)
+		if err == nil || err.Error() != "the text: with a colon" || !errors.Is(err, kind) || !errors.Is(err, transport) {
+			t.Errorf("%s: %v", code, err)
+		}
+	}
+	for _, code := range []string{"truncated", "bad_magic", "invalid_enum"} {
+		err := engineRefusal(code+": malformed", transport)
+		if err == nil || err.Error() != "malformed" || !errors.Is(err, transport) {
+			t.Errorf("%s: %v", code, err)
+		}
+	}
+	for _, msg := range []string{"cancelled: solver cancelled", "no code here", "unknown_code: x", ""} {
+		if err := engineRefusal(msg, transport); err != nil {
+			t.Errorf("%q must not map: %v", msg, err)
+		}
+	}
+}
+
+// TestPhase1WorkUnitCountsStateCells: the unit of a solve is a function's ops plus blocks x
+// max(slots, 1), so a wide function counts for what its solver state costs and a slotless one
+// still counts its blocks.
+func TestPhase1WorkUnitCountsStateCells(t *testing.T) {
+	for _, c := range []struct{ blocks, slots int }{{2048, 1}, {2048, 4096}, {7, 0}, {1, 3}} {
+		fn := shapeFunc(c.blocks, c.slots)
+		var st phase1Stats
+		if _, err := solveOracleLimited(context.Background(), []FuncIR{fn}, 2, Phase1WorkFactor, Phase1WorkFloor, &st); err != nil {
+			t.Fatal(err)
+		}
+		if want := uint64(c.blocks) * uint64(max(c.slots, 1)); st.work != want || packageSize([]FuncIR{fn}) != want {
+			t.Errorf("%d blocks x %d slots: %d work units, size %d, want %d", c.blocks, c.slots, st.work, packageSize([]FuncIR{fn}), want)
+		}
 	}
 }

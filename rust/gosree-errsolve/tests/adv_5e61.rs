@@ -35,6 +35,12 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static A: Counting = Counting;
 
+/// The allocator counters are process-wide, so a test that reads them must not run beside one that
+/// allocates (EXPECTATION CHANGED, ft-5e61 fix D: `decoded_heap_against_charge` measured the
+/// allocations of the 262,144-function chain test running in parallel and failed in full runs
+/// though it passes alone). Every test takes this lock.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn call_ret(callee: u32) -> FuncIR {
     FuncIR {
         flags: FUNC_RETURNS_CONCRETE_ERR_PTR,
@@ -117,10 +123,14 @@ fn min_cap(funcs: &[FuncIR], limit: usize) -> usize {
 /// share the cap semantics (per component), including the exact-cap and chained-pair cases.
 #[test]
 fn per_scc_cap_matches_the_oracle() {
-    assert_eq!(min_cap(&call_cycle(9), 12), 10);
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // EXPECTATION CHANGED (ft-5e61 fix A): call_cycle(9) needed a cap of 10 in function-index order
+    // (nine changing sweeps, one confirming). In the callee-first order inside the cycle the nil
+    // reaches every function in sweep 1 but function 0, which flips in sweep 2: it needs 3.
+    assert_eq!(min_cap(&call_cycle(9), 12), 3);
     assert!(matches!(
-        solve_package_capped(&call_cycle(9), &mut || true, 9),
-        Err(SolveError::CallgraphBudgetExceeded(9))
+        solve_package_capped(&call_cycle(9), &mut || true, 2),
+        Err(SolveError::CallgraphBudgetExceeded(2))
     ));
     // 40 pairs A_i <-> B_i, A_i returns A_{i+1}, B_i returns A_i, the last A is a nil source.
     let k = 40usize;
@@ -171,6 +181,7 @@ fn per_scc_cap_matches_the_oracle() {
 /// first refusal, wherever it comes (in the component search or the sweeps).
 #[test]
 fn cancellation_on_a_max_funcs_chain() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let funcs = call_chain(MAX_FUNCS);
     let mut calls = 0usize;
     solve_package(&funcs, &mut || {
@@ -211,6 +222,7 @@ fn cancellation_on_a_max_funcs_chain() {
 /// solves? (Prints the numbers; the sweep polls once, solve_function every 64 steps.)
 #[test]
 fn polls_inside_a_giant_cycle_sweep() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let funcs = call_cycle(20_000);
     let mut calls = 0usize;
     solve_package(&funcs, &mut || {
@@ -268,6 +280,7 @@ fn hostile_frames() -> Vec<(&'static str, Vec<u8>)> {
 /// charge arithmetic could wrap, and allocate almost nothing.
 #[test]
 fn hostile_claims_at_every_bound() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     for (name, f) in hostile_frames() {
         for bound in [0u64, 1, 95, 96, 1 << 20, MAX_DECODED_BYTES, u64::MAX] {
             let before = TOTAL.load(Ordering::Relaxed);
@@ -286,6 +299,7 @@ fn hostile_claims_at_every_bound() {
 /// (a Vec doubles), so the live decoded bytes are about twice what `decoded_bytes` charges.
 #[test]
 fn decoded_heap_against_charge() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     const BLOCKS: usize = 6000;
     const OPS: usize = 129;
     let blocks: Vec<BlockIR> = (0..BLOCKS)
@@ -324,13 +338,16 @@ fn decoded_heap_against_charge() {
 }
 
 /// The work-budget error text the Rust engine prints is the one the oracle prints (same numbers
-/// for the same package), checked on a closed hub and chain built here.
+/// for the same package), checked on a hub ladder built here. EXPECTATION CHANGED (ft-5e61 fix A):
+/// this used a closed hub and chain, which the callee-first order inside a cycle now solves in
+/// linear work; the hub ladder (every member calls both neighbours and the hub) is the cycle that
+/// is still quadratic.
 #[test]
 fn budget_refusal_text_is_stable() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let n = 2048usize;
-    let mut v: Vec<FuncIR> = Vec::new();
-    // hub = 0 calls members 1..n-1 (member j calls j+1 caller-first; last calls hub).
-    let mut hub_ops: Vec<OpIR> = (1..n as u32)
+    let m = n - 1;
+    let mut hub_ops: Vec<OpIR> = (1..=m as u32)
         .map(|c| OpIR::CallConcretePtr {
             site_id: c,
             dst_slot: 0,
@@ -344,7 +361,17 @@ fn budget_refusal_text_is_stable() {
         nil_hint: ASSIGN_NIL_NON_NIL,
         writable_hint: 0,
     });
-    v.push(FuncIR {
+    let ret = |slot: u32, flags: u8| Terminator::Return {
+        site_id: 4,
+        ret_slot: slot,
+        flags,
+    };
+    let call = |site_id: u32, dst_slot: u32, callee_idx: u32| OpIR::CallConcretePtr {
+        site_id,
+        dst_slot,
+        callee_idx,
+    };
+    let mut v = vec![FuncIR {
         flags: FUNC_RETURNS_CONCRETE_ERR_PTR,
         slot_flags: vec![0, 0],
         tuples: vec![],
@@ -357,13 +384,35 @@ fn budget_refusal_text_is_stable() {
                 flags: 0,
             },
         }],
-    });
-    for j in 1..n as u32 - 1 {
-        v.push(call_ret(j + 1));
+    }];
+    for j in 1..=m as u32 {
+        let mut ops = vec![call(1, 0, 0)];
+        if j > 1 {
+            ops.push(call(2, 1, j - 1));
+        }
+        let term = if (j as usize) < m {
+            ops.push(call(3, 2, j + 1));
+            ret(2, 0)
+        } else {
+            ret(NONE_U32, RET_CONCRETE_LITERAL_NIL)
+        };
+        v.push(FuncIR {
+            flags: FUNC_RETURNS_CONCRETE_ERR_PTR,
+            slot_flags: vec![0, 0, 0],
+            tuples: vec![],
+            blocks: vec![BlockIR {
+                phis: vec![],
+                ops,
+                term,
+            }],
+        });
     }
-    v.push(nil_source(Some(0)));
-    let err = solve_package(&v, &mut || true).expect_err("closed hub is refused");
+    let err = solve_package(&v, &mut || true).expect_err("hub ladder is refused");
     let text = err.to_string();
     assert!(text.starts_with("phase-1 work budget exceeded: "), "{text}");
+    assert_eq!(err.code(), "work_budget_exceeded");
+    assert!(err
+        .wire_message()
+        .starts_with("work_budget_exceeded: phase-1 work budget exceeded: "));
     println!("{text}");
 }

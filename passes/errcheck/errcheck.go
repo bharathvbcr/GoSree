@@ -115,7 +115,7 @@ func run(pass *analysis.Pass) (any, error) {
 
 	res, err := gusseterr.Solve(context.Background(), irFuncs)
 	if err != nil {
-		return nil, fmt.Errorf("safeerr solver failed: %w", err)
+		return nil, fmt.Errorf("safeerr solver failed on package %s: %w", pass.Pkg.Path(), err)
 	}
 
 	// Export cross-package FuncFacts for exported concrete-error-pointer functions so

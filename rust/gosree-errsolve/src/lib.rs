@@ -82,6 +82,17 @@ pub const DECODED_PHI_EDGE_BYTES: u64 = 8;
 pub const DECODED_OP_BYTES: u64 = 56;
 pub const DECODED_COMPANION_BYTES: u64 = 4;
 
+/// Fewest wire bytes of each record a count in the frame can claim: a function header, a tuple, a
+/// block (terminator tag, phi count, op count), a phi (slot and arity), a phi edge, an op (kind
+/// and site id) and a companion slot.
+const MIN_FUNC_WIRE_BYTES: usize = 13;
+const TUPLE_WIRE_BYTES: usize = 9;
+const MIN_BLOCK_WIRE_BYTES: usize = 9;
+const MIN_PHI_WIRE_BYTES: usize = 6;
+const PHI_EDGE_WIRE_BYTES: usize = 8;
+const MIN_OP_WIRE_BYTES: usize = 5;
+const COMPANION_WIRE_BYTES: usize = 4;
+
 /// Largest `GSR1` response either engine returns: 1 GiB, gusset's `MAX_BUFFER_BYTES` (the
 /// native path refuses a larger engine output with `output N bytes exceeds maximum M bytes`).
 /// The solver refuses before encoding, with the same text, and the Go oracle does the same.
@@ -90,7 +101,8 @@ pub const MAX_RESPONSE_BYTES: usize = 1 << 30;
 
 /// Phase-1 work budget: the solves of the interprocedural summary phase may do at most
 /// `PHASE1_WORK_FACTOR` x the package's size in work units, and at least `PHASE1_WORK_FLOOR`.
-/// A function's work unit count is its blocks plus its ops; a solve of it costs one count.
+/// A function's work unit count is its ops plus its state cells, blocks x max(slots, 1) (the
+/// product MAX_STATE_CELLS_PER_FUNC bounds); a solve of it costs one count.
 /// The unit is a property of the package, not of the machine, so both engines (and every
 /// load) refuse exactly the same packages. See docs/ERROR_DISCIPLINE.md for the measured
 /// ratios the factor was chosen from.
@@ -191,13 +203,16 @@ impl fmt::Display for SolveError {
             SolveError::BadMagic => write!(f, "invalid GSE1 frame magic"),
             SolveError::Truncated => write!(f, "truncated GSE1 frame"),
             SolveError::TrailingBytes(n) => write!(f, "GSE1 frame has {n} trailing bytes"),
-            SolveError::LimitExceeded(what) => write!(f, "GSE1 limit exceeded: {what}"),
+            SolveError::LimitExceeded(what) => match limit_bound(what) {
+                Some(bound) => write!(f, "GSE1 limit exceeded: {what} over the bound of {bound}"),
+                None => write!(f, "GSE1 limit exceeded: {what}"),
+            },
             SolveError::InvalidEnum(what, v) => write!(f, "invalid {what} tag: {v}"),
             SolveError::IndexOutOfBounds(what, idx, max) => {
                 write!(f, "{what} index {idx} out of bounds (len {max})")
             }
             SolveError::IterationBudgetExceeded(fn_id) => {
-                write!(f, "CFG worklist iteration budget exceeded in func {fn_id}")
+                write!(f, "CFG worklist iteration budget exceeded in func {fn_id} (bound {MAX_ITERATIONS_PER_FUNC} steps)")
             }
             SolveError::CallgraphBudgetExceeded(iters) => write!(
                 f,
@@ -208,7 +223,7 @@ impl fmt::Display for SolveError {
             }
             SolveError::WorkBudgetExceeded(work, budget) => write!(
                 f,
-                "phase-1 work budget exceeded: {work} work units against a budget of {budget} (ops plus blocks of every function solved; the budget is {PHASE1_WORK_FACTOR} times the package's ops plus blocks, at least {PHASE1_WORK_FLOOR})"
+                "phase-1 work budget exceeded: {work} work units against a budget of {budget} (ops plus blocks x max(slots, 1) of every function solved; the budget is {PHASE1_WORK_FACTOR} times the package's total of that, at least {PHASE1_WORK_FLOOR})"
             ),
             SolveError::ResponseTooLarge(bytes, max) => {
                 write!(f, "output {bytes} bytes exceeds maximum {max} bytes")
@@ -219,6 +234,52 @@ impl fmt::Display for SolveError {
 }
 
 impl std::error::Error for SolveError {}
+
+/// The bound a `LimitExceeded` names, so every limit message says what it was refused against.
+/// Mirrored by `limitBound` in `internal/gusseterr/wire.go`.
+fn limit_bound(what: &str) -> Option<u64> {
+    Some(match what {
+        "frame_bytes" => MAX_FRAME_BYTES as u64,
+        "decoded_bytes" => MAX_DECODED_BYTES,
+        "num_funcs" => MAX_FUNCS as u64,
+        "num_slots" => MAX_SLOTS as u64,
+        "num_tuples" => MAX_TUPLES as u64,
+        "num_blocks" => MAX_BLOCKS as u64,
+        "state cells (blocks x slots)" => MAX_STATE_CELLS_PER_FUNC,
+        "num_phis" => MAX_PHIS_PER_BLOCK as u64,
+        "phi_arity" => MAX_PHI_ARITY as u64,
+        "num_ops" => MAX_OPS_PER_BLOCK as u64,
+        "companions" => MAX_COMPANIONS as u64,
+        _ => return None,
+    })
+}
+
+impl SolveError {
+    /// A stable machine-readable name of the refusal, for the engine's wire message.
+    pub fn code(&self) -> &'static str {
+        match self {
+            SolveError::BadMagic => "bad_magic",
+            SolveError::Truncated => "truncated",
+            SolveError::TrailingBytes(_) => "trailing_bytes",
+            SolveError::LimitExceeded(what) if *what == "decoded_bytes" => "decoded_bytes_exceeded",
+            SolveError::LimitExceeded(_) => "limit_exceeded",
+            SolveError::InvalidEnum(_, _) => "invalid_enum",
+            SolveError::IndexOutOfBounds(_, _, _) => "index_out_of_bounds",
+            SolveError::IterationBudgetExceeded(_) => "iteration_budget_exceeded",
+            SolveError::CallgraphBudgetExceeded(_) => "callgraph_budget_exceeded",
+            SolveError::AllocationFailed(_) => "allocation_failed",
+            SolveError::WorkBudgetExceeded(_, _) => "work_budget_exceeded",
+            SolveError::ResponseTooLarge(_, _) => "response_too_large",
+            SolveError::Cancelled => "cancelled",
+        }
+    }
+
+    /// The message the engine hands gusset: `<code>: <text>`. The Go side maps the code to its
+    /// sentinel errors and prints the text, so both engines read the same.
+    pub fn wire_message(&self) -> String {
+        format!("{}: {}", self.code(), self)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Finding {
@@ -350,6 +411,16 @@ impl<'a> Cursor<'a> {
         self.buf.len().saturating_sub(self.pos)
     }
 
+    /// Fails with `Truncated` unless `count` records of at least `unit` wire bytes each could
+    /// still be in the frame: the decoder allocates a collection at exactly its claimed count,
+    /// so a count the remaining bytes cannot back is refused before anything is allocated.
+    fn need(&self, count: usize, unit: usize) -> Result<(), SolveError> {
+        if self.remaining() < count.saturating_mul(unit) {
+            return Err(SolveError::Truncated);
+        }
+        Ok(())
+    }
+
     fn read_exact(&mut self, n: usize) -> Result<&'a [u8], SolveError> {
         let end = self.pos.checked_add(n).ok_or(SolveError::Truncated)?;
         if end > self.buf.len() {
@@ -465,7 +536,8 @@ pub fn decode_package_bounded(
         return Err(SolveError::LimitExceeded("num_funcs"));
     }
 
-    let mut funcs = Vec::with_capacity(num_funcs.min(256));
+    cur.need(num_funcs, MIN_FUNC_WIRE_BYTES)?;
+    let mut funcs = Vec::with_capacity(num_funcs);
     for _ in 0..num_funcs {
         let flags = cur.read_u8()?;
         let num_slots_u32 = cur.read_u32()?;
@@ -492,7 +564,8 @@ pub fn decode_package_bounded(
 
         let slot_flags = cur.read_exact(num_slots)?.to_vec();
 
-        let mut tuples = Vec::with_capacity(num_tuples.min(128));
+        cur.need(num_tuples, TUPLE_WIRE_BYTES)?;
+        let mut tuples = Vec::with_capacity(num_tuples);
         for _ in 0..num_tuples {
             let err_slot = cur.read_u32()?;
             check_slot(err_slot, num_slots_u32, true)?;
@@ -505,7 +578,8 @@ pub fn decode_package_bounded(
             });
         }
 
-        let mut blocks = Vec::with_capacity(num_blocks.min(128));
+        cur.need(num_blocks, MIN_BLOCK_WIRE_BYTES)?;
+        let mut blocks = Vec::with_capacity(num_blocks);
         for _ in 0..num_blocks {
             budget.charge(1, DECODED_BLOCK_BYTES)?;
             let term_kind = cur.read_u8()?;
@@ -554,7 +628,8 @@ pub fn decode_package_bounded(
                 return Err(SolveError::LimitExceeded("num_phis"));
             }
             budget.charge(num_phis as u64, DECODED_PHI_BYTES)?;
-            let mut phis = Vec::with_capacity(num_phis.min(64));
+            cur.need(num_phis, MIN_PHI_WIRE_BYTES)?;
+            let mut phis = Vec::with_capacity(num_phis);
             for _ in 0..num_phis {
                 let dst_slot = cur.read_u32()?;
                 check_slot(dst_slot, num_slots_u32, false)?;
@@ -563,6 +638,7 @@ pub fn decode_package_bounded(
                     return Err(SolveError::LimitExceeded("phi_arity"));
                 }
                 budget.charge(arity as u64, DECODED_PHI_EDGE_BYTES)?;
+                cur.need(arity, PHI_EDGE_WIRE_BYTES)?;
                 let mut incoming = Vec::with_capacity(arity);
                 for _ in 0..arity {
                     let pred_bb = cur.read_u32()?;
@@ -579,7 +655,8 @@ pub fn decode_package_bounded(
                 return Err(SolveError::LimitExceeded("num_ops"));
             }
             budget.charge(num_ops as u64, DECODED_OP_BYTES)?;
-            let mut ops = Vec::with_capacity(num_ops.min(128));
+            cur.need(num_ops, MIN_OP_WIRE_BYTES)?;
+            let mut ops = Vec::with_capacity(num_ops);
             for _ in 0..num_ops {
                 let op_kind = cur.read_u8()?;
                 let site_id = cur.read_u32()?;
@@ -601,6 +678,7 @@ pub fn decode_package_bounded(
                             return Err(SolveError::LimitExceeded("companions"));
                         }
                         budget.charge(comp_count as u64, DECODED_COMPANION_BYTES)?;
+                        cur.need(comp_count, COMPANION_WIRE_BYTES)?;
                         let mut companions = Vec::with_capacity(comp_count);
                         for _ in 0..comp_count {
                             let cs = cur.read_u32()?;
@@ -1156,7 +1234,7 @@ fn with_canonical_tuples<F: FnMut() -> bool>(
 struct Phase1Stats {
     /// `solve_function` calls made by phase 1.
     solves: u64,
-    /// Work units of those solves (blocks plus ops of each function solved, per solve).
+    /// Work units of those solves (ops plus blocks x max(slots, 1) of each function solved, per solve).
     work: u64,
     /// Strongly connected components of the call graph that phase 1 visited.
     sccs: u64,
@@ -1173,8 +1251,14 @@ const SCC_POLL_STEPS: usize = 1024;
 /// search (a call chain of `MAX_FUNCS` functions would overflow the stack recursively).
 ///
 /// Tarjan emits a component after every component reachable from it, and here that is every
-/// component of its callers, so the emission order is callers first. The components are returned
-/// as one flat member list and the exclusive end offset of each component, in emission order.
+/// component of its callers, so the emission order is callers first. The result is the reverse:
+/// one flat list of the nodes in solve order (components callees first) and the exclusive end
+/// offset of each component in it. Inside a component the nodes are in reverse finish order of
+/// the depth-first search, which for the search over callers lists every function after the
+/// functions it calls that were found through it, so a summary that flips travels to its callers
+/// within one sweep wherever the search found them: the same callee-first order that is used
+/// between components, applied inside the cycle. A cycle can still contain back edges against
+/// that order; each costs one more sweep, and the work budget bounds the total.
 fn call_sccs<F: FnMut() -> bool>(
     callers: &[Vec<u32>],
     active: &[bool],
@@ -1183,6 +1267,8 @@ fn call_sccs<F: FnMut() -> bool>(
     const UNVISITED: u32 = u32::MAX;
     let n = callers.len();
     let mut index = vec![UNVISITED; n];
+    let mut finish = vec![0u32; n];
+    let mut next_finish = 0u32;
     let mut low = vec![0u32; n];
     let mut on_stack = vec![false; n];
     let mut stack: Vec<u32> = Vec::new();
@@ -1231,6 +1317,8 @@ fn call_sccs<F: FnMut() -> bool>(
                 continue;
             }
             frames.pop();
+            finish[vi] = next_finish;
+            next_finish += 1;
             if low[vi] == index[vi] {
                 while let Some(m) = stack.pop() {
                     on_stack[m as usize] = false;
@@ -1247,7 +1335,17 @@ fn call_sccs<F: FnMut() -> bool>(
             }
         }
     }
-    Ok((members, ends))
+    // Callees first between components, reverse finish order inside one.
+    let mut order: Vec<u32> = Vec::with_capacity(members.len());
+    let mut order_ends: Vec<u32> = Vec::with_capacity(ends.len());
+    for k in (0..ends.len()).rev() {
+        let start = if k == 0 { 0 } else { ends[k - 1] as usize };
+        let from = order.len();
+        order.extend_from_slice(&members[start..ends[k] as usize]);
+        order[from..].sort_unstable_by_key(|&m| Reverse(finish[m as usize]));
+        order_ends.push(order.len() as u32);
+    }
+    Ok((order, order_ends))
 }
 
 /// `solve_package` with an explicit call-graph sweep cap (the public entry point passes
@@ -1326,15 +1424,17 @@ where
     //
     // A component that is itself a cycle can still cost O(n^2) (a hub calling every member of a
     // chain that closes back on the hub), so the solves are also bounded by a whole-package
-    // work budget in a deterministic unit: the blocks plus ops of each function per solve,
-    // against `work_factor` x the package's blocks plus ops (at least `work_floor`). The unit
+    // work budget in a deterministic unit: the ops plus state cells (blocks x max(slots, 1))
+    // of each function per solve, against `work_factor` x the package's total of that (at least `work_floor`). The unit
     // is the same in both engines, so both refuse the same packages at the same solve. Cap
     // and budget are checked after every solve, and `check_cancel` is polled per component and
     // per sweep.
     let mut callers: Vec<Vec<u32>> = vec![Vec::new(); n_funcs];
     let mut unit_work: Vec<u64> = Vec::with_capacity(n_funcs);
     for (idx, fn_ir) in funcs.iter().copied().enumerate() {
-        let mut work = fn_ir.blocks.len() as u64;
+        // Solve cost scales with the state cells (blocks x slots) the solver holds, which is what
+        // MAX_STATE_CELLS_PER_FUNC bounds, plus one step per op.
+        let mut work = fn_ir.blocks.len() as u64 * (fn_ir.slot_flags.len() as u64).max(1);
         for block in &fn_ir.blocks {
             work += block.ops.len() as u64;
             for op in &block.ops {
@@ -1355,16 +1455,23 @@ where
         .zip(&may_return_nil)
         .map(|(f, &nil)| !nil && f.flags & FUNC_RETURNS_CONCRETE_ERR_PTR != 0)
         .collect();
-    let (scc_members, scc_ends) = call_sccs(&callers, &active, check_cancel)?;
+    let (order, scc_ends) = call_sccs(&callers, &active, check_cancel)?;
+    // rank[f] is f's position in the solve order; the sweep heaps hold ranks, so a sweep visits
+    // the dirty members of a component in that order and not in function-index order.
+    let mut rank = vec![0u32; n_funcs];
+    for (pos, &f) in order.iter().enumerate() {
+        rank[f as usize] = pos as u32;
+    }
 
     let mut dirty = vec![true; n_funcs];
     let mut this_sweep: BinaryHeap<Reverse<u32>> = BinaryHeap::new();
     let mut next_sweep: BinaryHeap<Reverse<u32>> = BinaryHeap::new();
     let mut work_done = 0u64;
-    for (k, &end) in scc_ends.iter().enumerate().rev() {
-        let start = if k == 0 { 0 } else { scc_ends[k - 1] as usize };
+    let mut start = 0u32;
+    for &end in &scc_ends {
         stats.sccs += 1;
-        this_sweep.extend(scc_members[start..end as usize].iter().map(|&m| Reverse(m)));
+        this_sweep.extend((start..end).map(Reverse));
+        start = end;
         let mut converged = false;
         for _iter in 0..max_callgraph_iters {
             if !check_cancel() {
@@ -1372,11 +1479,15 @@ where
             }
             stats.sweeps += 1;
             let mut any_changed = false;
-            while let Some(Reverse(idx32)) = this_sweep.pop() {
+            while let Some(Reverse(pos)) = this_sweep.pop() {
+                let idx32 = order[pos as usize];
                 let idx = idx32 as usize;
                 let fn_ir = funcs[idx];
                 if may_return_nil[idx] || !dirty[idx] {
                     continue;
+                }
+                if !check_cancel() {
+                    return Err(SolveError::Cancelled);
                 }
                 dirty[idx] = false;
                 let solved = solve_function(idx32, fn_ir, &may_return_nil, false, check_cancel)?;
@@ -1394,10 +1505,11 @@ where
                             continue;
                         }
                         dirty[c as usize] = true;
-                        if c > idx32 {
-                            this_sweep.push(Reverse(c));
+                        let r = rank[c as usize];
+                        if r > pos {
+                            this_sweep.push(Reverse(r));
                         } else {
-                            next_sweep.push(Reverse(c));
+                            next_sweep.push(Reverse(r));
                         }
                     }
                 }
@@ -2847,9 +2959,61 @@ mod tests {
         funcs
             .iter()
             .map(|f| {
-                f.blocks.len() as u64 + f.blocks.iter().map(|b| b.ops.len() as u64).sum::<u64>()
+                f.blocks.len() as u64 * (f.slot_flags.len() as u64).max(1)
+                    + f.blocks.iter().map(|b| b.ops.len() as u64).sum::<u64>()
             })
             .sum()
+    }
+
+    /// A hub (index 0) calling every member of a chain of `n - 1` whose members call both
+    /// neighbours and the hub, so the chain is a ladder of mutual calls in one cycle with the
+    /// hub. Member `j` returns the result of member `j + 1`; the last returns a literal nil. A
+    /// summary that flips at the last member reaches member `j - 1` along a back edge of the
+    /// search each time, one sweep per member with the hub re-solved in every sweep: the shape
+    /// the callee-first order inside a cycle does not help with and the work budget refuses.
+    fn hub_ladder(n: usize) -> Vec<FuncIR> {
+        let m = n - 1;
+        let mut hub_ops: Vec<OpIR> = (1..=m).map(|j| call_op(j as u32, j as u32)).collect();
+        hub_ops.push(OpIR::AssignSlot {
+            site_id: m as u32 + 1,
+            dst_slot: 1,
+            src_slot: NONE_U32,
+            nil_hint: ASSIGN_NIL_NON_NIL,
+            writable_hint: 0,
+        });
+        let mut funcs = vec![FuncIR {
+            flags: FUNC_RETURNS_CONCRETE_ERR_PTR,
+            slot_flags: vec![0, 0],
+            tuples: vec![],
+            blocks: one_block(hub_ops, term_return(1, 1, 0)),
+        }];
+        for j in 1..=m {
+            let mut ops = vec![call_op(1, 0)];
+            if j > 1 {
+                ops.push(OpIR::CallConcretePtr {
+                    site_id: 2,
+                    dst_slot: 1,
+                    callee_idx: j as u32 - 1,
+                });
+            }
+            let term = if j < m {
+                ops.push(OpIR::CallConcretePtr {
+                    site_id: 3,
+                    dst_slot: 2,
+                    callee_idx: j as u32 + 1,
+                });
+                term_return(4, 2, 0)
+            } else {
+                term_return(4, NONE_U32, RET_CONCRETE_LITERAL_NIL)
+            };
+            funcs.push(FuncIR {
+                flags: FUNC_RETURNS_CONCRETE_ERR_PTR,
+                slot_flags: vec![0, 0, 0],
+                tuples: vec![],
+                blocks: one_block(ops, term),
+            });
+        }
+        funcs
     }
 
     fn limited(
@@ -3027,8 +3191,28 @@ mod tests {
     }
 
     #[test]
-    fn closed_hub_and_chain_fails_closed_after_bounded_work() {
-        let funcs = hub_chain(4_096, true, true);
+    fn closed_hub_and_chain_is_linear() {
+        // f0dea98 re-solved the hub once per member (quadratic); 65e2cd4 refused this package
+        // from n = 1,024 because it ordered the cycle by function index. Callee-first order inside
+        // the cycle solves the hub twice, at any size.
+        for hub_first in [true, false] {
+            for n in [1_024usize, 4_096, 16_384] {
+                let funcs = hub_chain(n, hub_first, true);
+                let (res, stats) = limited(&funcs, PHASE1_WORK_FACTOR, PHASE1_WORK_FLOOR);
+                res.expect("solves");
+                let ratio = stats.work as f64 / package_size(&funcs) as f64;
+                assert!(
+                    ratio < 3.0 && stats.solves <= 2 * n as u64,
+                    "hub_first={hub_first} n={n}: {} solves, work/size {ratio:.2}",
+                    stats.solves
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hub_ladder_fails_closed_after_bounded_work() {
+        let funcs = hub_ladder(4_096);
         let size = package_size(&funcs);
         let (res, stats) = limited(&funcs, PHASE1_WORK_FACTOR, PHASE1_WORK_FLOOR);
         let budget = (size * PHASE1_WORK_FACTOR).max(PHASE1_WORK_FLOOR);
@@ -3067,7 +3251,7 @@ mod tests {
         assert_eq!(err, SolveError::WorkBudgetExceeded(18, 17));
         assert_eq!(
             err.to_string(),
-            format!("phase-1 work budget exceeded: 18 work units against a budget of 17 (ops plus blocks of every function solved; the budget is {PHASE1_WORK_FACTOR} times the package's ops plus blocks, at least {PHASE1_WORK_FLOOR})")
+            format!("phase-1 work budget exceeded: 18 work units against a budget of 17 (ops plus blocks x max(slots, 1) of every function solved; the budget is {PHASE1_WORK_FACTOR} times the package's total of that, at least {PHASE1_WORK_FLOOR})")
         );
         assert!(
             limited(&funcs, 2, 1).0.is_ok(),
@@ -3100,7 +3284,7 @@ mod tests {
             )
             .expect("solves");
             assert!(
-                polls as u64 >= stats.sccs + stats.sweeps,
+                polls as u64 >= stats.sccs + stats.sweeps + stats.solves,
                 "{polls} polls, {stats:?}"
             );
             for fail_at in 1..=polls {
@@ -3119,7 +3303,7 @@ mod tests {
     }
 
     #[test]
-    fn call_sccs_is_iterative_and_callers_first() {
+    fn call_sccs_is_iterative_and_callees_first() {
         const N: usize = 2_000_000;
         let mut callers: Vec<Vec<u32>> = (0..N)
             .map(|v| if v == 0 { vec![] } else { vec![(v - 1) as u32] })
@@ -3127,7 +3311,8 @@ mod tests {
         let active = vec![true; N];
         let (members, ends) = call_sccs(&callers, &active, &mut || true).expect("search");
         assert_eq!((members.len(), ends.len()), (N, N));
-        assert_eq!((members[0], members[N - 1]), (0, (N - 1) as u32));
+        // Function 0 calls 1 calls 2 ...: callees first, so N - 1 is solved first and 0 last.
+        assert_eq!((members[0], members[N - 1]), ((N - 1) as u32, 0));
         callers[0] = vec![(N - 1) as u32];
         let (members, ends) = call_sccs(&callers, &active, &mut || true).expect("search");
         assert_eq!((members.len(), ends.len()), (N, 1));
@@ -3266,5 +3451,86 @@ mod tests {
             )
         );
         assert_eq!(MAX_RESPONSE_BYTES, 1 << 30);
+    }
+
+    /// The decoded-size cost, frame length and phase-1 package size of `hub_chain(100, true,
+    /// false)`: the same numbers the Go test `TestDecodedModelGoldenMatchesRust` pins for
+    /// `hubChain(100, true, true, false)`, so both engines charge and refuse at exactly the same
+    /// modelled byte count.
+    #[test]
+    fn model_matches_the_go_golden() {
+        let funcs = hub_chain(100, true, false);
+        let frame = encode_package(&funcs);
+        assert_eq!(
+            (decoded_bytes(&funcs), frame.len(), package_size(&funcs)),
+            (30_389, 5_785, 299)
+        );
+        assert!(decode_package_bounded(&frame, 30_389).is_ok());
+        assert_eq!(
+            decode_package_bounded(&frame, 30_388).err(),
+            Some(SolveError::LimitExceeded("decoded_bytes"))
+        );
+    }
+
+    #[test]
+    fn refusals_name_their_bound() {
+        for (what, bound) in [
+            ("frame_bytes", MAX_FRAME_BYTES as u64),
+            ("decoded_bytes", MAX_DECODED_BYTES),
+            ("num_funcs", MAX_FUNCS as u64),
+            ("num_slots", MAX_SLOTS as u64),
+            ("num_tuples", MAX_TUPLES as u64),
+            ("num_blocks", MAX_BLOCKS as u64),
+            ("state cells (blocks x slots)", MAX_STATE_CELLS_PER_FUNC),
+            ("num_phis", MAX_PHIS_PER_BLOCK as u64),
+            ("phi_arity", MAX_PHI_ARITY as u64),
+            ("num_ops", MAX_OPS_PER_BLOCK as u64),
+            ("companions", MAX_COMPANIONS as u64),
+        ] {
+            assert_eq!(
+                SolveError::LimitExceeded(what).to_string(),
+                format!("GSE1 limit exceeded: {what} over the bound of {bound}")
+            );
+        }
+        assert!(SolveError::IterationBudgetExceeded(3)
+            .to_string()
+            .contains(&format!("(bound {MAX_ITERATIONS_PER_FUNC} steps)")));
+        assert_eq!(
+            SolveError::LimitExceeded("decoded_bytes").wire_message(),
+            format!(
+                "decoded_bytes_exceeded: GSE1 limit exceeded: decoded_bytes over the bound of {MAX_DECODED_BYTES}"
+            )
+        );
+    }
+
+    #[test]
+    fn phase1_work_unit_counts_state_cells() {
+        for (blocks, slots) in [(2048usize, 1usize), (2048, 4096), (7, 0), (1, 3)] {
+            let mut bl: Vec<BlockIR> = (0..blocks)
+                .map(|i| BlockIR {
+                    phis: vec![],
+                    ops: vec![],
+                    term: Terminator::Jump {
+                        target: i as u32 + 1,
+                    },
+                })
+                .collect();
+            bl[blocks - 1].term = term_return(1, NONE_U32, RET_CONCRETE_LITERAL_NIL);
+            let f = FuncIR {
+                flags: FUNC_RETURNS_CONCRETE_ERR_PTR,
+                slot_flags: vec![0; slots],
+                tuples: vec![],
+                blocks: bl,
+            };
+            let (res, stats) = limited(
+                std::slice::from_ref(&f),
+                PHASE1_WORK_FACTOR,
+                PHASE1_WORK_FLOOR,
+            );
+            res.expect("solves");
+            let want = blocks as u64 * (slots as u64).max(1);
+            assert_eq!(stats.work, want, "{blocks} blocks x {slots} slots");
+            assert_eq!(package_size(std::slice::from_ref(&f)), want);
+        }
     }
 }

@@ -2,6 +2,7 @@ package gusseterr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -60,6 +61,41 @@ func hubChain(n int, hubFirst, callersFirst, closed bool) []FuncIR {
 	return funcs
 }
 
+// hubLadder is a hub (index 0) calling every member of a chain of n-1 whose members call both
+// neighbours as well as the hub, so the chain is a ladder of mutual calls and every member is in
+// one cycle with the hub. Member j returns the result of member j+1; the last returns a literal
+// nil. The depth-first search over callers finds the members in index order, so a summary that
+// flips at the last member travels to member j-1 along a back edge of the search each time: one
+// sweep per member, with the hub re-solved in every sweep. This is the shape the callee-first
+// order inside a cycle does not help with, and the work budget refuses.
+func hubLadder(n int) []FuncIR {
+	m := n - 1
+	funcs := make([]FuncIR, n)
+	hubOps := make([]OpIR, 0, m+1)
+	for j := 1; j <= m; j++ {
+		hubOps = append(hubOps, OpIR{Kind: OpCallConcretePtr, SiteID: uint32(j), SlotA: 0, SlotB: uint32(j)})
+	}
+	hubOps = append(hubOps, OpIR{Kind: OpAssignSlot, SiteID: uint32(m + 1), SlotA: 1, SlotB: NoneU32, NilHint: AssignNilNonNil})
+	funcs[0] = FuncIR{
+		Flags:     FuncReturnsConcreteErrPtr,
+		SlotFlags: []uint8{0, 0},
+		Blocks:    []BlockIR{{Ops: hubOps, Term: Terminator{Kind: TermReturn, SiteID: 1, RetSlot: 1}}},
+	}
+	for j := 1; j <= m; j++ {
+		ops := []OpIR{{Kind: OpCallConcretePtr, SiteID: 1, SlotA: 0, SlotB: 0}}
+		if j > 1 {
+			ops = append(ops, OpIR{Kind: OpCallConcretePtr, SiteID: 2, SlotA: 1, SlotB: uint32(j - 1)})
+		}
+		term := Terminator{Kind: TermReturn, SiteID: 4, RetSlot: NoneU32, RetFlags: RetConcreteLiteralNil}
+		if j < m {
+			ops = append(ops, OpIR{Kind: OpCallConcretePtr, SiteID: 3, SlotA: 2, SlotB: uint32(j + 1)})
+			term = Terminator{Kind: TermReturn, SiteID: 4, RetSlot: 2}
+		}
+		funcs[j] = FuncIR{Flags: FuncReturnsConcreteErrPtr, SlotFlags: []uint8{0, 0, 0}, Blocks: []BlockIR{{Ops: ops, Term: term}}}
+	}
+	return funcs
+}
+
 // TestPhase1WorkIsLinearOnHubAndChain: phase-1 work on a hub calling every member of a
 // caller-first chain grows linearly with the package, not quadratically. The measure is the
 // work units of the phase-1 solves (blocks plus ops per solve), which depend on the package
@@ -102,11 +138,12 @@ func hubIndex(n int, hubFirst bool) int {
 	return n - 1
 }
 
-// packageSize is the phase-1 budget unit of a package: blocks plus ops over every function.
+// packageSize is the phase-1 budget unit of a package: for every function its ops plus its state
+// cells, blocks x max(slots, 1).
 func packageSize(funcs []FuncIR) uint64 {
 	var size uint64
 	for i := range funcs {
-		size += uint64(len(funcs[i].Blocks))
+		size += uint64(len(funcs[i].Blocks)) * max(uint64(len(funcs[i].SlotFlags)), 1)
 		for _, b := range funcs[i].Blocks {
 			size += uint64(len(b.Ops))
 		}
@@ -212,18 +249,40 @@ func TestPhase1ChainAtMaxFuncsInBothEngines(t *testing.T) {
 	}
 }
 
-// TestClosedHubChainFailsClosed: a hub calling every member of a chain that closes back on the
-// hub is one cycle, quadratic in sweeps, and phase 1 refuses it by its work budget in both
-// engines instead of running for minutes: the same error, after a bounded amount of work.
-func TestClosedHubChainFailsClosed(t *testing.T) {
+// TestClosedHubChainIsLinear: a hub calling every member of a caller-first chain that closes back
+// on the hub is one cycle. f0dea98 re-solved the hub once per member (quadratic); the callee-first
+// order inside the cycle solves it twice, at any size: work is linear and the package is not
+// refused (it was, from n = 1,024, in 65e2cd4, which ordered the cycle by function index).
+func TestClosedHubChainIsLinear(t *testing.T) {
+	ctx := context.Background()
+	for _, hubFirst := range []bool{true, false} {
+		for _, n := range []int{1024, 4096, 16384} {
+			closed := hubChain(n, hubFirst, true, true)
+			var st phase1Stats
+			if _, err := solveOracleLimited(ctx, closed, n+1, Phase1WorkFactor, Phase1WorkFloor, &st); err != nil {
+				t.Fatalf("hubFirst=%v n=%d: %v", hubFirst, n, err)
+			}
+			ratio := float64(st.work) / float64(packageSize(closed))
+			t.Logf("closed hub and chain, hubFirst=%v n=%d: %d solves, %d work units, work/size %.2f", hubFirst, n, st.solves, st.work, ratio)
+			if ratio > 3 || st.solves > uint64(2*n) {
+				t.Fatalf("hubFirst=%v n=%d: %d solves, work/size %.2f: not linear", hubFirst, n, st.solves, ratio)
+			}
+		}
+	}
+}
+
+// TestHubLadderFailsClosed: a cycle the callee-first order cannot flatten (back edges of the
+// search all the way along the chain) is still quadratic, and phase 1 refuses it by its work budget
+// in both engines instead of running for minutes: the same error, after a bounded amount of work.
+func TestHubLadderFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	const n = 4096
-	closed := hubChain(n, true, true, true)
-	size := packageSize(closed)
+	ladder := hubLadder(n)
+	size := packageSize(ladder)
 	var st phase1Stats
-	_, err := solveOracleLimited(ctx, closed, n+1, Phase1WorkFactor, Phase1WorkFloor, &st)
-	if err == nil || !strings.Contains(err.Error(), "phase-1 work budget exceeded") {
-		t.Fatalf("closed hub and chain: err = %v, want the work budget error", err)
+	_, err := solveOracleLimited(ctx, ladder, n+1, Phase1WorkFactor, Phase1WorkFloor, &st)
+	if err == nil || !strings.Contains(err.Error(), "phase-1 work budget exceeded") || !errors.Is(err, ErrWorkBudgetExceeded) {
+		t.Fatalf("hub ladder: err = %v, want the work budget error", err)
 	}
 	budget := max(uint64(Phase1WorkFloor), size*Phase1WorkFactor)
 	if st.work <= budget || st.work > budget+size {
@@ -233,15 +292,17 @@ func TestClosedHubChainFailsClosed(t *testing.T) {
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("err = %q, want it to name %q", err, want)
 	}
-	if _, err := Solve(ctx, closed); err == nil || !strings.Contains(err.Error(), "phase-1 work budget exceeded") {
-		t.Fatalf("Solve on the closed hub and chain: err = %v, want the work budget error", err)
+	for name, solve := range map[string]func(context.Context, []FuncIR) (PackageResult, error){"Solve": Solve, "SolveOracle": SolveOracle} {
+		if _, err := solve(ctx, ladder); err == nil || !strings.Contains(err.Error(), "phase-1 work budget exceeded") || !errors.Is(err, ErrWorkBudgetExceeded) {
+			t.Fatalf("%s on the hub ladder: err = %v, want the work budget error", name, err)
+		}
 	}
-	if _, err := SolveOracle(ctx, closed); err == nil || !strings.Contains(err.Error(), "phase-1 work budget exceeded") {
-		t.Fatalf("SolveOracle on the closed hub and chain: err = %v, want the work budget error", err)
-	}
-	// The same shape, left open, is solved in linear work.
-	if _, err := Solve(ctx, hubChain(n, true, true, false)); err != nil {
-		t.Fatalf("the open hub and chain: %v", err)
+	// Small ladders are within the floor and solved; the summaries are the naive solver's.
+	small := hubLadder(40)
+	got, err := SolveOracle(ctx, small)
+	want2, nerr := naiveSolve(ctx, small)
+	if err != nil || nerr != nil || !slices.Equal(got.MayReturnNil, want2.MayReturnNil) {
+		t.Fatalf("hub ladder of 40: %v / %v", err, nerr)
 	}
 }
 
@@ -256,7 +317,7 @@ func TestPhase1BudgetBoundary(t *testing.T) {
 		t.Fatalf("budget exactly the work (18): err = %v, work = %d", err, st.work)
 	}
 	_, err := solveOracleLimited(ctx, funcs, 11, 0, 17, &st)
-	want := fmt.Sprintf("phase-1 work budget exceeded: 18 work units against a budget of 17 (ops plus blocks of every function solved; the budget is %d times the package's ops plus blocks, at least %d)", Phase1WorkFactor, Phase1WorkFloor)
+	want := fmt.Sprintf("phase-1 work budget exceeded: 18 work units against a budget of 17 (ops plus blocks x max(slots, 1) of every function solved; the budget is %d times the package's total of that, at least %d)", Phase1WorkFactor, Phase1WorkFloor)
 	if err == nil || err.Error() != want {
 		t.Fatalf("budget one under the work: err = %v, want %q", err, want)
 	}
@@ -301,8 +362,8 @@ func TestPhase1PollsCancellationPerComponentAndSweep(t *testing.T) {
 		if _, err := solveOracleLimited(counter, funcs, len(funcs)+1, Phase1WorkFactor, Phase1WorkFloor, &st); err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if uint64(counter.calls) < st.sccs+st.sweeps {
-			t.Fatalf("%s: %d polls for %d components and %d sweeps", name, counter.calls, st.sccs, st.sweeps)
+		if uint64(counter.calls) < st.sccs+st.sweeps+st.solves {
+			t.Fatalf("%s: %d polls for %d components, %d sweeps and %d solves", name, counter.calls, st.sccs, st.sweeps, st.solves)
 		}
 		for failAt := 1; failAt <= counter.calls; failAt++ {
 			c := &pollCtx{Context: context.Background(), failAt: failAt}
@@ -313,9 +374,10 @@ func TestPhase1PollsCancellationPerComponentAndSweep(t *testing.T) {
 	}
 }
 
-// TestCallSCCsIsIterativeAndCallersFirst: the component search finds the right components on a
-// chain far deeper than a recursive search could hold on a goroutine stack, and emits callers first.
-func TestCallSCCsIsIterativeAndCallersFirst(t *testing.T) {
+// TestCallSCCsIsIterativeAndCalleesFirst: the component search finds the right components on a
+// chain far deeper than a recursive search could hold on a goroutine stack, and returns them
+// callees first.
+func TestCallSCCsIsIterativeAndCalleesFirst(t *testing.T) {
 	const n = 2_000_000
 	callers := make([][]uint32, n) // callers[v] = {v-1}: v-1 calls v, one long chain
 	active := make([]bool, n)
@@ -332,9 +394,9 @@ func TestCallSCCsIsIterativeAndCallersFirst(t *testing.T) {
 	if len(ends) != n || len(members) != n {
 		t.Fatalf("%d components over %d members, want %d singletons", len(ends), len(members), n)
 	}
-	// Function 0 calls 1 calls 2 ...: callers first means 0 is emitted before 1.
-	if members[0] != 0 || members[n-1] != n-1 {
-		t.Fatalf("emission order starts at %d and ends at %d, want callers first (0 ... n-1)", members[0], members[n-1])
+	// Function 0 calls 1 calls 2 ...: callees first means n-1 is solved before n-2, 0 last.
+	if members[0] != n-1 || members[n-1] != 0 {
+		t.Fatalf("solve order starts at %d and ends at %d, want callees first (n-1 ... 0)", members[0], members[n-1])
 	}
 	// One cycle through every function is one component.
 	callers[0] = []uint32{uint32(n - 1)}

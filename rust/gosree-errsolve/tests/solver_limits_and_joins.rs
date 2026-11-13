@@ -123,29 +123,30 @@ fn call_cycle(n: usize) -> Vec<FuncIR> {
     funcs
 }
 
-/// The sweep cap applies to each strongly connected component. It used to be reached with
-/// `call_chain(10)`; callee-first order solves a chain one function per component, so the cap
-/// needs a cycle, which `call_cycle(9)` gives with the same numbers.
+/// The sweep cap applies to each strongly connected component.
+///
+/// The numbers moved when the order inside a component became callee-first (reverse finish order
+/// of the search over callers) instead of function-index order. In index order `call_cycle(9)`
+/// flipped one function per sweep (nine changing sweeps and a confirming tenth: caps 3/9/10). Now
+/// the nil returned by the last function reaches every other function in the first sweep except
+/// function 0, which calls function 1 and was solved first: it flips in the second sweep and a
+/// third confirms. So the cycle needs a cap of 3 and fails closed at 2 and 1.
 #[test]
 fn callgraph_cap_fails_closed_instead_of_exporting_optimistic_summaries() {
     let funcs = call_cycle(9);
-    let err = solve_package_capped(&funcs, &mut || true, 3).unwrap_err();
-    assert_eq!(err, SolveError::CallgraphBudgetExceeded(3));
-    assert!(err
-        .to_string()
-        .contains("did not converge within 3 iterations"));
+    for cap in [1usize, 2] {
+        let err = solve_package_capped(&funcs, &mut || true, cap).unwrap_err();
+        assert_eq!(err, SolveError::CallgraphBudgetExceeded(cap));
+        assert!(err
+            .to_string()
+            .contains(&format!("did not converge within {cap} iterations")));
+    }
 
-    // With enough sweeps the same package converges and every summary is may-nil.
+    // Two sweeps change a summary and a third, unchanged one confirms the fixpoint. A fixpoint
+    // reached on the last permitted sweep without that confirmation is not trusted.
+    assert!(solve_package_capped(&funcs, &mut || true, 3).is_ok());
     let res = solve_package_capped(&funcs, &mut || true, 64).expect("converges");
     assert!(res.may_return_nil.iter().all(|&b| b));
-
-    // Nine sweeps each flip one summary; a tenth, unchanged sweep confirms the fixpoint. A
-    // fixpoint reached on the last permitted sweep without that confirmation is not trusted.
-    assert_eq!(
-        solve_package_capped(&funcs, &mut || true, 9).unwrap_err(),
-        SolveError::CallgraphBudgetExceeded(9)
-    );
-    assert!(solve_package_capped(&funcs, &mut || true, 10).is_ok());
 
     // The same chain left open is singleton components needing two sweeps each, at any length.
     assert!(solve_package_capped(&call_chain(10), &mut || true, 2).is_ok());

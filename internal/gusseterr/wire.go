@@ -9,9 +9,24 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 const NoneU32 uint32 = ^uint32(0)
+
+// Fewest wire bytes of each record a count in the frame can claim, mirroring the *_WIRE_BYTES
+// constants in rust/gosree-errsolve/src/lib.rs: a function header, a tuple, a block (terminator
+// tag, phi count, op count), a phi (slot and arity), a phi edge, an op (kind and site id) and a
+// companion slot.
+const (
+	minFuncWireBytes   = 13
+	tupleWireBytes     = 9
+	minBlockWireBytes  = 9
+	minPhiWireBytes    = 6
+	phiEdgeWireBytes   = 8
+	minOpWireBytes     = 5
+	companionWireBytes = 4
+)
 
 // Limits matching rust/gosree-errsolve/src/lib.rs.
 const (
@@ -81,8 +96,8 @@ const (
 
 	// Phase1WorkFactor and Phase1WorkFloor bound the solves of the interprocedural summary
 	// phase: at most Phase1WorkFactor x the package's size in work units, and at least
-	// Phase1WorkFloor. A function's work unit count is its blocks plus its ops, and a solve of
-	// it costs one count. The unit is a property of the package, not of the machine, so both
+	// Phase1WorkFloor. A function's work unit count is its ops plus its state cells, blocks x
+	// max(slots, 1) (the product MaxStateCells bounds), and a solve of it costs one count. The unit is a property of the package, not of the machine, so both
 	// engines refuse exactly the same packages at the same solve. docs/ERROR_DISCIPLINE.md has
 	// the measured ratios the factor was chosen from. Mirrors PHASE1_WORK_FACTOR and
 	// PHASE1_WORK_FLOOR in rust/gosree-errsolve/src/lib.rs.
@@ -94,9 +109,91 @@ const (
 // both engines apply the identical rule.
 func checkStateCells(nBlocks, nSlots uint64) error {
 	if nBlocks*nSlots > MaxStateCells {
-		return fmt.Errorf("gusseterr: GSE1 limit exceeded: state cells (blocks x slots) %d x %d exceeds %d", nBlocks, nSlots, MaxStateCells)
+		return limitErr("state cells (blocks x slots)")
 	}
 	return nil
+}
+
+// Sentinels for the refusals a caller can classify with errors.Is. Both engines return errors
+// that wrap them with identical text: the oracle builds them directly, and the native path maps
+// the code the Rust engine puts in front of its message (SolveError::code) back to them.
+var (
+	// ErrWorkBudgetExceeded: phase 1 did more work than the package's budget allows.
+	ErrWorkBudgetExceeded = errors.New("gusseterr: phase-1 work budget exceeded")
+	// ErrDecodedBytesExceeded: the decoded program would be over MaxDecodedBytes.
+	ErrDecodedBytesExceeded = errors.New("gusseterr: decoded size over MaxDecodedBytes")
+	// ErrCallgraphBudgetExceeded: a component's summary sweeps did not converge in the cap.
+	ErrCallgraphBudgetExceeded = errors.New("gusseterr: call-graph sweep cap exceeded")
+	// ErrIterationBudgetExceeded: a function's CFG worklist ran past MaxIterationsPerFunc.
+	ErrIterationBudgetExceeded = errors.New("gusseterr: CFG worklist budget exceeded")
+	// ErrResponseTooLarge: the GSR1 response would be over MaxResponseBytes.
+	ErrResponseTooLarge = errors.New("gusseterr: response over MaxResponseBytes")
+	// ErrLimitExceeded: a count, size or frame bound of Section 3.3 of the design doc was passed.
+	ErrLimitExceeded = errors.New("gusseterr: GSE1 limit exceeded")
+)
+
+// refusal is an error whose text is exactly msg and which matches kind (and cause, if any).
+type refusal struct {
+	kind  error
+	msg   string
+	cause error
+}
+
+func (e *refusal) Error() string { return e.msg }
+
+func (e *refusal) Unwrap() []error {
+	if e.cause == nil {
+		return []error{e.kind}
+	}
+	return []error{e.kind, e.cause}
+}
+
+func refuse(kind error, format string, args ...any) error {
+	return &refusal{kind: kind, msg: fmt.Sprintf(format, args...)}
+}
+
+// limitBound is the bound a limit error names, mirroring limit_bound in
+// rust/gosree-errsolve/src/lib.rs.
+func limitBound(what string) (uint64, bool) {
+	switch what {
+	case "frame_bytes":
+		return MaxFrameBytes, true
+	case "decoded_bytes":
+		return MaxDecodedBytes, true
+	case "num_funcs":
+		return MaxFuncs, true
+	case "num_slots":
+		return MaxSlots, true
+	case "num_tuples":
+		return MaxTuples, true
+	case "num_blocks":
+		return MaxBlocks, true
+	case "state cells (blocks x slots)":
+		return MaxStateCells, true
+	case "num_phis":
+		return MaxPhisPerBlock, true
+	case "phi_arity":
+		return MaxPhiArity, true
+	case "num_ops":
+		return MaxOpsPerBlock, true
+	case "companions":
+		return MaxCompanions, true
+	}
+	return 0, false
+}
+
+// limitErr is the error for passing the limit named what, with the text of
+// SolveError::LimitExceeded in the Rust engine: "GSE1 limit exceeded: <what> over the bound of <n>".
+// The decoded-size limit has its own sentinel.
+func limitErr(what string) error {
+	kind := ErrLimitExceeded
+	if what == "decoded_bytes" {
+		kind = ErrDecodedBytesExceeded
+	}
+	if bound, ok := limitBound(what); ok {
+		return refuse(kind, "GSE1 limit exceeded: %s over the bound of %d", what, bound)
+	}
+	return refuse(kind, "GSE1 limit exceeded: %s", what)
 }
 
 // Function flags.
@@ -324,7 +421,7 @@ func encodePackage(funcs []FuncIR, maxFrameBytes int) ([]byte, error) {
 		return nil, fmt.Errorf("gusseterr: func count %d exceeds %d", len(funcs), MaxFuncs)
 	}
 	if maxFrameBytes < 8 {
-		return nil, fmt.Errorf("gusseterr: GSE1 limit exceeded: frame bytes 8 exceeds %d", maxFrameBytes)
+		return nil, fmt.Errorf("%w: frame bytes 8 over the bound of %d", ErrLimitExceeded, maxFrameBytes)
 	}
 	buf := make([]byte, 0, min(64+len(funcs)*128, maxFrameBytes))
 	buf = append(buf, reqMagic[:]...)
@@ -345,7 +442,7 @@ func encodePackage(funcs []FuncIR, maxFrameBytes int) ([]byte, error) {
 		}
 		size := funcWireSize(&fn)
 		if uint64(len(buf))+size > uint64(maxFrameBytes) {
-			return nil, fmt.Errorf("gusseterr: GSE1 limit exceeded: frame bytes %d with func %d exceeds %d", uint64(len(buf))+size, fi, maxFrameBytes)
+			return nil, fmt.Errorf("%w: frame bytes %d with func %d over the bound of %d", ErrLimitExceeded, uint64(len(buf))+size, fi, maxFrameBytes)
 		}
 		if need := len(buf) + int(size); need > cap(buf) {
 			grown := make([]byte, len(buf), min(max(need, 2*cap(buf)), maxFrameBytes))
@@ -514,3 +611,48 @@ func DecodeResult(frame []byte) (PackageResult, error) {
 	}
 	return PackageResult{MayReturnNil: mayNil, Findings: findings}, nil
 }
+
+// engineKinds maps the code the Rust engine puts in front of its message (SolveError::code,
+// "<code>: <text>") to the sentinel a caller matches with errors.Is. A nil kind is a refusal with
+// no sentinel (a malformed frame).
+var engineKinds = map[string]error{
+	"work_budget_exceeded":      ErrWorkBudgetExceeded,
+	"decoded_bytes_exceeded":    ErrDecodedBytesExceeded,
+	"callgraph_budget_exceeded": ErrCallgraphBudgetExceeded,
+	"iteration_budget_exceeded": ErrIterationBudgetExceeded,
+	"response_too_large":        ErrResponseTooLarge,
+	"limit_exceeded":            ErrLimitExceeded,
+	"bad_magic":                 nil,
+	"truncated":                 nil,
+	"trailing_bytes":            nil,
+	"invalid_enum":              nil,
+	"index_out_of_bounds":       nil,
+	"allocation_failed":         nil,
+}
+
+// engineRefusal turns the message a Rust engine error carried (cause is the transport error that
+// carried it) into the error both engines return: the text after the code, which is what the
+// oracle prints for the same refusal, matching the code's sentinel and the transport error. A
+// message with no known code is not an engine refusal and returns nil.
+func engineRefusal(msg string, cause error) error {
+	code, text, ok := strings.Cut(msg, ": ")
+	if !ok {
+		return nil
+	}
+	kind, known := engineKinds[code]
+	if !known {
+		return nil
+	}
+	if kind == nil {
+		return &engineText{msg: text, cause: cause}
+	}
+	return &refusal{kind: kind, msg: text, cause: cause}
+}
+
+type engineText struct {
+	msg   string
+	cause error
+}
+
+func (e *engineText) Error() string { return e.msg }
+func (e *engineText) Unwrap() error { return e.cause }
