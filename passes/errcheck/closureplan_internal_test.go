@@ -23,7 +23,13 @@ func closurePlanWork(t *testing.T, n int) uint64 {
 		fmt.Fprintf(&b, "\tvar v%[1]d *T\n\tvar e%[1]d error\n\tfunc() { v%[1]d, e%[1]d = workV() }()\n\tif e%[1]d == nil {\n\t\tn += use(v%[1]d)\n\t}\n\tif c[%[1]d] {\n\t\treturn n\n\t}\n", i)
 	}
 	b.WriteString("\treturn n\n}\n")
-	dir, cleanup, err := analysistest.WriteFiles(map[string]string{"big/big.go": b.String()})
+	return planWorkOf(t, b.String())
+}
+
+// planWorkOf analyzes one package, big/big.go, and returns the plan work counter.
+func planWorkOf(t *testing.T, src string) uint64 {
+	t.Helper()
+	dir, cleanup, err := analysistest.WriteFiles(map[string]string{"big/big.go": src})
 	if err != nil {
 		t.Fatal(err)
 	}
