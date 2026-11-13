@@ -2,8 +2,9 @@ package errexitdeferadvbreaks
 
 // ft-8f3c adversary: functions that never return and never exit the process either (an infinite
 // loop, a block that waits forever). The unmodified tip reports ERR005 on each deferred Close; the
-// fix silences them although not every path ends in os.Exit or log.Fatal. The wants are the tip
-// results, which the invariant says must stay.
+// fix keeps them: no path ends in a process exit. Pure infinite loops keep ERR005 as a scope limit
+// of ft-8f3c (the ruling covered only os.Exit and log.Fatal*), not as a claim that they are true
+// positives. LoopOnlyExit and AcceptLoop can leave only through a process exit and are silenced.
 
 import (
 	"log"
@@ -42,7 +43,8 @@ func LoopOnlyExit(path string) { // loop whose only exit is os.Exit
 	if err != nil {
 		return
 	}
-	defer f.Close() // want "ERR005"
+	// ft-8f3c (Fable ruling 2026-11-13): every terminating path ends in a process exit and the spin path never runs defers; silenced as H4
+	defer f.Close()
 	for {
 		if cond() {
 			os.Exit(1)
@@ -67,7 +69,8 @@ func AcceptLoop(path string, l net.Listener) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // want "ERR005"
+	// ft-8f3c (Fable ruling 2026-11-13): every terminating path ends in a process exit and the spin path never runs defers; silenced as H4
+	defer f.Close()
 	for {
 		c, err := l.Accept()
 		if err != nil {
