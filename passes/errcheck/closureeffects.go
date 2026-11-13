@@ -53,7 +53,7 @@ func (b *packageBuilder) closureEffectsAt(call *ssa.Call) *closureFx {
 	if !ok {
 		return nil
 	}
-	if cc := b.closureCallFor(fn); cc == nil || !cc.domLowered || cc.call != call {
+	if cc := b.closureCallFor(fn); cc == nil || !cc.dominates || cc.call != call {
 		return nil
 	}
 	if closureDepth(fn) > maxReplayDepth {

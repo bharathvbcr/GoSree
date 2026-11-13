@@ -720,10 +720,6 @@ type parentIndex struct {
 	// retDom is the nearest block that dominates every return block, or nil when there is none. A
 	// call runs on every path to a return exactly when its block dominates retDom.
 	retDom *ssa.BasicBlock
-	// mainRetDom is the same, over the returns the function lowers: the Recover block (the path of
-	// a recovered panic, which has no predecessor and is not lowered) is left out, so a function
-	// with a defer can still have a call that dominates its returns. It is nil when there is none.
-	mainRetDom *ssa.BasicBlock
 	// namedResults holds the names of the parent's named results: their cells are read by the
 	// return itself (a bare return, and the deferred and recovered paths), not by a visible load.
 	namedResults map[string]bool
@@ -741,8 +737,8 @@ func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
 			}
 		}
 	}
-	var retDom, mainRetDom *ssa.BasicBlock
-	mainNone, seenRet := false, false
+	var retDom *ssa.BasicBlock
+	seenRet := false
 	for _, blk := range parent.Blocks {
 		b.planWork += uint64(len(blk.Instrs)) + 1
 		if len(blk.Instrs) == 0 {
@@ -762,15 +758,11 @@ func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
 		if _, isRet := blk.Instrs[len(blk.Instrs)-1].(*ssa.Return); !isRet {
 			continue
 		}
-		if blk != parent.Recover && !mainNone {
-			if mainRetDom == nil {
-				mainRetDom = blk
-			}
-			for mainRetDom != nil && !mainRetDom.Dominates(blk) {
-				b.planWork++
-				mainRetDom = mainRetDom.Idom()
-			}
-			mainNone = mainRetDom == nil
+		// The Recover block is entered only by a recovered panic and returns the result cells
+		// (go/ssa createRecoverBlock), which no plan tracks (namedResults). It has no dominator, so
+		// counting it would make every function with a defer lack a return dominator.
+		if blk == parent.Recover {
+			continue
 		}
 		if !seenRet {
 			seenRet, retDom = true, blk
@@ -782,7 +774,6 @@ func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
 		}
 	}
 	ix.retDom = retDom
-	ix.mainRetDom = mainRetDom
 	b.parentIndexes[parent] = ix
 	return ix
 }
@@ -792,13 +783,11 @@ func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
 //
 // The call runs on every path to a return when its block dominates the returns. A call on one
 // branch leaves the cells at their previous values on the other, and the join of the two cannot
-// carry the tuple. domAll counts every return block (what the closure pair plan requires), domLowered
-// the returns the function lowers (what the effect replay requires).
+// carry the tuple. The Recover block is not counted (parentIndexFor).
 type closureCall struct {
-	mc         *ssa.MakeClosure
-	call       *ssa.Call
-	domAll     bool
-	domLowered bool
+	mc        *ssa.MakeClosure
+	call      *ssa.Call
+	dominates bool
 }
 
 // closureCallFor returns the closureCall of closure fn, or nil when the enclosing function does not
@@ -846,16 +835,15 @@ func (b *packageBuilder) findClosureCall(fn *ssa.Function) *closureCall {
 		return nil
 	}
 	return &closureCall{
-		mc:         mc,
-		call:       parentCall,
-		domAll:     pix.retDom != nil && parentCall.Block().Dominates(pix.retDom),
-		domLowered: pix.mainRetDom != nil && parentCall.Block().Dominates(pix.mainRetDom),
+		mc:        mc,
+		call:      parentCall,
+		dominates: pix.retDom != nil && parentCall.Block().Dominates(pix.retDom),
 	}
 }
 
 func (b *packageBuilder) buildClosurePlan(fn *ssa.Function) *closurePlan {
 	cc := b.closureCallFor(fn)
-	if cc == nil || !cc.domAll {
+	if cc == nil || !cc.dominates {
 		return nil
 	}
 	mc, parentCall := cc.mc, cc.call
