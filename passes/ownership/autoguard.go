@@ -2889,7 +2889,7 @@ func (st *state) resolveClosedFieldInterfaceTypes(typeKey string, fieldIdx int) 
 		}
 		q := st.ask()
 		ts, incomplete := q.resolveInterfaceTypes(iv.fn, iv.v)
-		if incomplete || q.cut {
+		if incomplete || q.cut || len(ts) == 0 {
 			return nil, false
 		}
 		for _, t := range ts {
@@ -3254,7 +3254,7 @@ func (st *state) nonShareableInterfaceTypesInSlot(selfField *types.Var, selfGlob
 		}
 		q := st.ask()
 		ts, incomplete := q.resolveInterfaceTypes(fn, v)
-		if incomplete || q.cut {
+		if incomplete || q.cut || len(ts) == 0 {
 			failed = true
 			return
 		}
@@ -3637,7 +3637,14 @@ func (st *state) inferAutoSyncInterfaces(scanFns []*ssa.Function) {
 		return named.Origin().Obj()
 	}
 
-	for _, fn := range scanFns {
+	allScanFns := scanFns
+	if st.ssa != nil && st.ssa.Pkg != nil {
+		if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil && len(pkgInit.Blocks) > 0 && !slices.Contains(allScanFns, pkgInit) {
+			allScanFns = append(append([]*ssa.Function(nil), scanFns...), pkgInit)
+		}
+	}
+
+	for _, fn := range allScanFns {
 		if len(fn.Blocks) == 0 {
 			continue
 		}
@@ -3648,6 +3655,11 @@ func (st *state) inferAutoSyncInterfaces(scanFns []*ssa.Function) {
 				if tn == nil || rejected[tn] {
 					return
 				}
+				if x.X != nil {
+					if tp, isTP := types.Unalias(x.X.Type()).(*types.TypeParam); isTP && targetTypeName(tp.Constraint()) == tn {
+						return
+					}
+				}
 				if x.X == nil || (!st.cls.Shareable(x.X.Type()) && !st.isAutoSyncType(x.X.Type())) {
 					rejected[tn] = true
 					return
@@ -3657,6 +3669,11 @@ func (st *state) inferAutoSyncInterfaces(scanFns []*ssa.Function) {
 				tn := targetTypeName(x.Type())
 				if tn == nil || rejected[tn] {
 					return
+				}
+				if x.X != nil {
+					if tp, isTP := types.Unalias(x.X.Type()).(*types.TypeParam); isTP && targetTypeName(tp.Constraint()) == tn {
+						return
+					}
 				}
 				if x.X == nil || (!st.cls.Shareable(x.X.Type()) && !st.isAutoSyncType(x.X.Type()) && !st.isAutoSyncCallResultValue(x.X)) {
 					rejected[tn] = true
@@ -3671,6 +3688,32 @@ func (st *state) inferAutoSyncInterfaces(scanFns []*ssa.Function) {
 				}
 			}
 		})
+	}
+
+	if st.pass != nil && st.pass.TypesInfo != nil {
+		for ident, inst := range st.pass.TypesInfo.Instances {
+			if inst.TypeArgs == nil {
+				continue
+			}
+			tparams := instantiatedTypeParams(st.pass.TypesInfo, ident)
+			if tparams == nil {
+				continue
+			}
+			n := min(tparams.Len(), inst.TypeArgs.Len())
+			for i := range n {
+				tn := targetTypeName(tparams.At(i).Constraint())
+				if tn == nil || rejected[tn] {
+					continue
+				}
+				ta := inst.TypeArgs.At(i)
+				if outerTP, isTP := types.Unalias(ta).(*types.TypeParam); isTP && targetTypeName(outerTP.Constraint()) == tn {
+					continue
+				}
+				if !st.cls.Shareable(ta) && !st.isAutoSyncType(ta) {
+					rejected[tn] = true
+				}
+			}
+		}
 	}
 
 	// Also inspect AST blank-identifier compile-time interface witnesses (`var _ I = (*T)(nil)`),
@@ -3751,6 +3794,73 @@ func (st *state) isAutoSyncInterfaceType(t types.Type) (*types.Named, bool) {
 	return named, true
 }
 
+func instantiatedTypeParams(info *types.Info, ident *ast.Ident) *types.TypeParamList {
+	if info == nil || ident == nil {
+		return nil
+	}
+	obj := info.Uses[ident]
+	if obj == nil {
+		obj = info.Defs[ident]
+	}
+	switch o := obj.(type) {
+	case *types.Func:
+		orig := o.Origin()
+		if orig == nil {
+			orig = o
+		}
+		if sig, ok := orig.Type().(*types.Signature); ok {
+			return sig.TypeParams()
+		}
+	case *types.TypeName:
+		switch t := o.Type().(type) {
+		case *types.Named:
+			return t.Origin().TypeParams()
+		case *types.Alias:
+			return t.Origin().TypeParams()
+		}
+	}
+	return nil
+}
+
+func (st *state) collectAutoSyncInterfacesInConstraint(c types.Type, seen map[types.Type]bool, out *[]*types.Named) {
+	if c == nil || seen[c] {
+		return
+	}
+	seen[c] = true
+	if named, ok := st.isAutoSyncInterfaceType(c); ok {
+		for _, ex := range *out {
+			if ex.Origin() == named.Origin() {
+				return
+			}
+		}
+		*out = append(*out, named)
+		return
+	}
+	if iface, ok := c.Underlying().(*types.Interface); ok {
+		for i := range iface.NumEmbeddeds() {
+			st.collectAutoSyncInterfacesInConstraint(iface.EmbeddedType(i), seen, out)
+		}
+	}
+}
+
+func constraintEmbedsNamedInterface(c types.Type, target *types.Named, seen map[types.Type]bool) bool {
+	if c == nil || target == nil || seen[c] {
+		return false
+	}
+	seen[c] = true
+	if named, ok := types.Unalias(c).(*types.Named); ok && named.Origin() == target.Origin() {
+		return true
+	}
+	if iface, ok := c.Underlying().(*types.Interface); ok {
+		for i := range iface.NumEmbeddeds() {
+			if constraintEmbedsNamedInterface(iface.EmbeddedType(i), target, seen) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // checkAutoSyncInterfaceConversions enforces at every MakeInterface, ChangeInterface, and
 // TypeAssert into a checked AutoSync interface that the underlying concrete value is Shareable or
 // AutoSync, closing the cross-package open-world interface boundary soundly.
@@ -3765,12 +3875,19 @@ func (st *state) checkAutoSyncInterfaceConversions(fn *ssa.Function) {
 		if c, isConst := src.(*ssa.Const); isConst && c.IsNil() {
 			return
 		}
+		if _, isTA := ins.(*ssa.TypeAssert); !isTA {
+			if tp, isTP := types.Unalias(src.Type()).(*types.TypeParam); isTP {
+				if constraintEmbedsNamedInterface(tp.Constraint(), targetNamed, map[types.Type]bool{}) {
+					return
+				}
+			}
+		}
 		if st.cls.Shareable(src.Type()) || st.isAutoSyncType(src.Type()) || st.isAutoSyncCallResultValue(src) {
 			return
 		}
 		q := st.ask()
 		ts, incomplete := q.resolveInterfaceTypes(fn, src)
-		if !incomplete && !q.cut {
+		if !incomplete && !q.cut && len(ts) > 0 {
 			allSafe := true
 			for _, ct := range ts {
 				if !st.cls.Shareable(ct) && !st.isAutoSyncType(ct) {
@@ -3790,6 +3907,11 @@ func (st *state) checkAutoSyncInterfaceConversions(fn *ssa.Function) {
 			switch x := ins.(type) {
 			case *ssa.MakeInterface:
 				if targetNamed, ok := st.isAutoSyncInterfaceType(x.Type()); ok && x.X != nil {
+					if tp, isTP := types.Unalias(x.X.Type()).(*types.TypeParam); isTP {
+						if constraintEmbedsNamedInterface(tp.Constraint(), targetNamed, map[types.Type]bool{}) {
+							continue
+						}
+					}
 					if !st.cls.Shareable(x.X.Type()) && !st.isAutoSyncType(x.X.Type()) {
 						pos := posOf(ins, ins)
 						st.report(pos, NotOwned, describe(x.X)+" ("+x.X.Type().String()+") boxed into concurrency-safe interface "+targetNamed.Obj().Name()+" is not concurrency-safe")
@@ -3804,6 +3926,257 @@ func (st *state) checkAutoSyncInterfaceConversions(fn *ssa.Function) {
 					checkIfaceSource(ins, targetNamed, x.X)
 				}
 			}
+		}
+	}
+}
+
+// checkAutoSyncGenericInstances enforces at every generic function or type instantiation site in
+// TypesInfo.Instances that any type parameter constrained by a checked AutoSync interface is
+// instantiated only with Shareable or AutoSync types (or outer type parameters carrying the same
+// AutoSync interface constraint). This closes generic call/type instantiations that buildssa does
+// not materialize into SrcFuncs.
+func (st *state) checkAutoSyncGenericInstances() {
+	if st.pass == nil || st.pass.TypesInfo == nil || len(st.pass.TypesInfo.Instances) == 0 {
+		return
+	}
+	idents := make([]*ast.Ident, 0, len(st.pass.TypesInfo.Instances))
+	for ident := range st.pass.TypesInfo.Instances {
+		idents = append(idents, ident)
+	}
+	slices.SortFunc(idents, func(a, b *ast.Ident) int {
+		if a.Pos() < b.Pos() {
+			return -1
+		}
+		if a.Pos() > b.Pos() {
+			return 1
+		}
+		return 0
+	})
+	for _, ident := range idents {
+		inst := st.pass.TypesInfo.Instances[ident]
+		if inst.TypeArgs == nil {
+			continue
+		}
+		tparams := instantiatedTypeParams(st.pass.TypesInfo, ident)
+		if tparams == nil {
+			continue
+		}
+		n := min(tparams.Len(), inst.TypeArgs.Len())
+		for i := range n {
+			var reqIfaces []*types.Named
+			st.collectAutoSyncInterfacesInConstraint(tparams.At(i).Constraint(), map[types.Type]bool{}, &reqIfaces)
+			if len(reqIfaces) == 0 {
+				continue
+			}
+			ta := inst.TypeArgs.At(i)
+			if outerTP, isTP := types.Unalias(ta).(*types.TypeParam); isTP {
+				for _, req := range reqIfaces {
+					if !constraintEmbedsNamedInterface(outerTP.Constraint(), req, map[types.Type]bool{}) {
+						st.report(ident.Pos(), NotOwned, "type argument "+ta.String()+" for concurrency-safe constraint "+req.Obj().Name()+" is not proven concurrency-safe")
+						break
+					}
+				}
+				continue
+			}
+			if !st.cls.Shareable(ta) && !st.isAutoSyncType(ta) {
+				st.report(ident.Pos(), NotOwned, "type argument "+ta.String()+" for concurrency-safe constraint "+reqIfaces[0].Obj().Name()+" is not concurrency-safe")
+			}
+		}
+	}
+}
+
+func sigParamTypeAt(sig *types.Signature, idx int, hasEllipsis bool) types.Type {
+	if sig == nil || sig.Params() == nil || idx < 0 {
+		return nil
+	}
+	np := sig.Params().Len()
+	if np == 0 {
+		return nil
+	}
+	if sig.Variadic() && idx >= np-1 {
+		last := sig.Params().At(np - 1).Type()
+		if hasEllipsis {
+			return last
+		}
+		if sl, ok := last.Underlying().(*types.Slice); ok {
+			return sl.Elem()
+		}
+		return nil
+	}
+	if idx < np {
+		return sig.Params().At(idx).Type()
+	}
+	return nil
+}
+
+// checkAutoSyncGenericFuncBodies inspects AST bodies of generic functions and methods (for which
+// buildssa leaves fn.Blocks empty without ssa.InstantiateGenerics) and rejects any conversion or
+// type assertion into a checked AutoSync interface unless the source type is Shareable, AutoSync,
+// or (for non-assertion conversions) a TypeParam whose constraint embeds that AutoSync interface.
+func (st *state) checkAutoSyncGenericFuncBodies() {
+	if st.pass == nil || st.pass.TypesInfo == nil {
+		return
+	}
+	info := st.pass.TypesInfo
+	checkConv := func(pos token.Pos, expr ast.Expr, targetType types.Type) {
+		if expr == nil || targetType == nil {
+			return
+		}
+		targetNamed, ok := st.isAutoSyncInterfaceType(targetType)
+		if !ok {
+			return
+		}
+		srcType := info.TypeOf(expr)
+		if srcType == nil || types.Identical(srcType, types.Typ[types.UntypedNil]) {
+			return
+		}
+		if tp, isTP := types.Unalias(srcType).(*types.TypeParam); isTP {
+			if constraintEmbedsNamedInterface(tp.Constraint(), targetNamed, map[types.Type]bool{}) {
+				return
+			}
+			st.report(pos, NotOwned, "type parameter "+tp.String()+" converted to concurrency-safe interface "+targetNamed.Obj().Name()+" is not constrained by "+targetNamed.Obj().Name())
+			return
+		}
+		if st.cls.Shareable(srcType) || st.isAutoSyncType(srcType) {
+			return
+		}
+		st.report(pos, NotOwned, "value of type "+srcType.String()+" converted to concurrency-safe interface "+targetNamed.Obj().Name()+" is not proven concurrency-safe")
+	}
+
+	inspectScope := func(body *ast.BlockStmt, curSig *types.Signature) {
+		var walk func(n ast.Node, sig *types.Signature)
+		walk = func(n ast.Node, sig *types.Signature) {
+			if n == nil {
+				return
+			}
+			switch x := n.(type) {
+			case *ast.FuncLit:
+				var litSig *types.Signature
+				if t := info.TypeOf(x); t != nil {
+					litSig, _ = t.Underlying().(*types.Signature)
+				}
+				if x.Body != nil {
+					walk(x.Body, litSig)
+				}
+				return
+			case *ast.ReturnStmt:
+				if sig != nil && sig.Results() != nil && len(x.Results) == sig.Results().Len() {
+					for i, res := range x.Results {
+						checkConv(res.Pos(), res, sig.Results().At(i).Type())
+					}
+				}
+			case *ast.AssignStmt:
+				if len(x.Lhs) == len(x.Rhs) {
+					for i, rhs := range x.Rhs {
+						checkConv(rhs.Pos(), rhs, info.TypeOf(x.Lhs[i]))
+					}
+				}
+			case *ast.ValueSpec:
+				if x.Type != nil {
+					tt := info.TypeOf(x.Type)
+					for _, val := range x.Values {
+						checkConv(val.Pos(), val, tt)
+					}
+				}
+			case *ast.SendStmt:
+				if ct := info.TypeOf(x.Chan); ct != nil {
+					if ch, ok := ct.Underlying().(*types.Chan); ok {
+						checkConv(x.Value.Pos(), x.Value, ch.Elem())
+					}
+				}
+			case *ast.CallExpr:
+				if tv, ok := info.Types[x.Fun]; ok && tv.IsType() {
+					if len(x.Args) == 1 {
+						checkConv(x.Pos(), x.Args[0], tv.Type)
+					}
+				} else if ft := info.TypeOf(x.Fun); ft != nil {
+					if csig, ok := ft.Underlying().(*types.Signature); ok {
+						for i, arg := range x.Args {
+							checkConv(arg.Pos(), arg, sigParamTypeAt(csig, i, x.Ellipsis.IsValid()))
+						}
+					}
+				}
+			case *ast.TypeAssertExpr:
+				if x.Type != nil {
+					if targetNamed, ok := st.isAutoSyncInterfaceType(info.TypeOf(x.Type)); ok {
+						srcType := info.TypeOf(x.X)
+						if srcType != nil && !st.cls.Shareable(srcType) && !st.isAutoSyncType(srcType) {
+							st.report(x.Pos(), NotOwned, "value of type "+srcType.String()+" asserted to concurrency-safe interface "+targetNamed.Obj().Name()+" is not proven concurrency-safe")
+						}
+					}
+				}
+			case *ast.CompositeLit:
+				if lt := info.TypeOf(x); lt != nil {
+					switch u := lt.Underlying().(type) {
+					case *types.Slice:
+						for _, elt := range x.Elts {
+							val := elt
+							if kv, ok := elt.(*ast.KeyValueExpr); ok {
+								val = kv.Value
+							}
+							checkConv(val.Pos(), val, u.Elem())
+						}
+					case *types.Array:
+						for _, elt := range x.Elts {
+							val := elt
+							if kv, ok := elt.(*ast.KeyValueExpr); ok {
+								val = kv.Value
+							}
+							checkConv(val.Pos(), val, u.Elem())
+						}
+					case *types.Map:
+						for _, elt := range x.Elts {
+							if kv, ok := elt.(*ast.KeyValueExpr); ok {
+								checkConv(kv.Key.Pos(), kv.Key, u.Key())
+								checkConv(kv.Value.Pos(), kv.Value, u.Elem())
+							}
+						}
+					case *types.Struct:
+						for i, elt := range x.Elts {
+							if kv, ok := elt.(*ast.KeyValueExpr); ok {
+								if id, ok := kv.Key.(*ast.Ident); ok {
+									if obj := info.Uses[id]; obj != nil {
+										checkConv(kv.Value.Pos(), kv.Value, obj.Type())
+									}
+								}
+							} else if i < u.NumFields() {
+								checkConv(elt.Pos(), elt, u.Field(i).Type())
+							}
+						}
+					}
+				}
+			}
+			ast.Inspect(n, func(child ast.Node) bool {
+				if child == nil || child == n {
+					return true
+				}
+				walk(child, sig)
+				return false
+			})
+		}
+		walk(body, curSig)
+	}
+
+	for _, file := range st.pass.Files {
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || fd.Name == nil {
+				continue
+			}
+			obj, ok := info.Defs[fd.Name].(*types.Func)
+			if !ok || obj == nil {
+				continue
+			}
+			sig, ok := obj.Type().(*types.Signature)
+			if !ok || sig == nil {
+				continue
+			}
+			hasTP := (sig.TypeParams() != nil && sig.TypeParams().Len() > 0) ||
+				(sig.RecvTypeParams() != nil && sig.RecvTypeParams().Len() > 0)
+			if !hasTP {
+				continue
+			}
+			inspectScope(fd.Body, sig)
 		}
 	}
 }

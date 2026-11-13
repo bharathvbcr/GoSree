@@ -1641,6 +1641,67 @@ func computeDirectWrites(fn *ssa.Function, st *state) ([]bool, []bool, []bool) {
 		written, _ = written.unionWith(bothOf(v))
 	}
 
+	markInteriorBases := func(v ssa.Value, nonReg bool) {
+		if v == nil {
+			return
+		}
+		seen := map[ssa.Value]bool{}
+		var walk func(cur ssa.Value, sawUntrackedInterior bool)
+		walk = func(cur ssa.Value, sawUntrackedInterior bool) {
+			if cur == nil || seen[cur] {
+				return
+			}
+			seen[cur] = true
+			if _, guarded := st.slotOf(cur); guarded {
+				return
+			}
+			if sawUntrackedInterior {
+				if bits := d1[cur]; !bits.isEmpty() {
+					written, _ = written.unionWith(bits)
+					if nonReg {
+						writtenNonReg, _ = writtenNonReg.unionWith(bits)
+					}
+					return
+				}
+			}
+			switch x := cur.(type) {
+			case *ssa.FieldAddr:
+				untracked := st.cls.Shareable(x.Type()) || st.isAutoSyncType(x.Type())
+				walk(x.X, sawUntrackedInterior || untracked)
+			case *ssa.IndexAddr:
+				untracked := st.cls.Shareable(x.Type()) || st.isAutoSyncType(x.Type())
+				walk(x.X, sawUntrackedInterior || untracked)
+			case *ssa.ChangeType:
+				walk(x.X, sawUntrackedInterior)
+			case *ssa.MakeInterface:
+				walk(x.X, sawUntrackedInterior)
+			case *ssa.ChangeInterface:
+				walk(x.X, sawUntrackedInterior)
+			case *ssa.Phi:
+				for _, edge := range x.Edges {
+					walk(edge, sawUntrackedInterior)
+				}
+			case *ssa.UnOp:
+				if x.Op == token.MUL {
+					if a, ok := x.X.(*ssa.Alloc); ok && a.Referrers() != nil {
+						for _, r := range *a.Referrers() {
+							if stIns, isStore := r.(*ssa.Store); isStore && stIns.Addr == a {
+								walk(stIns.Val, sawUntrackedInterior)
+							}
+						}
+					}
+				}
+			}
+		}
+		walk(v, false)
+	}
+	markInterior := func(v ssa.Value) {
+		markInteriorBases(v, true)
+	}
+	markInteriorRegOnly := func(v ssa.Value) {
+		markInteriorBases(v, false)
+	}
+
 	recvWriteOnceInit := st.isMutexWriteOnceInitMethod(fn)
 
 	for _, b := range fn.Blocks {
@@ -1664,13 +1725,16 @@ func computeDirectWrites(fn *ssa.Function, st *state) ([]bool, []bool, []bool) {
 				for i, a := range cc.Args {
 					if gSum == nil || gSum.writes(i) {
 						markCallArg(a, true)
+						if callee == nil || !isEncapsulatedMethodRecvCall(st, callee, i, a) {
+							markInterior(a)
+						}
 					}
 				}
 				markCallArg(cc.Value, true)
 			case *ssa.Call:
-				collectCallWrites(fn, x, &x.Call, st, markCallArg, markCallArgRegOnly)
+				collectCallWrites(fn, x, &x.Call, st, markCallArg, markCallArgRegOnly, markInterior, markInteriorRegOnly)
 			case *ssa.Defer:
-				collectCallWrites(fn, x, &x.Call, st, markCallArg, markCallArgRegOnly)
+				collectCallWrites(fn, x, &x.Call, st, markCallArg, markCallArgRegOnly, markInterior, markInteriorRegOnly)
 			}
 		}
 	}
@@ -2163,6 +2227,8 @@ func collectCallWrites(
 	st *state,
 	markVal func(ssa.Value, bool),
 	markValRegOnly func(ssa.Value),
+	markInterior func(ssa.Value),
+	markInteriorRegOnly func(ssa.Value),
 ) {
 	if _, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
 		return
@@ -2177,6 +2243,7 @@ func collectCallWrites(
 				for i, a := range cc.Args {
 					if ms.writes(i + 1) {
 						markVal(a, true)
+						markInterior(a)
 					}
 				}
 			}
@@ -2188,6 +2255,7 @@ func collectCallWrites(
 		if !hasContract || !rc.suppressWrite {
 			for _, a := range cc.Args {
 				markVal(a, true)
+				markInterior(a)
 			}
 		}
 		return
@@ -2220,10 +2288,14 @@ func collectCallWrites(
 					ms := st.summary(mfn)
 					if ms.writes(0) {
 						markVal(recv, true)
+						if !isEncapsulatedMethodRecvCall(st, mfn, 0, recv) {
+							markInterior(recv)
+						}
 					}
 					for i, a := range cc.Args {
 						if ms.writes(i + 1) {
 							markVal(a, true)
+							markInterior(a)
 						}
 					}
 					continue
@@ -2238,6 +2310,9 @@ func collectCallWrites(
 				for i, a := range cc.Args {
 					if ts.writes(i) {
 						markVal(a, true)
+						if !isEncapsulatedMethodRecvCall(st, t.fn, i, a) {
+							markInterior(a)
+						}
 					}
 				}
 			}
@@ -2249,6 +2324,9 @@ func collectCallWrites(
 				for i, a := range cc.Args {
 					if ts.writes(i) {
 						markVal(a, true)
+						if !isEncapsulatedMethodRecvCall(st, tfn, i, a) {
+							markInterior(a)
+						}
 					}
 				}
 			}
@@ -2259,6 +2337,7 @@ func collectCallWrites(
 		if !hasContract || !rc.suppressWrite {
 			for _, a := range cc.Args {
 				markVal(a, true)
+				markInterior(a)
 			}
 		}
 		markVal(cc.Value, true)
@@ -2290,6 +2369,7 @@ func collectCallWrites(
 			}
 			if i == 0 && strings.HasPrefix(fname, "fmt.Append") {
 				markVal(a, true)
+				markInterior(a)
 				continue
 			}
 			for _, op := range formatOperands(a, ins) {
@@ -2309,10 +2389,17 @@ func collectCallWrites(
 			}
 			continue
 		}
+		encapRecv := isEncapsulatedMethodRecvCall(st, callee, i, a)
 		if sum.spawns(i) || sum.writesNonReg(i) {
 			markVal(a, true)
+			if !encapRecv {
+				markInterior(a)
+			}
 		} else if sum.writes(i) {
 			markValRegOnly(a)
+			if !encapRecv {
+				markInteriorRegOnly(a)
+			}
 		}
 	}
 }

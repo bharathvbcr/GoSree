@@ -23,6 +23,7 @@ package ownership
 import (
 	"go/ast"
 	"go/token"
+	"slices"
 	"go/types"
 	"reflect"
 	"strings"
@@ -295,6 +296,11 @@ func run(pass *analysis.Pass) (any, error) {
 		st.checkAutoSyncInterfaceConversions(fn)
 		st.checkImmStores(fn)
 	}
+	if pkgInit := st.ssa.Pkg.Func("init"); pkgInit != nil && len(pkgInit.Blocks) > 0 && !slices.Contains(fns, pkgInit) {
+		st.checkAutoSyncInterfaceConversions(pkgInit)
+	}
+	st.checkAutoSyncGenericInstances()
+	st.checkAutoSyncGenericFuncBodies()
 	st.checkSharedLoadWrites(fns)
 	st.checkGlobals()
 	st.checkGuarded(fns)

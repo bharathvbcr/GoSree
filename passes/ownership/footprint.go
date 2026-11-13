@@ -5,6 +5,7 @@ import (
 	"go/constant"
 	"go/token"
 	"go/types"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -358,9 +359,35 @@ func (w *fpWalker) walk(f *fpFrame, v ssa.Value, d desig) {
 	}
 }
 
+// isMutableValueSubobjectAddr reports whether v is an interior address (`&s.field` or `&arr[i]`)
+// whose pointer type is Shareable or AutoSync (other than sync/atomic primitives handled by
+// isAtomicTarget and //gosree:imm types enforced by SAFE005), so whole-field overwrites or
+// external pointer writes conflict with concurrent encapsulated method calls on the subobject.
+func isMutableValueSubobjectAddr(st *state, v ssa.Value) bool {
+	if st == nil || v == nil {
+		return false
+	}
+	switch v.(type) {
+	case *ssa.FieldAddr, *ssa.IndexAddr:
+	default:
+		return false
+	}
+	if isAtomicTarget(v.Type()) {
+		return false
+	}
+	if !st.cls.Shareable(v.Type()) && !st.isAutoSyncType(v.Type()) {
+		return false
+	}
+	p, ok := v.Type().Underlying().(*types.Pointer)
+	if !ok {
+		return false
+	}
+	return !st.isImmNamed(p.Elem())
+}
+
 // untracked mirrors graph.val: a value whose type cannot carry unchecked shared memory.
 func (w *fpWalker) untracked(v ssa.Value) bool {
-	if isAtomicTarget(v.Type()) {
+	if isAtomicTarget(v.Type()) || isMutableValueSubobjectAddr(w.st, v) {
 		return false
 	}
 	if mi, ok := v.(*ssa.MakeInterface); ok {
@@ -414,6 +441,22 @@ func (w *fpWalker) use(f *fpFrame, v ssa.Value, d desig, r ssa.Instruction) {
 			if path := funcPkgPath(c.Common().StaticCallee()); path == "sync" || path == atomicPkg {
 				if _, isGo := r.(*ssa.Go); !isGo {
 					w.record(f, r, d, true, true)
+					return
+				}
+			}
+		}
+	}
+	if isMutableValueSubobjectAddr(w.st, v) {
+		if c, ok := r.(ssa.CallInstruction); ok && !c.Common().IsInvoke() {
+			if _, isGo := r.(*ssa.Go); !isGo {
+				cc := c.Common()
+				callee := cc.StaticCallee()
+				if isEncapsulatedMethodRecvCall(w.st, callee, 0, v) && len(cc.Args) > 0 && cc.Args[0] == v && !slices.Contains(cc.Args[1:], v) {
+					mayWrite := len(callee.Blocks) == 0 || w.st.summary(callee).writes(0)
+					if p, ok := v.Type().Underlying().(*types.Pointer); ok && w.st.cls.Shareable(p.Elem()) {
+						mayWrite = false
+					}
+					w.record(f, r, d, mayWrite, true)
 					return
 				}
 			}

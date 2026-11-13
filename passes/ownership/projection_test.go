@@ -579,3 +579,423 @@ func RunRace(xs []*Box) {
 		}
 	})
 }
+
+func TestVerifierSoundnessFixes(t *testing.T) {
+	t.Run("same_pkg_handler_overwrite_regexp_flagged_clean_passes", func(t *testing.T) {
+		diags := runProjModule(t, map[string]string{
+			"app/app.go": `package app
+
+import (
+	"net/http"
+	"net/url"
+	"regexp"
+)
+
+type RegexpServer struct {
+	re  regexp.Regexp
+	buf []byte
+}
+
+func Bad() {
+	s := &RegexpServer{re: *regexp.MustCompile("a+"), buf: []byte{1}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/re", func(w http.ResponseWriter, r *http.Request) {
+		_ = s.re.MatchString("abc")
+	})
+	ready := make(chan struct{})
+	go func() {
+		close(ready)
+		mux.ServeHTTP(nil, &http.Request{Method: "GET", URL: &url.URL{Path: "/re"}})
+	}()
+	<-ready
+	s.re = *regexp.MustCompile("b+")
+}
+`,
+		})
+		if len(diags) == 0 {
+			t.Fatalf("expected diagnostic when overwriting s.re concurrently with handler MatchString")
+		}
+
+		clean := runProjModule(t, map[string]string{
+			"app/app.go": `package app
+
+import (
+	"net/http"
+	"net/url"
+	"regexp"
+)
+
+type RegexpServer struct {
+	re  regexp.Regexp
+	buf []byte
+}
+
+func Good() {
+	s := &RegexpServer{re: *regexp.MustCompile("a+"), buf: []byte{1}}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/re", func(w http.ResponseWriter, r *http.Request) {
+		_ = s.re.MatchString("abc")
+	})
+	go func() {
+		mux.ServeHTTP(nil, &http.Request{Method: "GET", URL: &url.URL{Path: "/re"}})
+	}()
+	_ = s.re.MatchString("xyz")
+}
+`,
+		})
+		if len(clean) != 0 {
+			t.Fatalf("expected 0 diagnostics when calling MatchString concurrently without field overwrite, got %v", clean)
+		}
+	})
+
+	t.Run("fork_join_footprint_overwrite_regexp_flagged_clean_passes", func(t *testing.T) {
+		diags := runProjModule(t, map[string]string{
+			"app/app.go": `package app
+
+import (
+	"regexp"
+	"sync"
+)
+
+type Holder struct {
+	re regexp.Regexp
+	xs []int
+}
+
+func Bad() {
+	h := &Holder{re: *regexp.MustCompile("a+"), xs: []int{1}}
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		_ = h.re.MatchString("abc")
+	})
+	h.re = *regexp.MustCompile("b+")
+	wg.Wait()
+}
+`,
+		})
+		if len(diags) == 0 {
+			t.Fatalf("expected diagnostic on fork-join concurrent h.re overwrite")
+		}
+
+		clean := runProjModule(t, map[string]string{
+			"app/app.go": `package app
+
+import (
+	"regexp"
+	"sync"
+)
+
+type Holder struct {
+	re regexp.Regexp
+	xs []int
+}
+
+func Good() {
+	h := &Holder{re: *regexp.MustCompile("a+"), xs: []int{1}}
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		_ = h.re.MatchString("abc")
+	})
+	_ = h.re.MatchString("xyz")
+	wg.Wait()
+}
+`,
+		})
+		if len(clean) != 0 {
+			t.Fatalf("expected 0 diagnostics on fork-join concurrent MatchString, got %v", clean)
+		}
+	})
+
+	t.Run("cross_pkg_shared_read_overwrite_regexp_and_unmarshal_flagged", func(t *testing.T) {
+		diags := runProjModule(t, map[string]string{
+			"srv/srv.go": `package srv
+
+import (
+	"net/http"
+	"regexp"
+)
+
+type Config struct {
+	Re  regexp.Regexp
+	Buf []byte
+}
+
+func RegisterRe(mux *http.ServeMux, cfg *Config) {
+	mux.HandleFunc("/re", func(w http.ResponseWriter, r *http.Request) {
+		_ = cfg.Re.MatchString("abc")
+	})
+}
+`,
+			"app/app.go": `package app
+
+import (
+	"net/http"
+	"net/url"
+	"regexp"
+
+	"testmod/srv"
+)
+
+func BadStore() {
+	cfg := &srv.Config{Re: *regexp.MustCompile("a+"), Buf: []byte{1}}
+	mux := http.NewServeMux()
+	srv.RegisterRe(mux, cfg)
+	ready := make(chan struct{})
+	go func() {
+		close(ready)
+		mux.ServeHTTP(nil, &http.Request{Method: "GET", URL: &url.URL{Path: "/re"}})
+	}()
+	<-ready
+	cfg.Re = *regexp.MustCompile("b+")
+}
+`,
+		})
+		if len(diags) == 0 {
+			t.Fatalf("expected diagnostic on cross-pkg SharedRead cfg.Re overwrite")
+		}
+
+		unmarshalDiags := runProjModule(t, map[string]string{
+			"srv/srv.go": `package srv
+
+import (
+	"net/http"
+	"regexp"
+)
+
+type Config struct {
+	Re  regexp.Regexp
+	Buf []byte
+}
+
+func RegisterRe(mux *http.ServeMux, cfg *Config) {
+	mux.HandleFunc("/re", func(w http.ResponseWriter, r *http.Request) {
+		_ = cfg.Re.MatchString("abc")
+	})
+}
+`,
+			"app/app.go": `package app
+
+import (
+	"encoding/json"
+	"net/http"
+	"regexp"
+
+	"testmod/srv"
+)
+
+func clobberHelper(cfg *srv.Config, raw []byte) {
+	_ = json.Unmarshal(raw, &cfg.Re)
+}
+
+func BadUnmarshal(raw []byte) {
+	cfg := &srv.Config{Re: *regexp.MustCompile("a+"), Buf: []byte{1}}
+	mux := http.NewServeMux()
+	srv.RegisterRe(mux, cfg)
+	clobberHelper(cfg, raw)
+}
+`,
+		})
+		if len(unmarshalDiags) == 0 {
+			t.Fatalf("expected diagnostic when helper passes &cfg.Re to json.Unmarshal after SharedRead")
+		}
+
+		clean := runProjModule(t, map[string]string{
+			"srv/srv.go": `package srv
+
+import (
+	"net/http"
+	"regexp"
+)
+
+type Config struct {
+	Re  regexp.Regexp
+	Buf []byte
+}
+
+func RegisterRe(mux *http.ServeMux, cfg *Config) {
+	mux.HandleFunc("/re", func(w http.ResponseWriter, r *http.Request) {
+		_ = cfg.Re.MatchString("abc")
+	})
+}
+`,
+			"app/app.go": `package app
+
+import (
+	"net/http"
+	"regexp"
+
+	"testmod/srv"
+)
+
+func Good() {
+	cfg := &srv.Config{Re: *regexp.MustCompile("a+"), Buf: []byte{1}}
+	mux := http.NewServeMux()
+	srv.RegisterRe(mux, cfg)
+	_ = cfg.Re.MatchString("xyz")
+}
+`,
+		})
+		if len(clean) != 0 {
+			t.Fatalf("expected 0 diagnostics when cfg.Re is only read via MatchString, got %v", clean)
+		}
+	})
+
+	t.Run("autosync_interface_generics_and_pkg_init_enforced", func(t *testing.T) {
+		baseIfacePkg := `package ifacepkg
+
+import "sync"
+
+type Store interface {
+	Touch()
+}
+
+type SafeStore struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (s *SafeStore) Touch() {
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+}
+
+var _ Store = (*SafeStore)(nil)
+
+func RunConcurrent(s Store) {
+	var wg sync.WaitGroup
+	wg.Go(func() { s.Touch() })
+	wg.Go(func() { s.Touch() })
+	wg.Wait()
+}
+`
+		for _, tc := range []struct {
+			name string
+			code string
+			want bool
+		}{
+			{
+				name: "probe2b_boxGeneric_evil",
+				want: true,
+				code: `package app
+
+import "testmod/ifacepkg"
+
+type EvilStore struct{ n int }
+func (e *EvilStore) Touch() { e.n++ }
+func boxGeneric[T ifacepkg.Store](x T) ifacepkg.Store { return x }
+
+func Run() {
+	s := boxGeneric(&EvilStore{})
+	ifacepkg.RunConcurrent(s)
+}
+`,
+			},
+			{
+				name: "probe2b2_runGen_evil",
+				want: true,
+				code: `package app
+
+import "testmod/ifacepkg"
+
+type EvilStore struct{ n int }
+func (e *EvilStore) Touch() { e.n++ }
+func runGen[T ifacepkg.Store](x T) { ifacepkg.RunConcurrent(x) }
+
+func Run() {
+	runGen(&EvilStore{})
+}
+`,
+			},
+			{
+				name: "duck_constraint_evil",
+				want: true,
+				code: `package app
+
+import "testmod/ifacepkg"
+
+type EvilStore struct{ n int }
+func (e *EvilStore) Touch() { e.n++ }
+type Duck interface { Touch() }
+func boxDuck[T Duck](x T) ifacepkg.Store { return x }
+
+func Run() {
+	s := boxDuck(&EvilStore{})
+	ifacepkg.RunConcurrent(s)
+}
+`,
+			},
+			{
+				name: "generic_struct_holder_evil",
+				want: true,
+				code: `package app
+
+import "testmod/ifacepkg"
+
+type EvilStore struct{ n int }
+func (e *EvilStore) Touch() { e.n++ }
+type Holder[T ifacepkg.Store] struct { val T }
+func (h *Holder[T]) Box() ifacepkg.Store { return h.val }
+
+func Run() {
+	h := &Holder[*EvilStore]{val: &EvilStore{}}
+	ifacepkg.RunConcurrent(h.Box())
+}
+`,
+			},
+			{
+				name: "probe2e_pkg_init_global_evil",
+				want: true,
+				code: `package app
+
+import "testmod/ifacepkg"
+
+type EvilStore struct{ n int }
+func (e *EvilStore) Touch() { e.n++ }
+
+var globalEvil ifacepkg.Store = &EvilStore{}
+
+func Run() {
+	ifacepkg.RunConcurrent(globalEvil)
+}
+`,
+			},
+			{
+				name: "safe_generic_and_global_clean",
+				want: false,
+				code: `package app
+
+import "testmod/ifacepkg"
+
+func boxGeneric[T ifacepkg.Store](x T) ifacepkg.Store { return x }
+func runGen[T ifacepkg.Store](x T) { ifacepkg.RunConcurrent(x) }
+
+type Holder[T ifacepkg.Store] struct { val T }
+func (h *Holder[T]) Box() ifacepkg.Store { return h.val }
+
+var globalSafe ifacepkg.Store = &ifacepkg.SafeStore{}
+
+func Run() {
+	s := boxGeneric(&ifacepkg.SafeStore{})
+	ifacepkg.RunConcurrent(s)
+	runGen(&ifacepkg.SafeStore{})
+	h := &Holder[*ifacepkg.SafeStore]{val: &ifacepkg.SafeStore{}}
+	ifacepkg.RunConcurrent(h.Box())
+	ifacepkg.RunConcurrent(globalSafe)
+}
+`,
+			},
+		} {
+			diags := runProjModule(t, map[string]string{
+				"ifacepkg/ifacepkg.go": baseIfacePkg,
+				"app/app.go":           tc.code,
+			})
+			if tc.want && len(diags) == 0 {
+				t.Fatalf("%s: expected diagnostic, got none", tc.name)
+			}
+			if !tc.want && len(diags) != 0 {
+				t.Fatalf("%s: expected 0 diagnostics, got %v", tc.name, diags)
+			}
+		}
+	})
+}

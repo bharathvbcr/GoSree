@@ -1240,9 +1240,61 @@ func (st *state) collectDirectionalSlice(g *graph, start ssa.Value, selfInstr ss
 	return ds, true
 }
 
+func (st *state) interiorAddrAliasesSlice(ds *directionalSlice, v ssa.Value) bool {
+	if ds == nil || v == nil {
+		return false
+	}
+	seen := map[ssa.Value]bool{}
+	var walk func(cur ssa.Value, sawInterior bool) bool
+	walk = func(cur ssa.Value, sawInterior bool) bool {
+		if cur == nil || seen[cur] {
+			return false
+		}
+		seen[cur] = true
+		if _, guarded := st.slotOf(cur); guarded {
+			return false
+		}
+		if sawInterior && (ds.alias[cur] || ds.up[cur]) {
+			return true
+		}
+		switch x := cur.(type) {
+		case *ssa.FieldAddr:
+			return walk(x.X, true)
+		case *ssa.IndexAddr:
+			return walk(x.X, true)
+		case *ssa.ChangeType:
+			return walk(x.X, sawInterior)
+		case *ssa.MakeInterface:
+			return walk(x.X, sawInterior)
+		case *ssa.ChangeInterface:
+			return walk(x.X, sawInterior)
+		case *ssa.Phi:
+			for _, edge := range x.Edges {
+				if walk(edge, sawInterior) {
+					return true
+				}
+			}
+		case *ssa.UnOp:
+			if x.Op == token.MUL {
+				if a, ok := x.X.(*ssa.Alloc); ok && a.Referrers() != nil {
+					for _, r := range *a.Referrers() {
+						if stIns, isStore := r.(*ssa.Store); isStore && stIns.Addr == a {
+							if walk(stIns.Val, sawInterior) {
+								return true
+							}
+						}
+					}
+				}
+			}
+		}
+		return false
+	}
+	return walk(v, false)
+}
+
 func (st *state) sliceInstructionWrites(g *graph, ds *directionalSlice, ins ssa.Instruction) bool {
 	if w, isW := writeOf(ins); isW {
-		if ds.alias[w.addr] || ds.up[w.addr] {
+		if ds.alias[w.addr] || ds.up[w.addr] || st.interiorAddrAliasesSlice(ds, w.addr) {
 			return true
 		}
 	}
@@ -1254,7 +1306,7 @@ func (st *state) sliceInstructionWrites(g *graph, ds *directionalSlice, ins ssa.
 	if b, isBuiltin := cc.Value.(*ssa.Builtin); isBuiltin {
 		switch b.Name() {
 		case "append", "copy", "delete", "clear":
-			if len(cc.Args) > 0 && (ds.alias[cc.Args[0]] || ds.up[cc.Args[0]]) {
+			if len(cc.Args) > 0 && (ds.alias[cc.Args[0]] || ds.up[cc.Args[0]] || st.interiorAddrAliasesSlice(ds, cc.Args[0])) {
 				return true
 			}
 		}
@@ -1262,11 +1314,11 @@ func (st *state) sliceInstructionWrites(g *graph, ds *directionalSlice, ins ssa.
 	}
 	if cc.IsInvoke() {
 		for _, a := range cc.Args {
-			if ds.alias[a] || ds.up[a] {
+			if ds.alias[a] || ds.up[a] || st.interiorAddrAliasesSlice(ds, a) {
 				return true
 			}
 		}
-		if cc.Value != nil && (ds.alias[cc.Value] || ds.up[cc.Value]) {
+		if cc.Value != nil && (ds.alias[cc.Value] || ds.up[cc.Value] || (!st.cls.Shareable(cc.Value.Type()) && !st.isAutoSyncType(cc.Value.Type()) && st.interiorAddrAliasesSlice(ds, cc.Value))) {
 			return true
 		}
 		return false
@@ -1280,7 +1332,8 @@ func (st *state) sliceInstructionWrites(g *graph, ds *directionalSlice, ins ssa.
 		}
 		cs := st.summary(callee)
 		for ai, a := range cc.Args {
-			if (ds.alias[a] || ds.up[a]) && (cs.pessimistic || cs.writesNonReg(ai) || cs.spawns(ai)) {
+			inSlice := ds.alias[a] || ds.up[a] || (!isEncapsulatedMethodRecvCall(st, callee, ai, a) && st.interiorAddrAliasesSlice(ds, a))
+			if inSlice && (cs.pessimistic || cs.writesNonReg(ai) || cs.spawns(ai)) {
 				return true
 			}
 		}
@@ -1290,12 +1343,12 @@ func (st *state) sliceInstructionWrites(g *graph, ds *directionalSlice, ins ssa.
 		if anon, ok := mc.Fn.(*ssa.Function); ok && st.isAnalyzableClosureFn(anon) {
 			cs := st.summary(anon)
 			for ai, a := range cc.Args {
-				if (ds.alias[a] || ds.up[a]) && (cs.pessimistic || cs.writesNonReg(ai) || cs.spawns(ai)) {
+				if (ds.alias[a] || ds.up[a] || st.interiorAddrAliasesSlice(ds, a)) && (cs.pessimistic || cs.writesNonReg(ai) || cs.spawns(ai)) {
 					return true
 				}
 			}
 			for bi, bnd := range mc.Bindings {
-				if (ds.alias[bnd] || ds.up[bnd]) && (cs.pessimistic || cs.writesFree(bi)) {
+				if (ds.alias[bnd] || ds.up[bnd] || st.interiorAddrAliasesSlice(ds, bnd)) && (cs.pessimistic || cs.writesFree(bi)) {
 					return true
 				}
 			}
@@ -1303,7 +1356,7 @@ func (st *state) sliceInstructionWrites(g *graph, ds *directionalSlice, ins ssa.
 		}
 	}
 	for _, a := range cc.Args {
-		if ds.alias[a] || ds.up[a] {
+		if ds.alias[a] || ds.up[a] || st.interiorAddrAliasesSlice(ds, a) {
 			return true
 		}
 	}

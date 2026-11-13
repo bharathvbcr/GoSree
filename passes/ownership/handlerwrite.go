@@ -536,7 +536,7 @@ func (st *state) specializeHandlerCtorFields(sp spawnSite) map[*types.Var][]type
 					}
 					q := st.ask()
 					ts, incomplete := q.resolveInterfaceTypes(callerFn, arg)
-					if incomplete || q.cut {
+					if incomplete || q.cut || len(ts) == 0 {
 						return false
 					}
 					for _, ct := range ts {
@@ -558,7 +558,7 @@ func (st *state) specializeHandlerCtorFields(sp spawnSite) map[*types.Var][]type
 				default:
 					q := st.ask()
 					ts, incomplete := q.resolveInterfaceTypes(ctor, sv)
-					if incomplete || q.cut {
+					if incomplete || q.cut || len(ts) == 0 {
 						return false
 					}
 					for _, ct := range ts {
