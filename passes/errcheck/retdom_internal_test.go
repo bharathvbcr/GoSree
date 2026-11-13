@@ -1,6 +1,8 @@
 package errcheck
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"golang.org/x/tools/go/analysis"
@@ -8,8 +10,7 @@ import (
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 )
 
-// retDomOf lowers nothing: it builds the parent index of the function named fn in pkg and returns
-// whether its retDom is nil.
+// retDomOf builds the parent index of the function named fn in pkg and returns its retDom.
 func retDomIsNil(t *testing.T, pkg, fn string) bool {
 	t.Helper()
 	var got, seen bool
@@ -35,12 +36,48 @@ func retDomIsNil(t *testing.T, pkg, fn string) bool {
 	return got
 }
 
-// A function with a defer has a Recover block that ends in a return, has no dominator and comes
-// before the other return blocks. No block dominates every return then, so retDom must be nil and
-// stay nil: resetting it at the next return block let a call that one return path skips pass for
-// one that dominates every return.
-func TestParentIndexRetDomIsStickyNil(t *testing.T) {
-	if !retDomIsNil(t, "errretdom", "F") {
-		t.Fatal("retDom is not nil for a function whose Recover block precedes its other returns")
+// errretdomDiags is "line: message" for every diagnostic of errretdom.
+func errretdomDiags(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for _, r := range analysistest.Run(discardT{}, analysistest.TestData(), Analyzer, "errretdom") {
+		for _, d := range r.Diagnostics {
+			out = append(out, fmt.Sprintf("%d: %s", r.Pass.Fset.Position(d.Pos).Line, d.Message))
+		}
+	}
+	return out
+}
+
+// The Recover block is entered only by a recovered panic, and its return reloads the function's
+// result cells (go/ssa createRecoverBlock: a load of each named or synthetic result alloc, then a
+// Return), which the pair plan already keeps out of any plan. It has no dominator and comes before
+// the other returns, so it is left out of the return-dominance walk; a defer does not disable the
+// plan. Any other climb to nil would stay nil (parentIndexFor's seenRet).
+//
+//	F: its early `return 1, nil` precedes the closure call, so the call does not dominate every
+//	   normal return and the plan stays rejected: the closure's store is reported (ERR002);
+//	G: the call dominates every normal return, so the pair is tracked and nothing is reported.
+func TestRecoverBlockIsLeftOutOfReturnDominance(t *testing.T) {
+	for _, fn := range []string{"F", "G"} {
+		if retDomIsNil(t, "errretdom", fn) {
+			t.Errorf("%s: retDom is nil: the Recover block was counted among the returns", fn)
+		}
+	}
+	const gLine = 34 // the line of `func G` in testdata/src/errretdom/a.go
+	var onF, onG []string
+	for _, d := range errretdomDiags(t) {
+		var line int
+		fmt.Sscanf(d, "%d:", &line)
+		if line < gLine {
+			onF = append(onF, d)
+		} else {
+			onG = append(onG, d)
+		}
+	}
+	if len(onF) != 1 || !strings.Contains(onF[0], "ERR002") {
+		t.Errorf("F: want exactly one ERR002 at the closure's store, got %v", onF)
+	}
+	if len(onG) != 0 {
+		t.Errorf("G: want no diagnostic (the plan is accepted), got %v", onG)
 	}
 }
