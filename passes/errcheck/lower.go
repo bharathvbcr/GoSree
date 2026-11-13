@@ -729,6 +729,7 @@ func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
 		}
 	}
 	var retDom *ssa.BasicBlock
+	seenRet := false
 	for _, blk := range parent.Blocks {
 		b.planWork += uint64(len(blk.Instrs)) + 1
 		if len(blk.Instrs) == 0 {
@@ -748,8 +749,8 @@ func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
 		if _, isRet := blk.Instrs[len(blk.Instrs)-1].(*ssa.Return); !isRet {
 			continue
 		}
-		if retDom == nil {
-			retDom = blk
+		if !seenRet {
+			seenRet, retDom = true, blk
 			continue
 		}
 		for retDom != nil && !retDom.Dominates(blk) {
