@@ -67,7 +67,9 @@ func TestRecoverBlockIsLeftOutOfReturnDominance(t *testing.T) {
 	var onF, onG []string
 	for _, d := range errretdomDiags(t) {
 		var line int
-		fmt.Sscanf(d, "%d:", &line)
+		if _, err := fmt.Sscanf(d, "%d:", &line); err != nil {
+			t.Fatalf("diagnostic %q does not start with a line number: %v", d, err)
+		}
 		if line < gLine {
 			onF = append(onF, d)
 		} else {
