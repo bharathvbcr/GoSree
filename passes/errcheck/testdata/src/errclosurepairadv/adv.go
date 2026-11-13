@@ -1261,8 +1261,11 @@ func T_CheckInDefer() (n int) {
 
 // ---- 7. returns, summaries, loops, conversions ---------------------------------------------
 
+// C_Named and C_NamedUse: named results are excluded from the closure plan (the return reads the
+// cells implicitly), so the closure store is reported as on base, a residual false positive for
+// C_Named whose twin is clean.
 func C_Named() (v *T, err error) {
-	func() { v, err = workV() }()
+	func() { v, err = workV() }() // want "ERR002"
 	return
 }
 
@@ -1594,8 +1597,8 @@ func T_ReturnOtherErr() (*T, error) {
 }
 
 func C_NamedUse() (v *T, err error) {
-	func() { v, err = workV() }()
-	_ = use(v) // want "ERR002"
+	func() { v, err = workV() }() // want "ERR002"
+	_ = use(v)
 	return
 }
 

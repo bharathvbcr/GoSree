@@ -23,6 +23,10 @@ type packageBuilder struct {
 	blankedBySite map[uint32]siteMeta
 	// closurePlans caches the closure pair plan per closure; a nil plan means the closure is untracked.
 	closurePlans map[*ssa.Function]*closurePlan
+	// parentIndexes caches the per-parent facts the plans share; planWork counts the instructions,
+	// blocks and referrers visited while building them (a deterministic cost measure for tests).
+	parentIndexes map[*ssa.Function]*parentIndex
+	planWork      uint64
 }
 
 func newPackageBuilder(pass *analysis.Pass, funcs []*ssa.Function) *packageBuilder {
@@ -37,6 +41,7 @@ func newPackageBuilder(pass *analysis.Pass, funcs []*ssa.Function) *packageBuild
 		sites:         []siteMeta{{pos: token.NoPos}}, // site 0 reserved
 		blankedBySite: make(map[uint32]siteMeta),
 		closurePlans:  make(map[*ssa.Function]*closurePlan),
+		parentIndexes: make(map[*ssa.Function]*parentIndex),
 	}
 	return b
 }
@@ -677,7 +682,7 @@ func (b *packageBuilder) closurePlanFor(fn *ssa.Function) *closurePlan {
 	if p, ok := b.closurePlans[fn]; ok {
 		return p
 	}
-	p := buildClosurePlan(fn)
+	p := b.buildClosurePlan(fn)
 	b.closurePlans[fn] = p
 	return p
 }
@@ -699,30 +704,80 @@ func (b *packageBuilder) closurePlanAt(call *ssa.Call) *closurePlan {
 	return nil
 }
 
-func buildClosurePlan(fn *ssa.Function) *closurePlan {
+// parentIndex is what every closure of one enclosing function needs to know about it, computed in
+// one pass so that a plan costs the size of its closure, not of the parent.
+type parentIndex struct {
+	closures map[*ssa.Function]*ssa.MakeClosure // nil value: the closure is built at more than one site
+	// retDom is the nearest block that dominates every return block, or nil when there is none. A
+	// call runs on every path to a return exactly when its block dominates retDom.
+	retDom *ssa.BasicBlock
+	// namedResults holds the names of the parent's named results: their cells are read by the
+	// return itself (a bare return, and the deferred and recovered paths), not by a visible load.
+	namedResults map[string]bool
+}
+
+func (b *packageBuilder) parentIndexFor(parent *ssa.Function) *parentIndex {
+	if ix, ok := b.parentIndexes[parent]; ok {
+		return ix
+	}
+	ix := &parentIndex{closures: make(map[*ssa.Function]*ssa.MakeClosure), namedResults: make(map[string]bool)}
+	if res := parent.Signature.Results(); res != nil {
+		for i := range res.Len() {
+			if name := res.At(i).Name(); name != "" && name != "_" {
+				ix.namedResults[name] = true
+			}
+		}
+	}
+	var retDom *ssa.BasicBlock
+	for _, blk := range parent.Blocks {
+		b.planWork += uint64(len(blk.Instrs)) + 1
+		if len(blk.Instrs) == 0 {
+			continue
+		}
+		for _, ins := range blk.Instrs {
+			if m, ok := ins.(*ssa.MakeClosure); ok {
+				if fn, ok := m.Fn.(*ssa.Function); ok {
+					if _, dup := ix.closures[fn]; dup {
+						ix.closures[fn] = nil
+					} else {
+						ix.closures[fn] = m
+					}
+				}
+			}
+		}
+		if _, isRet := blk.Instrs[len(blk.Instrs)-1].(*ssa.Return); !isRet {
+			continue
+		}
+		if retDom == nil {
+			retDom = blk
+			continue
+		}
+		for retDom != nil && !retDom.Dominates(blk) {
+			b.planWork++
+			retDom = retDom.Idom()
+		}
+	}
+	ix.retDom = retDom
+	b.parentIndexes[parent] = ix
+	return ix
+}
+
+func (b *packageBuilder) buildClosurePlan(fn *ssa.Function) *closurePlan {
 	parent := fn.Parent()
 	if parent == nil || len(fn.FreeVars) == 0 || len(fn.Blocks) == 0 {
 		return nil
 	}
+	pix := b.parentIndexFor(parent)
 
 	// The enclosing function runs the closure at exactly one call, in a block it lowers, and the
 	// closure value goes nowhere else (not stored, passed, deferred or started as a goroutine).
-	var mc *ssa.MakeClosure
-	for _, blk := range parent.Blocks {
-		for _, ins := range blk.Instrs {
-			if m, ok := ins.(*ssa.MakeClosure); ok && m.Fn == fn {
-				if mc != nil {
-					return nil
-				}
-				mc = m
-			}
-		}
-	}
+	mc := pix.closures[fn]
 	if mc == nil {
 		return nil
 	}
 	var parentCall *ssa.Call
 	for _, ref := range liveReferrers(mc) {
+		b.planWork++
 		call, ok := ref.(*ssa.Call)
 		if !ok || call.Call.Value != mc || call.Block() == parent.Recover || parentCall != nil {
 			return nil
@@ -739,13 +794,8 @@ func buildClosurePlan(fn *ssa.Function) *closurePlan {
 	}
 	// The call runs on every path to a return. A call on one branch leaves the cells at their
 	// previous values on the other, and the join of the two cannot carry the tuple.
-	for _, blk := range parent.Blocks {
-		if len(blk.Instrs) == 0 {
-			continue
-		}
-		if _, isRet := blk.Instrs[len(blk.Instrs)-1].(*ssa.Return); isRet && !parentCall.Block().Dominates(blk) {
-			return nil
-		}
+	if pix.retDom == nil || !parentCall.Block().Dominates(pix.retDom) {
+		return nil
 	}
 
 	// Collect the value components the closure stores to captured variables together with the
@@ -756,6 +806,7 @@ func buildClosurePlan(fn *ssa.Function) *closurePlan {
 			continue
 		}
 		for _, ins := range blk.Instrs {
+			b.planWork++
 			st, ok := ins.(*ssa.Store)
 			if !ok {
 				continue
@@ -794,6 +845,8 @@ func buildClosurePlan(fn *ssa.Function) *closurePlan {
 		return nil
 	}
 
+	// A named result is read by the parent's return, which checks only a literal nil or blanked
+	// error: a pair that ends up in a returned cell is left to the closure-store report.
 	// Each captured variable the pair lands in is written once by the closure and touched only
 	// through plain loads and stores, in the closure and in the enclosing function, and no other
 	// closure captures it: nothing else can change it between the call and the check. The closure
@@ -810,7 +863,7 @@ func buildClosurePlan(fn *ssa.Function) *closurePlan {
 			return nil
 		}
 		alloc, ok := mc.Bindings[idx].(*ssa.Alloc)
-		if !ok || !isLocalCellAlloc(alloc) || !capturedOnlyBy(alloc, mc) {
+		if !ok || !isLocalCellAlloc(alloc) || pix.namedResults[alloc.Comment] || !capturedOnlyBy(alloc, mc) {
 			return nil
 		}
 	}

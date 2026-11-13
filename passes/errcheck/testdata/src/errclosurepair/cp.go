@@ -355,3 +355,50 @@ func LoopUseBefore() int {
 	}
 	return n
 }
+
+// Named results are read by the return itself, which checks only a literal-nil or blanked error, so
+// a pair that lands in a result cell is not tracked and the closure store is reported. The twin
+// without a closure is reported at its return as well.
+
+func NamedNilErr() (v *T, err error) {
+	func() { v, err = workV() }() // want "ERR002"
+	return v, nil
+}
+
+func NamedBare() (v *T, err error) {
+	func() { v, err = workV() }() // want "ERR002"
+	err = nil
+	return
+}
+
+// NamedChecked checks err before the bare return: a residual false positive at the store, kept so
+// that every named-result shape fails closed.
+func NamedChecked() (v *T, err error) {
+	func() { v, err = workV() }() // want "ERR002"
+	if err != nil {
+		return
+	}
+	return v, nil
+}
+
+// NamedDeferred also has a deferred function that rewrites err: another closure captures the cell.
+func NamedDeferred() (v *T, err error) {
+	defer func() {
+		if err != nil {
+			err = errNo
+		}
+	}()
+	func() { v, err = workV() }() // want "ERR002"
+	return v, nil
+}
+
+// NamedRecover assigns err on the recovered path.
+func NamedRecover() (v *T, err error) {
+	defer func() {
+		if recover() != nil {
+			err = errNo
+		}
+	}()
+	func() { v, err = workV() }() // want "ERR002"
+	return v, nil
+}
