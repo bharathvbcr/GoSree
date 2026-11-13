@@ -1,0 +1,108 @@
+cgo	plain	./clean	0		stdout_lines=0
+cgo	json	./clean	0		stdout_lines=1
+cgo	fix	./clean	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	diff	./clean	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	tags-foo	./clean	0		stdout_lines=0
+cgo	tags-bar	./clean	0		stdout_lines=0
+cgo	test-false	./clean	0	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+cgo	borrow-false	./clean	0	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+cgo	vet	./clean	0		
+cgo	plain	./find	3	find/f.go:5:2: BORROW004: cannot return reference to local stack variable 'x'	stdout_lines=0
+cgo	json	./find	3		stdout_lines=12
+cgo	fix	./find	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	diff	./find	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	tags-foo	./find	3	find/f.go:5:2: BORROW004: cannot return reference to local stack variable 'x'	stdout_lines=0
+cgo	tags-bar	./find	3	find/f.go:5:2: BORROW004: cannot return reference to local stack variable 'x'	stdout_lines=0
+cgo	test-false	./find	3	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+cgo	borrow-false	./find	0	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+cgo	vet	./find	1	find/f.go:5:2: BORROW004: cannot return reference to local stack variable 'x'	
+cgo	plain	./tagged	0		stdout_lines=0
+cgo	json	./tagged	0		stdout_lines=1
+cgo	fix	./tagged	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	diff	./tagged	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	tags-foo	./tagged	3	tagged/g_foo.go:7:2: BORROW004: cannot return reference to local stack variable 'x'	stdout_lines=0
+cgo	tags-bar	./tagged	0		stdout_lines=0
+cgo	test-false	./tagged	0	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+cgo	borrow-false	./tagged	0	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+cgo	vet	./tagged	0		
+cgo	plain	./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+cgo	json	./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=25
+cgo	fix	./bad	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	diff	./bad	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	tags-foo	./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+cgo	tags-bar	./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+cgo	test-false	./bad	1	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+cgo	borrow-false	./bad	1	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+cgo	vet	./bad	1	# scratch/bad	
+cgo	plain	./nope	1	-: stat nope: directory not found	stdout_lines=0
+cgo	json	./nope	1	-: stat nope: directory not found	stdout_lines=25
+cgo	fix	./nope	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	diff	./nope	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	tags-foo	./nope	1	-: stat nope: directory not found	stdout_lines=0
+cgo	tags-bar	./nope	1	-: stat nope: directory not found	stdout_lines=0
+cgo	test-false	./nope	1	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+cgo	borrow-false	./nope	1	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+cgo	vet	./nope	1	stat nope: directory not found	
+cgo	plain	./find ./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+cgo	json	./find ./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=35
+cgo	fix	./find ./bad	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	diff	./find ./bad	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+cgo	tags-foo	./find ./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+cgo	tags-bar	./find ./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+cgo	test-false	./find ./bad	1	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+cgo	borrow-false	./find ./bad	1	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+cgo	vet	./find ./bad	1	find/f.go:5:2: BORROW004: cannot return reference to local stack variable 'x'	
+nocgo	plain	./clean	0		stdout_lines=0
+nocgo	json	./clean	0		stdout_lines=1
+nocgo	fix	./clean	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	diff	./clean	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	tags-foo	./clean	0		stdout_lines=0
+nocgo	tags-bar	./clean	0		stdout_lines=0
+nocgo	test-false	./clean	0	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+nocgo	borrow-false	./clean	0	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+nocgo	vet	./clean	0		
+nocgo	plain	./find	3	find/f.go:5:2: BORROW004: cannot return reference to local stack variable 'x'	stdout_lines=0
+nocgo	json	./find	3		stdout_lines=12
+nocgo	fix	./find	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	diff	./find	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	tags-foo	./find	3	find/f.go:5:2: BORROW004: cannot return reference to local stack variable 'x'	stdout_lines=0
+nocgo	tags-bar	./find	3	find/f.go:5:2: BORROW004: cannot return reference to local stack variable 'x'	stdout_lines=0
+nocgo	test-false	./find	3	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+nocgo	borrow-false	./find	0	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+nocgo	vet	./find	1	find/f.go:5:2: BORROW004: cannot return reference to local stack variable 'x'	
+nocgo	plain	./tagged	0		stdout_lines=0
+nocgo	json	./tagged	0		stdout_lines=1
+nocgo	fix	./tagged	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	diff	./tagged	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	tags-foo	./tagged	3	tagged/g_foo.go:7:2: BORROW004: cannot return reference to local stack variable 'x'	stdout_lines=0
+nocgo	tags-bar	./tagged	0		stdout_lines=0
+nocgo	test-false	./tagged	0	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+nocgo	borrow-false	./tagged	0	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+nocgo	vet	./tagged	0		
+nocgo	plain	./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+nocgo	json	./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=25
+nocgo	fix	./bad	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	diff	./bad	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	tags-foo	./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+nocgo	tags-bar	./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+nocgo	test-false	./bad	1	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+nocgo	borrow-false	./bad	1	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+nocgo	vet	./bad	1	# scratch/bad	
+nocgo	plain	./nope	1	-: stat nope: directory not found	stdout_lines=0
+nocgo	json	./nope	1	-: stat nope: directory not found	stdout_lines=25
+nocgo	fix	./nope	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	diff	./nope	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	tags-foo	./nope	1	-: stat nope: directory not found	stdout_lines=0
+nocgo	tags-bar	./nope	1	-: stat nope: directory not found	stdout_lines=0
+nocgo	test-false	./nope	1	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+nocgo	borrow-false	./nope	1	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+nocgo	vet	./nope	1	stat nope: directory not found	
+nocgo	plain	./find ./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+nocgo	json	./find ./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=35
+nocgo	fix	./find ./bad	2	gosree: -fix is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	diff	./find ./bad	2	gosree: -diff is not supported: gosree offers no suggested fixes, and the driver exits 0 and prints no findings in this mode, so a gate would pass code that has findings	stdout_lines=0
+nocgo	tags-foo	./find ./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+nocgo	tags-bar	./find ./bad	1	bad/b.go:3:23: cannot use "x" (untyped string constant) as int value in return statement	stdout_lines=0
+nocgo	test-false	./find ./bad	1	gosree: WARNING: -test=false: test files are not analysed, so findings in them are not reported	stdout_lines=0
+nocgo	borrow-false	./find ./bad	1	gosree: WARNING: analysis passes are switched off by the command line: -borrow (the borrow rules). Exit status 0 then does not mean those rules were checked	stdout_lines=0
+nocgo	vet	./find ./bad	1	find/f.go:5:2: BORROW004: cannot return reference to local stack variable 'x'	

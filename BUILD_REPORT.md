@@ -4,19 +4,20 @@ This is the second backlog run on gocap (GoSree). The first run's report, `BUILD
 
 - **Branches:** the work is on local, unpushed branches named `run2/*`. Nothing was merged to `main` and nothing was pushed; merging is the owner's call.
 - **Labels:** every claim below is labelled **verified** (with the command or evidence) or **inferred**.
-- **Run log:** the full chronological log is the session scratchpad's `runlog.md`.
+- **Run log:** the full chronological log is committed beside this report as [`build-run-2026-11-12/runlog.md`](build-run-2026-11-12/runlog.md). The ft-a0d4 exit-code table is [`build-run-2026-11-12/exitcodes-table.md`](build-run-2026-11-12/exitcodes-table.md), and its raw rows are in `exitcodes-results.tsv`.
 
 ## 0. Summary
 
 - **Cards moved to review (8):** ft-f2e5, ft-5e61, ft-420d, ft-c7dd, ft-8f3c, ft-fe6e, ft-c37e, and ft-6d5a *(see §1 for its gate)*.
   - Done: none. `dev verify` cannot run here: `dev doctor` reports no DevCouncil task store and gate mode off (verified 2026-11-12). Review is the ceiling, as Fable ruled.
-- **New cards filed (6):**
+- **New cards filed (7):**
   - ft-32cd: census nondeterminism
   - ft-eddc: Go 1.27.4 cgo break, p1
   - ft-6d5a: ERR003 quoting, then fixed in this run
   - ft-fe6e: ERR005 design, then worked in one bounded round
   - ft-c37e: gosree_commit provenance, then fixed
   - ft-79c7: replay depth redesign
+  - ft-e92e: path keying and the remaining ERR005 shapes
 - **Environment break found mid-run.** Homebrew moved `go` to 1.27.4 at 23:19 on 2026-11-12. On 1.27.4 every cgo build of gosree fails, unmodified `main` included. All cgo verification in this run used go1.27.3 by absolute path (Fable ruling). See §5.
 - **A brief-induced regression was caught and undone.** ft-c7dd's first ERR005 attempt added 10 false positives and 3 misses. The cause was the orchestrator's brief. It was attributed per commit, split out, and redone under the correct invariant. See §4.
 
@@ -39,8 +40,12 @@ Every card here carries this label, which must be cleared before merge: **"cgo v
 - Stack A is `run2/5e61` alone.
 - Stack B is 420d → c7dd → 8f3c → fe6e → 6d5a; merge it whole, since only the 6d5a tip records the correct fingerprint.
 - `run2/f2e5` and `run2/c37e` are independent. Their merge-tree with each other is clean.
-- Each Stack B tip was test-merged with `run2/5e61` in both engines (Fable's stack rule), and every one was clean and green. `errcheck.go` auto-merges.
-- **FINDINGS.md fingerprint cell:** it is correct only on the latest Stack B tip. Earlier tips record stale fingerprints, and each card notes its computed value. Merging the whole stack lands the correct one.
+- **Stack A×B test merges (Fable's stack rule).** Each Stack B card's tip was test-merged with `run2/5e61` before its review, in both engines, and every merge was clean and green: 420d 865eada, c7dd 8c5c983, 8f3c 417b04b, fe6e 45fbc54, 6d5a ff3e20b. `errcheck.go` auto-merges.
+  - The *post-fix* 420d, c7dd and 8f3c tips (after the forward merges of the retDom fixes) were not separately test-merged.
+  - The 6d5a tip, which contains them, was.
+- **FINDINGS.md fingerprint cell:**
+  - Stack B: only the 6d5a tip records its own fingerprint (`1694ac132e12f19b`). Earlier tips are stale, and each card notes its computed value.
+  - **After both stacks merge, the fingerprint will be `c4888388dc458b33`** (verified: `git merge-tree --write-tree run2/6d5a run2/5e61`, then the tree archived and `fingerprint.sh` run). The cell must be set to that at merge time.
 
 *ft-6d5a final gate (05:28–05:37): go1.27.3 vet ok, cgo test ./... 17/17 ok, CGO_ENABLED=0 errcheck+gusseterr+stress ok, 6d5a×5e61 merge (ff3e20b) ok in both engines. Its FINDINGS.md records the stack-tip fingerprint `1694ac132e12f19b` (55b1e86).*
 
@@ -51,6 +56,7 @@ Every card here carries this label, which must be cleared before merge: **"cgo v
 - An Opus review.
 - A separate adversarial pass.
 - A full-suite gate: go1.27.3, `go test -timeout 60m -count=1 ./...` with cgo, 17/17 packages.
+  - Exception, ft-8f3c: 16/17. `tests/stress` failed only `TestWitnesses/lk_wit_maplookup` (a race the runtime did not convict). That witness passed 30/30 isolated on both base and the branch, and the full `tests/stress` rerun passed. It is the load flake tracked by ft-a0d4.
 - `CGO_ENABLED=0` runs of the touched packages.
 
 **Load-independent performance evidence**
@@ -59,7 +65,7 @@ Every card here carries this label, which must be cleared before merge: **"cgo v
 - ft-8f3c: exit-path analysis costs 2.50 units per block at 1,401 and 21,001 blocks.
 - ft-fe6e: with the cap, `nestedClosedSrc` is linear (1,286 → 10,386 at depth 25 → 200).
 
-**Adversarial breaks found and fixed (25 in total)**
+**Adversarial breaks found and fixed (23 in total, counting each regression class once)**
 
 | Card | Breaks |
 |---|---|
@@ -88,6 +94,7 @@ Every card here carries this label, which must be cleared before merge: **"cgo v
 | ft-5e61, Rust engine | allocs/op, 200 / 50 funcs | 8 / 7 | 8 / 7 |
 
 - The benchmark is `SolvePackageAB`, interleaved, 6 runs per side.
+- **Lowering changes (ft-420d, ft-c7dd, ft-8f3c, ft-fe6e, ft-6d5a): cost is unmeasured.** No lowering benchmark exists. Their only cost evidence is the deterministic work counters in §1, which show linear growth. The checker self-run output is unchanged, but its wall-clock was not compared.
 - CPU-profile attribution: the new code is at most 0.4% of samples, and the indicative oracle wall-clock rise was noise.
 - No other card touched a benchmarked hot path. Their work counters are listed in §1.
 
@@ -103,7 +110,7 @@ Every card here carries this label, which must be cleared before merge: **"cgo v
 | ft-238f | Push: ask-first. |
 | ft-264e | Roadmap: needs build/bundle/leave decisions. |
 | ft-eddc (new) | gusset-level fix plus a pin bump: owner and gusset lane (Fable). |
-| ft-79c7 (new), ft-fe6e remainder | Design follow-ups. Path keying needs per-store versioning; the replay depth needs an Euler-interval redesign. |
+| ft-79c7, ft-e92e (new), ft-fe6e remainder | Design follow-ups. Path keying needs per-store versioning; the replay depth needs an Euler-interval redesign. |
 
 ## 4. Two corrections the run made to its own work
 
@@ -141,6 +148,7 @@ Every card here carries this label, which must be cleared before merge: **"cgo v
 | ft-fe6eb6d8 (p2) | ERR005 written state across closures and field paths. **One bounded round in review; remainder open.** |
 | ft-c37ee4e9 (p3) | module-report gosree_commit names the working directory's checkout. **Fixed in this run (review).** |
 | ft-79c70141 (p3) | ERR005 closure replay: quadratic work in nesting depth below the 16-level cap |
+| ft-e92e722c (p2) | ERR005 path keying with per-store versioning, and the remaining MISS(ERR005) closure and field shapes. Its spec is `run2/c7dd-err005-wip`. |
 
 ## 7. Fable's decisions
 
@@ -163,7 +171,11 @@ Every card here carries this label, which must be cleared before merge: **"cgo v
 
 ## 8. Owner decisions pending
 
-- **Merging the review branches** (order in §1). Each FINDINGS.md fingerprint cell is correct only on the Stack B tip.
+- **Merging the review branches** (order in §1). Each FINDINGS.md fingerprint cell is correct only on the Stack B tip. After both stacks land, set it to `c4888388dc458b33`.
+- **`go run` and gosree_commit (ft-c37e).** The documented `go run ./cmd/gosree-corpus …` invocation (6 places across README, docs and the refservice record) now records `gosree_commit: "unknown (no vcs stamp)"`, because `go run` does not stamp vcs by default.
+  - Verified on a temporary worktree of 1e216e9: `go run -buildvcs=true …` and `go build` record `1e216e9`.
+  - Choose one: change the documented command (add `-buildvcs=true`, or build then run), or accept no-stamp and cite commits by hand.
+  - Most of those docs are held by other sessions.
 - **The gusset Go 1.27.4 fix** (ft-eddc14e5) and the pin bump that adopts it. Until then, nothing can be verified with cgo on the default toolchain.
 - **Deleting `run2/c7dd-err005-wip`.** Keep it until ft-fe6e's remainder no longer needs it as a spec.
 - **Two sentences withheld from held or recently edited files:**
@@ -218,4 +230,9 @@ Every card here carries this label, which must be cleared before merge: **"cgo v
   - a stray symlink created in the gusset repo (removed and verified absent);
   - Python used once for a mechanical edit (it does not ship);
   - an intermediate commit (69eb7b6, parked on the wip branch) whose own tests do not compile.
+- **Platforms.** Every test run was on darwin/arm64.
+  - The only cross-platform check: `CGO_ENABLED=0 go vet ./...` with `GOOS=linux` and `GOOS=windows` (amd64) on the f2e5, c37e, 5e61 and 6d5a tips. All were clean (verified). That excludes cgo-only files.
+  - **No Linux or Windows test run was attempted.** CI runs on Linux.
+  - `extract_links_adv_unix_test.go` carries `//go:build !windows` (verified).
+- **ft-420d acceptance after the Recover-block fix.** The exact change against the adversarially tested 90fa6e9 is on the card. Acceptance narrows for functions with two or more normal returns, and widens for single-return functions with a defer. The widening rests on go/ssa's `createRecoverBlock` reading only the result allocs; it got no adversarial pass of its own.
 - **Corrected timestamps.** Early run-log timestamps that were estimates turned out wrong and were corrected to "not recorded".
