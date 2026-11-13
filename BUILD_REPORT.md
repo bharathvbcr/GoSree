@@ -268,3 +268,61 @@ Every card here carries this label, which must be cleared before merge: **"cgo v
 - Removed: w-8462 and w-e92e (branches kept), plus 5 scratch binaries (about 72 MB).
 - Free space at the end of the wave: 160 GiB.
 - **Cards in review now: 9.** The 8 from §1, plus ft-8462.
+
+## 12. Wind-down, verification and merge into main (2026-11-13, 13:42–14:40)
+
+**Owner instruction:**
+- wind down all agents;
+- fix critical bugs;
+- verify every branch with Opus;
+- merge into main;
+- prune stale and regressed branches;
+- track the remaining gaps in GitPulse.
+
+**What had already happened.**
+- Between 10:18 and 11:42, an antigravity session (`c7c101ff`) merged run2/c37e, run2/f2e5, run2/5e61, run2/6d5a (the whole of Stack B), **swarm/integrate** and run2/report into main (`82ea584`).
+- It deleted 13 merged branches with `-d`, after backing them up to `refs/backup/2026-11-13/*` and two bundles.
+- Its own account is the untracked `BRANCH_REPORT.md` in the main checkout. It is left as is, at gocap-55's request.
+- Its Opus and Fable calls failed on quota, so **swarm/integrate (ownership v5, +16,258 lines) reached main unreviewed.**
+
+**Opus review of that merge** (independent; full text in `build-run-2026-11-12/swarm-review-2026-11-13.md`):
+- **C1, critical:** a goroutine spawned in a loop that reaches shared memory through a per-iteration alias is no longer reported. `childOf` sets `selfConcurrent=false` for every `go` and `wg.Go`.
+- **C2, critical:** a channel hand-off followed by a join is no longer reported.
+- Both were verified with `go run -race` (3/3 convictions each). The suites stayed green because no fixture covers either shape.
+- The merge also changed what SAFE003 means: a read/read loop capture is now clean. It made that change in three places without an owner ruling.
+- It deleted `sp_table/errgroup` `HIT(SAFE002)` without a MISS marker.
+
+**Fable ruled: revert, not fix-forward.**
+- Commit `c6d8dad` is `git revert -m 1 a43c90a`: new history, no rewrite, no conflicts.
+- Verified on both engines: the ledger is back to **644/183/46/0** and the fingerprint is `c4888388dc458b33`.
+- The probes recover their findings: wit 0→5, pe 0→2, fp4 5→10, fp5 3→5, fp3 13→14.
+- The antigravity lane was notified through the GitPulse inbox (thread `gocap-revert-a43c90a`), and gocap-55 was notified too. gocap-55 acknowledged; it has nothing pending for main.
+- **To re-land v5**, revert `c6d8dad` or bring the work in as fresh commits. The sources are `refs/backup/2026-11-13/swarm/integrate` (kept; Fable veto on pruning it) and the bundles. The spec is the review plus the probes in `build-run-2026-11-12/testdata/swarm-review-probes/`.
+
+**Merged on top (branch `run2/integ2`, then fast-forwarded into main):**
+- `4487165`: run2/8462.
+- `af68f03`: run2/e92e (design and fixtures only).
+- `6d79a49`: the fingerprint `91745f19002f4021`, the review evidence, and the regressed `run2/c7dd-err005-wip` preserved as patches in `build-run-2026-11-12/err005-wip/`.
+
+**Final gate on `6d79a49`, all verified:**
+- The fingerprint matches FINDINGS.md.
+- cargo fmt, clippy (`-D warnings`), test and the release build all pass.
+- go1.27.3 `go vet ./...` passes.
+- `go test -timeout 60m -count=1 ./...` passes with cgo on go1.27.3: **17/17**.
+- `CGO_ENABLED=0` on go1.27.4: **17/17**.
+
+**Pruned:**
+- run2/8462, run2/e92e and run2/integ2 (all merged; deleted with `-d`).
+- **run2/c7dd-err005-wip** (regressed; deleted with `-D`, its content kept as patches on main and as `refs/backup/2026-11-13/run2/c7dd-err005-wip`).
+- The worktrees `.gocap-run2/w-integ` (after `cargo clean`) and `.gocap-run2/base`.
+- **Not pruned:** the `refs/backup/2026-11-13/*` refs (the consolidator's backups; Fable veto on swarm/integrate). `origin` was not pushed.
+
+**GitPulse is blocked.**
+- `gitpulse-mcp` 1.5.0, reinstalled at 12:39 by another session, refuses every read and write with `schema_upgrade_required` (workbench schema 15 → 16, "open the desktop app once").
+- A schema migration is an owner decision, so it was not triggered.
+- The new cards and the merge notes are prepared in the session scratchpad (`pending-cards/01–05` plus `apply.sh`):
+  - 01: re-land ownership v5 (p1);
+  - 02: the `GOSREE_JSON_CHILD` bypass (an owner decision);
+  - 03: the doc sentences withheld from held files, and the `go run -buildvcs` decision;
+  - 04: stress tests that flake on wall-clock and race-witness checks under load;
+  - 05: an adversarial pass on ft-420d's widened single-return acceptance.
