@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -63,7 +64,15 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 	enabled := map[string]bool{} // an analyzer flag that was given: its last value
 	var order []string           // analyzer flags in the order first given
 	var kept []string
-	testsOff := false
+	testsOff := false          // the last value of -test is false
+	given := map[string]bool{} // the last value of each flag that is warned about when repeated
+	var changed []string       // those flags, in the order their value first changed
+	record := func(name string, v bool) {
+		if prev, ok := given[name]; ok && prev != v && !slices.Contains(changed, name) {
+			changed = append(changed, name)
+		}
+		given[name] = v
+	}
 	printFlags := false // the last value of -flags
 	i := 0
 	for ; i < len(args); i++ {
@@ -121,14 +130,14 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 		case name == "json":
 			p.json = truthy()
 		case name == "test":
-			if !truthy() {
-				testsOff = true
-			}
+			testsOff = !truthy() // like every flag, the last -test decides
+			record("test", !testsOff)
 		case known[name]:
 			if _, seen := enabled[name]; !seen {
 				order = append(order, name)
 			}
 			enabled[name] = truthy()
+			record(name, enabled[name])
 		default:
 			take()
 		}
@@ -139,6 +148,9 @@ func parseCommandLine(args []string, analyzers []string) (plan, error) {
 		return plan{args: args}, nil // the driver prints its flags and exits without analysing
 	}
 
+	for _, name := range changed {
+		p.warnings = append(p.warnings, fmt.Sprintf("-%s was given more than once with different values: the last, -%s=%t, decides", name, name, given[name]))
+	}
 	if testsOff {
 		p.warnings = append(p.warnings, "-test=false: test files are not analysed, so findings in them are not reported")
 	}

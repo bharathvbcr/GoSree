@@ -118,6 +118,7 @@ func isMetaCommand(args []string) bool {
 	if end < len(args) && args[end] == "help" {
 		return true
 	}
+	printFlags := false // the last value of -flags decides, as in parseCommandLine
 	for i := 0; i < end; i++ {
 		arg := args[i]
 		name := strings.TrimLeft(arg, "-")
@@ -134,9 +135,7 @@ func isMetaCommand(args []string) bool {
 		}
 		switch name {
 		case "flags":
-			if truthy() {
-				return true
-			}
+			printFlags = truthy()
 		case "V":
 			return true
 		case "help", "h":
@@ -145,7 +144,7 @@ func isMetaCommand(args []string) bool {
 			}
 		}
 	}
-	return false
+	return printFlags
 }
 
 // packageArgs returns the non-flag arguments representing packages, stripping any leading "--".
