@@ -1,0 +1,17 @@
+erre92e/a.go:71:2: ERR005: Close() on writable resource w discards flush error
+erre92e/a.go:83:2: ERR005: deferred Close() on writable resource w discards flush error
+erre92e/a.go:96:2: ERR005: Close() on writable resource *pw discards flush error
+erre92e/a.go:120:2: ERR005: Close() on writable resource w discards flush error
+erre92e/a.go:164:2: ERR005: Close() on writable resource w discards flush error
+erre92e/a.go:179:2: ERR005: Close() on writable resource a discards flush error
+erre92e/a.go:189:2: ERR005: Close() on writable resource a discards flush error
+erre92e/a.go:197:2: ERR005: Close() on writable resource a discards flush error
+erre92e/a.go:205:2: ERR005: Close() on writable resource a discards flush error
+erre92e/a.go:214:3: ERR005: Close() on writable resource a discards flush error
+erre92e/a.go:224:2: ERR005: Close() on writable resource a discards flush error
+erre92e/a.go:233:2: ERR005: Close() on writable resource a discards flush error
+erre92e/a.go:394:3: ERR005: Close() on writable resource w discards flush error
+erre92e/a.go:428:2: ERR005: Close() on writable resource w discards flush error
+erre92e/a.go:446:2: ERR005: Close() on writable resource w discards flush error
+erre92e/a.go:555:2: ERR005: Close() on writable resource w discards flush error
+erre92e/a.go:574:2: ERR005: Close() on writable resource w discards flush error
