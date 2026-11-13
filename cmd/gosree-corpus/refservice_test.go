@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -148,7 +149,7 @@ func TestArchiveRev(t *testing.T) {
 	put("backend/svc/pkg/a.go", "package pkg // uncommitted\n")
 
 	dst := filepath.Join(t.TempDir(), "out")
-	sha, err := archiveRev(repo, first[:7], "backend/svc", dst)
+	sha, err := archiveRev(repo, first[:7], "backend/svc", dst, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,10 +166,10 @@ func TestArchiveRev(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dst, "other")); err == nil {
 		t.Error("a directory outside -subdir was extracted")
 	}
-	if _, err := archiveRev(repo, first, "missing", dst); err == nil {
+	if _, err := archiveRev(repo, first, "missing", dst, io.Discard); err == nil {
 		t.Error("archiving a missing subdirectory succeeded")
 	}
-	if _, err := archiveRev(repo, "no-such-rev", "backend/svc", dst); err == nil {
+	if _, err := archiveRev(repo, "no-such-rev", "backend/svc", dst, io.Discard); err == nil {
 		t.Error("archiving a missing commit succeeded")
 	}
 }

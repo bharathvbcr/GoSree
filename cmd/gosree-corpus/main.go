@@ -96,7 +96,7 @@ func main() {
 	flag.Parse()
 	log.SetFlags(0)
 	if *gitRepo != "" || *module != "" {
-		opts := moduleOpts{dir: *module, tests: *tests, patterns: flag.Args(), out: *out, list: *list, census: *censusFlag}
+		opts := moduleOpts{dir: *module, tests: *tests, patterns: flag.Args(), out: *out, list: *list, census: *censusFlag, diag: os.Stderr}
 		if *gitRepo != "" {
 			if *module != "" || *rev == "" || *subdir == "" {
 				log.Fatal("-git needs -rev and -subdir, and replaces -module")

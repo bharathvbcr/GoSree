@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -52,6 +53,8 @@ type moduleOpts struct {
 	out      string
 	list     bool
 	census   bool
+	// diag receives diagnostics that are not failures: the count of skipped archive links.
+	diag io.Writer
 }
 
 type gitSource struct{ repo, rev, subdir string }
@@ -90,7 +93,7 @@ func runModule(o moduleOpts) {
 			short = short[:12]
 		}
 		o.dir = filepath.Join(o.out, filepath.Base(filepath.Clean(o.git.subdir))+"@"+short)
-		sha, err := archiveRev(o.git.repo, o.git.rev, o.git.subdir, o.dir)
+		sha, err := archiveRev(o.git.repo, o.git.rev, o.git.subdir, o.dir, o.diag)
 		if err != nil {
 			log.Fatal(err)
 		}
