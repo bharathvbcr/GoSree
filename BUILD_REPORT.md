@@ -236,3 +236,35 @@ Every card here carries this label, which must be cleared before merge: **"cgo v
   - `extract_links_adv_unix_test.go` carries `//go:build !windows` (verified).
 - **ft-420d acceptance after the Recover-block fix.** The exact change against the adversarially tested 90fa6e9 is on the card. Acceptance narrows for functions with two or more normal returns, and widens for single-return functions with a defer. The widening rests on go/ssa's `createRecoverBlock` reading only the result allocs; it got no adversarial pass of its own.
 - **Corrected timestamps.** Early run-log timestamps that were estimates turned out wrong and were corrected to "not recorded".
+
+## 11. Wave 7 (2026-11-13, 09:55–11:15, on the owner's "Next wave")
+
+**Pre-wave state (verified).**
+- Nothing had moved: main at `8df1d77`, the antigravity branches unmerged (5/9/2), session 45c62196's docs uncommitted.
+- Load was 77 and rose to 140–170 during the wave. `dev verify` still had no task store.
+- Collisions: 7 of 7 worktrees scanned, none overlapping.
+
+**Fable's wave composition.**
+- ft-8462: the preflight half only.
+- ft-e92e: design-first, with a hard stop before any code.
+- Not ft-79c7.
+- Vetoes: no ft-e92e code, no timing claims, keep the go1.27.3 label, no `imm.go`.
+
+| Card | Result |
+|---|---|
+| ft-8462: preflight half | **Review** (rev 4), `run2/8462` (0aafc95) off main. `isMetaCommand` lets the last `-flags` decide. A repeated `-test`/`-NAME` with different values warns. One adversary break (a value-flag argument read as a flag) was fixed at the root: a single `scanFlags` walk now serves seven callers, and the code got smaller. Two exit-status corrections align preflight with the driver; documented codes are unchanged. **Item 1 (`GOSREE_JSON_CHILD` env bypass) is an owner decision:** the variable is documented (README.md:180, TOOLING:79). A contract-preserving fix is proposed on the card. The imm items are still held. |
+| ft-e92e: path keying | **Design approved (Fable), code paused** (in_progress, rev 3), `run2/e92e` (91fad0b). The change set is only tests, testdata and `DESIGN_ERR005_PATHS.md` (verified). Per-store versions of access paths, lowering only: no wire or solver change, and a hand-built IR test agrees in both engines. UNKNOWN is keyed as on the tip. 77 fixtures are pinned. Fable answered six questions: three milestones, K=32 to be measured, the receiver-only Write/Close exemption, maps and slices in the next card. Two hard stops were added. **Resume** when Stack B leaves review, or when the owner says proceed. |
+
+**Gate note (ft-8462).**
+- `tests/stress` `TestScale/N_live_//gosree:mut_borrows` failed on a wall-clock ratio: 10.3× against a bound of 10× at load 140–170.
+- Isolated, it passed on base and on the branch, with identical `alloc MB` (7.7/29.2/112.8). The branch does not touch the borrow pass.
+- This is a third occurrence of the ft-a0d4 load-flake class. The first two were `lk_wit_maplookup`.
+
+**New owner decisions.**
+- `GOSREE_JSON_CHILD` bypass: change the documented marker contract, or accept it.
+- A sentence for README §4 / TOOLING §1.3.2 documenting the repeated-flag warning. The text is on ft-8462.
+
+**Storage.**
+- Removed: w-8462 and w-e92e (branches kept), plus 5 scratch binaries (about 72 MB).
+- Free space at the end of the wave: 160 GiB.
+- **Cards in review now: 9.** The 8 from §1, plus ft-8462.
