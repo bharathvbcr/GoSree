@@ -1576,6 +1576,10 @@ func (fl *funcLowerer) lowerCall(
 		tflags |= gusseterr.TupleErrBlanked
 		callSitePos = blankInfo.pos
 		callDesc = blankInfo.callDesc
+	} else if fl.astInfo.discarded[pos] {
+		// Every result is blanked. go/ssa still emits the error Extract, and binding it to a slot
+		// nothing reads would make the next trip round a loop report it as an overwritten error.
+		tflags |= gusseterr.TupleErrBlanked
 	} else {
 		if v, ok := fl.callErrVar[ins]; ok {
 			varSid := fl.pkg.addSite(pos, v.Name(), "")

@@ -105,7 +105,7 @@ func p2c(w io.WriteCloser, c bool) func() {
 func p3a(w io.WriteCloser, n int) func() {
 	return func() {
 		for i := 0; i < n; i++ {
-			_, _ = w.Write(nil) // want "ERR003"
+			_, _ = w.Write(nil) // ft-c7dd: the error is explicitly blanked, so ERR003 does not apply (RULES.md: `_ = f()` is the explicit-discard escape)
 			w = open()
 		}
 		w.Close() // P3a
@@ -117,7 +117,7 @@ func p3b(w io.WriteCloser, n int) func() {
 	return func() {
 		for i := 0; i < n; i++ {
 			w = open()
-			_, _ = w.Write(nil) // want "ERR003"
+			_, _ = w.Write(nil) // ft-c7dd: the error is explicitly blanked, so ERR003 does not apply (RULES.md: `_ = f()` is the explicit-discard escape)
 			w.Close()           // P3b // want "ERR005"
 		}
 	}
@@ -129,7 +129,7 @@ func p3c(w io.WriteCloser, n int) func() {
 		for i := 0; i < n; i++ {
 			w = open()
 			w.Close()           // P3c
-			_, _ = w.Write(nil) // want "ERR003"
+			_, _ = w.Write(nil) // ft-c7dd: the error is explicitly blanked, so ERR003 does not apply (RULES.md: `_ = f()` is the explicit-discard escape)
 		}
 	}
 }

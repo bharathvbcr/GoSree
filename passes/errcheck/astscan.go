@@ -81,6 +81,9 @@ type funcASTInfo struct {
 	unhandled map[token.Pos]unhandledCallAST // keyed by CallExpr.Lparen
 	closes    map[token.Pos]closeCallAST     // keyed by CallExpr.Lparen
 	blanked   map[token.Pos]blankedTupleAST  // keyed by CallExpr.Lparen
+	// discarded holds the calls whose every result is blanked (`_, _ = w.Write(nil)`), by Lparen.
+	// It is matched exactly and never by line, so a neighbouring call cannot claim one.
+	discarded map[token.Pos]bool
 	shadows   []shadowErrAST
 
 	// shadowVisits counts the AST nodes the shadow scan visited. It is the work measure the
@@ -94,6 +97,7 @@ func scanFuncAST(pass *analysis.Pass, syntax ast.Node) *funcASTInfo {
 		unhandled: make(map[token.Pos]unhandledCallAST),
 		closes:    make(map[token.Pos]closeCallAST),
 		blanked:   make(map[token.Pos]blankedTupleAST),
+		discarded: make(map[token.Pos]bool),
 	}
 	if syntax == nil {
 		return info
@@ -392,6 +396,7 @@ func checkBlankedTupleAssign(pass *analysis.Pass, info *funcASTInfo, stmt *ast.A
 		}
 	}
 	if !hasBoundCompanion {
+		info.discarded[call.Lparen] = true
 		return
 	}
 	info.blanked[call.Lparen] = blankedTupleAST{

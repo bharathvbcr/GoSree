@@ -65,7 +65,7 @@ func loopReassign(w io.WriteCloser) func() {
 		for i := 0; i < 2; i++ {
 			w.Close() // want "ERR005"
 			w = open()
-			_, _ = w.Write(nil) // want "ERR003"
+			_, _ = w.Write(nil) // ft-c7dd: the error is explicitly blanked, so ERR003 does not apply (RULES.md: `_ = f()` is the explicit-discard escape)
 		}
 	}
 }
