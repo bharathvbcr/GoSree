@@ -279,7 +279,7 @@ var readBuildInfo = debug.ReadBuildInfo
 //   - the same prefix preceded by "<vcs>:" for any other VCS, e.g. "hg:0123456";
 //   - "-dirty" appended when the build tree had modified OR untracked files (Go's vcs.modified,
 //     which counts untracked files; `git describe --dirty` does not). Any vcs.modified value other
-//     than exactly "false" counts as dirty; an absent one counts as clean;
+//     than exactly "false" counts as dirty, or the flag is missing (the tree's state is then unknown);
 //   - never a tag name or a commit count, unlike `git describe`;
 //   - noVCSStamp when there is no stamp, no vcs setting, a revision that is not at least 7 lowercase
 //     hex digits (so a non-hex svn or bzr revision is reported as unstamped, not guessed at), or
@@ -317,7 +317,7 @@ func gosreeCommit() string {
 		}
 		out = vcs + ":" + out
 	}
-	if m, present := seen["vcs.modified"]; present && m != "false" {
+	if seen["vcs.modified"] != "false" {
 		out += "-dirty"
 	}
 	return out

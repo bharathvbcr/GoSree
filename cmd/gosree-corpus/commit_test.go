@@ -99,7 +99,7 @@ func TestGosreeCommitNonGitAndDuplicates(t *testing.T) {
 		want string
 	}{
 		{"hg dirty is prefixed", commitFor(t, bs("vcs", "hg"), bs("vcs.revision", rev), bs("vcs.modified", "true")), "hg:0123456-dirty"},
-		{"equal duplicate revisions", commitFor(t, bs("vcs", "git"), bs("vcs.revision", rev), bs("vcs.revision", rev)), "0123456"},
+		{"equal duplicate revisions", commitFor(t, bs("vcs", "git"), bs("vcs.revision", rev), bs("vcs.revision", rev), bs("vcs.modified", "false")), "0123456"},
 		{"conflicting vcs", commitFor(t, bs("vcs", "git"), bs("vcs", "hg"), bs("vcs.revision", rev)), noVCSStamp},
 		{"vcs name with odd characters", commitFor(t, bs("vcs", "h\"g"), bs("vcs.revision", rev)), noVCSStamp},
 		{"upper-case hex", commitFor(t, bs("vcs", "git"), bs("vcs.revision", "0123456789ABCDEF")), noVCSStamp},
@@ -108,5 +108,13 @@ func TestGosreeCommitNonGitAndDuplicates(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("%s: gosreeCommit() = %q, want %q", c.name, c.got, c.want)
 		}
+	}
+}
+
+// A valid revision with no vcs.modified flag leaves the tree's state unknown, which is not clean.
+func TestGosreeCommitMissingModifiedFlagIsDirty(t *testing.T) {
+	got := commitFor(t, bs("vcs", "git"), bs("vcs.revision", "0123456789abcdef"))
+	if got != "0123456-dirty" {
+		t.Fatalf("gosreeCommit() = %q, want %q", got, "0123456-dirty")
 	}
 }

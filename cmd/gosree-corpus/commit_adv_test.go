@@ -48,7 +48,7 @@ func TestAdvNonGitVCSIsNamed(t *testing.T) {
 
 // The git case must stay a bare hash so existing records stay comparable.
 func TestAdvGitVCSStaysBare(t *testing.T) {
-	got := commitFor(t, bs("vcs", "git"), bs("vcs.revision", "0123456789abcdef0123456789abcdef01234567"))
+	got := commitFor(t, bs("vcs", "git"), bs("vcs.revision", "0123456789abcdef0123456789abcdef01234567"), bs("vcs.modified", "false"))
 	if got != "0123456" {
 		t.Fatalf("gosreeCommit() = %q", got)
 	}
