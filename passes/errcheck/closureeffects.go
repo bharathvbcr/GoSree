@@ -56,7 +56,36 @@ func (b *packageBuilder) closureEffectsAt(call *ssa.Call) *closureFx {
 	if cc := b.closureCallFor(fn); cc == nil || !cc.domLowered || cc.call != call {
 		return nil
 	}
+	if closureDepth(fn) > maxReplayDepth {
+		return nil
+	}
 	return b.closureFxFor(fn)
+}
+
+// maxReplayDepth is the deepest closure nesting the replay follows: a closure written directly in
+// a declared function is at depth 1, one in that closure at depth 2. A closure deeper than this is
+// not replayed, so it behaves as before ft-fe6e and its creator never sees its effects.
+//
+// The bound exists because the cost is not linear in the depth. A closure at depth i names every
+// captured variable the closures inside it use, so with one variable per layer the layers carry
+// d, d-1, ... 1 names, and a summary lists the variables written below it: the work is the size of
+// those lists, d(d+1)/2 entries for d layers (1,617 plan-work units at depth 25 and 65,492 at depth
+// 200 when every variable is closed, against 494 and 3,994 without the replay). Under the cap that
+// stays quadratic in the depth, which is at most maxReplayDepth layers each naming at most the
+// variables of the function, so the work is bounded by the cap times the captured-variable lists
+// and is linear in the size of the input. 16 is three times the deepest nesting of function
+// literals in this repository, its fixtures and the Go standard library (5, measured with a parser
+// walk over all three), and a power of two.
+const maxReplayDepth = 16
+
+// closureDepth is the number of functions enclosing fn, counted up to maxReplayDepth+1: it stops
+// there, since only whether fn is past the cap is asked.
+func closureDepth(fn *ssa.Function) int {
+	n := 0
+	for p := fn.Parent(); p != nil && n <= maxReplayDepth; p = p.Parent() {
+		n++
+	}
+	return n
 }
 
 // closureFxFor summarises closure fn once. Each closure is scanned once and a closure nested in it

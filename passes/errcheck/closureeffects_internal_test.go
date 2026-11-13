@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"golang.org/x/tools/go/analysis/analysistest"
 )
 
 // chainSrc builds closures nested depth deep over ONE captured resource: the innermost writes it
@@ -58,9 +60,44 @@ func TestClosureEffectsChainIsLinear(t *testing.T) {
 // With a distinct variable per layer that Big closes, the work is the size of the captured-variable
 // lists the closures carry (the layer at depth i names d-i variables, d(d+1)/2 in all), which is the
 // size of the SSA the analyzer is handed: one entry of work per entry of input, each built once.
-// That is quadratic in the depth (1,617 at 25 and 65,492 at 200, against 494 and 3,994 without the
-// replay): every layer's summary lists the variables written below it. Only a variable some code
+// Without a bound that would be quadratic in the depth (1,617 at 25 and 65,492 at 200, against 494 and
+// 3,994 without the replay), since every layer's summary lists the variables written below it; the
+// replay stops at maxReplayDepth layers, so past it the work per unit falls. Only a variable some code
 // closes by name enters a summary, so nestedSrc, which closes nothing, costs what it did before.
 func TestClosureEffectsNestedClosedIsLinearInInput(t *testing.T) {
 	perUnit(t, nestedClosedSrc, func(d int) uint64 { return uint64(d*(d+1)/2 + d) })
+}
+
+// err005Lines analyzes one package, big/big.go, and returns the lines that carry an ERR005.
+func err005Lines(t *testing.T, src string) []int {
+	t.Helper()
+	dir, cleanup, err := analysistest.WriteFiles(map[string]string{"big/big.go": src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	var lines []int
+	for _, r := range analysistest.Run(discardT{}, dir, Analyzer, "big") {
+		for _, d := range r.Diagnostics {
+			if strings.Contains(d.Message, "ERR005") {
+				lines = append(lines, r.Pass.Fset.Position(d.Pos).Line)
+			}
+		}
+	}
+	return lines
+}
+
+// A write nested exactly maxReplayDepth closures down is replayed through every layer and the
+// creator's Close is reported; one layer deeper is past the cap, so the write is not replayed and
+// the Close is not reported, as before ft-fe6e.
+func TestClosureReplayDepthCap(t *testing.T) {
+	closeLine := func(depth int) int { return 2*depth + 7 }
+	at := chainSrc(maxReplayDepth)
+	if got := err005Lines(t, at); len(got) != 1 || got[0] != closeLine(maxReplayDepth) {
+		t.Fatalf("depth %d: ERR005 lines %v, want [%d]\n%s", maxReplayDepth, got, closeLine(maxReplayDepth), at)
+	}
+	over := chainSrc(maxReplayDepth + 1)
+	if got := err005Lines(t, over); len(got) != 0 {
+		t.Fatalf("depth %d: ERR005 lines %v, want none\n%s", maxReplayDepth+1, got, over)
+	}
 }
