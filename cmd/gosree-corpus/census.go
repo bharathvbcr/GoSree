@@ -633,10 +633,20 @@ func namedStruct(t types.Type) *types.Named {
 // The walk terminates on recursive named types (type T []T, type List[X] struct{ next *List[X] }):
 // a struct is never entered, and a named non-struct's underlying type is entered once.
 func (c *census) reach(t types.Type) []*types.Named {
+	out, _ := c.reachCounted(t)
+	return out
+}
+
+// reachCounted is reach with the number of type nodes the walk visited. The walk follows the type
+// expression as a tree, so a subexpression that appears twice is visited twice; the count is what
+// the tests bound, because it is the same on a loaded machine and an idle one and a duration is not.
+func (c *census) reachCounted(t types.Type) ([]*types.Named, int) {
 	var out []*types.Named
+	visits := 0
 	seen := map[*types.Named]bool{}
 	var walk func(types.Type)
 	walk = func(t types.Type) {
+		visits++
 		switch t := types.Unalias(t).(type) {
 		case *types.Named:
 			o := t.Origin()
@@ -674,7 +684,7 @@ func (c *census) reach(t types.Type) []*types.Named {
 		}
 	}
 	walk(t)
-	return out
+	return out, visits
 }
 
 // byValueContainer reports whether t is an array, at any depth, of module structs or pointers to
