@@ -89,6 +89,13 @@ type extraction struct {
 // component over the name, so the bound keeps that work per entry fixed. No git tree comes near it.
 const maxEntryName = 4096
 
+// maxEntryDepth bounds an entry's path components. os.Root resolves a path one component at a time
+// from the root on every MkdirAll and OpenFile, so an entry costs work quadratic in its depth: a
+// single 2048-component name (within maxEntryName) took 34 s to extract here, and that cost predates
+// the link handling. 128 is several times the depth of any real source tree and caps that cost at
+// about 1/250 of the 2048-level case.
+const maxEntryDepth = 128
+
 // extractTar writes the entries under prefix to dst, with prefix stripped, and counts the files.
 // Every write goes through an os.Root on dst. Symlink and hard-link entries are never created: they
 // are skipped and counted, because a link in an archived tree is either irrelevant to the analysis or
@@ -130,6 +137,9 @@ func extractTar(r io.Reader, prefix, dst string) (extraction, error) {
 		}
 		if len(clean) > maxEntryName {
 			return res, fmt.Errorf("archive entry %.64q... names a path of %d bytes, over the %d-byte bound", h.Name, len(clean), maxEntryName)
+		}
+		if depth := strings.Count(clean, "/") + 1; depth > maxEntryDepth {
+			return res, fmt.Errorf("archive entry %.64q... is %d components deep, over the %d-component bound", h.Name, depth, maxEntryDepth)
 		}
 		if link, ok := skippedAncestor(skipped, clean); ok {
 			return res, fmt.Errorf("archive entry %q is at or beneath the skipped link %q", h.Name, link)
