@@ -61,17 +61,21 @@ func TestGosreeCommitFromBuildStamp(t *testing.T) {
 		want string
 	}{
 		{"clean", stamped(
+			debug.BuildSetting{Key: "vcs", Value: "git"},
 			debug.BuildSetting{Key: "vcs.revision", Value: rev},
 			debug.BuildSetting{Key: "vcs.modified", Value: "false"}), "8df1d77"},
 		{"dirty", stamped(
+			debug.BuildSetting{Key: "vcs", Value: "git"},
 			debug.BuildSetting{Key: "vcs.revision", Value: rev},
 			debug.BuildSetting{Key: "vcs.modified", Value: "true"}), "8df1d77-dirty"},
-		{"short revision kept whole", stamped(
-			debug.BuildSetting{Key: "vcs.revision", Value: "abc"}), "abc"},
+		{"revision shorter than 7 is no stamp", stamped(
+			debug.BuildSetting{Key: "vcs", Value: "git"},
+			debug.BuildSetting{Key: "vcs.revision", Value: "abc"}), noVCSStamp},
 		{"no build info", func() (*debug.BuildInfo, bool) { return nil, false }, noVCSStamp},
 		{"build info without vcs settings", stamped(
 			debug.BuildSetting{Key: "-buildvcs", Value: "false"}), noVCSStamp},
 		{"empty revision", stamped(
+			debug.BuildSetting{Key: "vcs", Value: "git"},
 			debug.BuildSetting{Key: "vcs.revision", Value: ""},
 			debug.BuildSetting{Key: "vcs.modified", Value: "true"}), noVCSStamp},
 	}
@@ -84,5 +88,25 @@ func TestGosreeCommitFromBuildStamp(t *testing.T) {
 				t.Fatalf("gosreeCommit() = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+func TestGosreeCommitNonGitAndDuplicates(t *testing.T) {
+	const rev = "0123456789abcdef"
+	cases := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"hg dirty is prefixed", commitFor(t, bs("vcs", "hg"), bs("vcs.revision", rev), bs("vcs.modified", "true")), "hg:0123456-dirty"},
+		{"equal duplicate revisions", commitFor(t, bs("vcs", "git"), bs("vcs.revision", rev), bs("vcs.revision", rev)), "0123456"},
+		{"conflicting vcs", commitFor(t, bs("vcs", "git"), bs("vcs", "hg"), bs("vcs.revision", rev)), noVCSStamp},
+		{"vcs name with odd characters", commitFor(t, bs("vcs", "h\"g"), bs("vcs.revision", rev)), noVCSStamp},
+		{"upper-case hex", commitFor(t, bs("vcs", "git"), bs("vcs.revision", "0123456789ABCDEF")), noVCSStamp},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("%s: gosreeCommit() = %q, want %q", c.name, c.got, c.want)
+		}
 	}
 }

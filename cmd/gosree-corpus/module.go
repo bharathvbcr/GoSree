@@ -24,9 +24,10 @@ import (
 // ModuleReport is the machine-readable result of -module, written to <out>/module-report.json.
 type ModuleReport struct {
 	GoVersion string `json:"go_version"`
-	// GosreeCommit names the source this gosree-corpus binary was built from: its 7-character vcs
-	// revision, plus "-dirty" if the tree was modified at build time, or "unknown (no vcs stamp)".
-	// It is read from the binary's build info, never from the working directory.
+	// GosreeCommit names the source this gosree-corpus binary was built from: a fixed 7-character
+	// hex revision (prefixed "<vcs>:" for a non-git VCS), plus "-dirty" when the build tree had
+	// modified or untracked files, or "unknown (no vcs stamp)". It carries no tag name, unlike
+	// `git describe`, and is read from the binary's build info, never from the working directory.
 	GosreeCommit string   `json:"gosree_commit"`
 	Dir          string   `json:"dir"`
 	Patterns     []string `json:"patterns"`
@@ -271,37 +272,69 @@ const noVCSStamp = "unknown (no vcs stamp)"
 // readBuildInfo is where gosreeCommit reads the binary's build stamp; tests replace it.
 var readBuildInfo = debug.ReadBuildInfo
 
-// gosreeCommit names the source this binary was built from, read from the vcs.revision and
-// vcs.modified settings that `go build` stamps when it builds inside a git checkout (-buildvcs=auto).
-// The format is the first 7 characters of the revision, plus "-dirty" when vcs.modified is "true",
-// the same shape as `git describe --always --dirty`. A binary with no stamp (built outside a
-// checkout, with -buildvcs=false, or a test binary) reports noVCSStamp. It never consults the
-// working directory, which says nothing about how the binary was built.
+// gosreeCommit names the source this binary was built from, read from the vcs, vcs.revision and
+// vcs.modified settings that `go build` stamps when it builds inside a checkout (-buildvcs=auto).
+// The result is:
+//   - a fixed 7-character lowercase hex revision prefix, e.g. "8df1d77", for git;
+//   - the same prefix preceded by "<vcs>:" for any other VCS, e.g. "hg:0123456";
+//   - "-dirty" appended when the build tree had modified OR untracked files (Go's vcs.modified,
+//     which counts untracked files; `git describe --dirty` does not). Any vcs.modified value other
+//     than exactly "false" counts as dirty; an absent one counts as clean;
+//   - never a tag name or a commit count, unlike `git describe`;
+//   - noVCSStamp when there is no stamp, no vcs setting, a revision that is not at least 7 lowercase
+//     hex digits (so a non-hex svn or bzr revision is reported as unstamped, not guessed at), or
+//     conflicting duplicate settings.
+//
+// It never consults the working directory, which says nothing about how the binary was built.
 func gosreeCommit() string {
 	info, ok := readBuildInfo()
 	if !ok || info == nil {
 		return noVCSStamp
 	}
-	var rev string
-	var modified bool
+	seen := map[string]string{}
 	for _, s := range info.Settings {
 		switch s.Key {
-		case "vcs.revision":
-			rev = s.Value
-		case "vcs.modified":
-			modified = s.Value == "true"
+		case "vcs", "vcs.revision", "vcs.modified":
+			if prev, dup := seen[s.Key]; dup && prev != s.Value {
+				return noVCSStamp
+			}
+			seen[s.Key] = s.Value
 		}
 	}
-	if rev == "" {
+	vcs, rev := seen["vcs"], seen["vcs.revision"]
+	if vcs == "" || len(rev) < 7 {
 		return noVCSStamp
 	}
-	if len(rev) > 7 {
-		rev = rev[:7]
+	for i := 0; i < len(rev); i++ {
+		if c := rev[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return noVCSStamp
+		}
 	}
-	if modified {
-		rev += "-dirty"
+	out := rev[:7]
+	if vcs != "git" {
+		if !validVCSName(vcs) {
+			return noVCSStamp
+		}
+		out = vcs + ":" + out
 	}
-	return rev
+	if m, present := seen["vcs.modified"]; present && m != "false" {
+		out += "-dirty"
+	}
+	return out
+}
+
+// validVCSName reports whether s is a short lowercase ASCII word, so a stamped vcs name cannot
+// smuggle other characters into the recorded field.
+func validVCSName(s string) bool {
+	if s == "" || len(s) > 16 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 'a' || s[i] > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 // distinctPackages drops the copies go/packages makes when tests are loaded, so no file is counted
