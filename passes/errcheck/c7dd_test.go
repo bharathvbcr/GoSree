@@ -13,3 +13,10 @@ import (
 func TestC7ddBlankDiscardInLoop(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddblank")
 }
+
+// ft-c7dd: the all-blank discard against the shapes an adversary tried: the same line as a real
+// overwrite, nested calls, multi-line calls, a closure in a loop, generics, a method value,
+// `_, _ = g(), g()`, and the real `_, err =` overwrites that must still report.
+func TestC7ddBlankDiscardAdversary(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddblankadv")
+}
