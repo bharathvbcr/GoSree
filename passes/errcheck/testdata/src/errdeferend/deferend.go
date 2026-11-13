@@ -67,14 +67,15 @@ func panicsAfterDefer(w io.WriteCloser) {
 }
 
 // When the resource is already writable at registration (os.Create) the finding does not depend
-// on the exit kind, so these report today. The os.Exit one is questionable, since deferred calls
-// do not run on os.Exit; it is pinned here as characterized behavior, not endorsed.
+// on what is written, but it does depend on how the function ends. Deferred calls do not run on
+// os.Exit, so that one reports nothing (ft-8f3c; it was pinned as reporting before, and marked
+// questionable). They do run on panic, so that one reports.
 func createThenExit(path string) {
 	f, err := os.Create(path)
 	if err != nil {
 		return
 	}
-	defer f.Close() // want "ERR005"
+	defer f.Close()
 	os.Exit(0)
 }
 

@@ -1,7 +1,8 @@
 // Package er_exitdefer stress-tests ERR005 on a deferred Close in a function that ends in a process
 // exit. os.Exit and log.Fatal* skip deferred calls, so no Close runs and the finding is false;
 // panic, runtime.Goexit and log.Panic* run them, and so does any path that returns normally.
-// Card ft-8f3c.
+// Card ft-8f3c. The process-exit shapes were ten false-positive markers and are clean since the fix:
+// they carry no marker, as the harness asks of a fixed false positive.
 package er_exitdefer
 
 import (
@@ -19,7 +20,7 @@ func exitAfterWrite(path string) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // FP(ERR005): ft-8f3c: os.Exit skips the deferred Close
+	defer f.Close()
 	_, _ = f.Write([]byte("x"))
 	os.Exit(1)
 }
@@ -29,7 +30,7 @@ func fatalAfterWrite(path string) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // FP(ERR005): ft-8f3c: log.Fatal exits the process and skips the deferred Close
+	defer f.Close()
 	_, _ = f.Write([]byte("x"))
 	log.Fatal("done")
 }
@@ -39,7 +40,7 @@ func fatalfAfterWrite(path string) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // FP(ERR005): ft-8f3c: log.Fatalf exits the process and skips the deferred Close
+	defer f.Close()
 	_, _ = f.Write([]byte("x"))
 	log.Fatalf("done %d", 1)
 }
@@ -49,7 +50,7 @@ func fatallnAfterWrite(path string) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // FP(ERR005): ft-8f3c: log.Fatalln exits the process and skips the deferred Close
+	defer f.Close()
 	_, _ = f.Write([]byte("x"))
 	log.Fatalln("done")
 }
@@ -59,7 +60,7 @@ func loggerFatalAfterWrite(path string, l *log.Logger) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // FP(ERR005): ft-8f3c: (*log.Logger).Fatal exits the process and skips the deferred Close
+	defer f.Close()
 	_, _ = f.Write([]byte("x"))
 	l.Fatal("done")
 }
@@ -69,7 +70,7 @@ func loggerFatalfAfterWrite(path string, l *log.Logger) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // FP(ERR005): ft-8f3c: (*log.Logger).Fatalf exits the process and skips the deferred Close
+	defer f.Close()
 	_, _ = f.Write([]byte("x"))
 	l.Fatalf("done %d", 1)
 }
@@ -79,7 +80,7 @@ func loggerFatallnAfterWrite(path string, l *log.Logger) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // FP(ERR005): ft-8f3c: (*log.Logger).Fatalln exits the process and skips the deferred Close
+	defer f.Close()
 	_, _ = f.Write([]byte("x"))
 	l.Fatalln("done")
 }
@@ -89,7 +90,7 @@ func exitOnBothBranches(path string, bad bool) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // FP(ERR005): ft-8f3c: every path ends in a process exit, so the deferred Close never runs
+	defer f.Close()
 	_, _ = f.Write([]byte("x"))
 	if bad {
 		os.Exit(1)
@@ -102,7 +103,7 @@ func exitInLoop(path string, n int) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // FP(ERR005): ft-8f3c: the loop leaves only through the process exit
+	defer f.Close()
 	_, _ = f.Write([]byte("x"))
 	for range n {
 		_, _ = f.Write([]byte("y"))
@@ -116,7 +117,7 @@ func exitBeforeAnyWrite(path string) {
 	if err != nil {
 		return
 	}
-	defer f.Close() // FP(ERR005): ft-8f3c: os.Exit skips the deferred Close
+	defer f.Close()
 	os.Exit(1)
 }
 

@@ -1092,6 +1092,7 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 
 	nBlocks := len(fl.fn.Blocks)
 	blocks := make([]gusseterr.BlockIR, nBlocks)
+	deferRuns := blocksWhereDefersRun(fl.fn)
 
 	// Map AST shadowed error positions to their best matching basic block.
 	shadowBlocks := make(map[int][]shadowErrAST)
@@ -1144,12 +1145,12 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
 			case *ssa.Call:
 				fl.lowerCall(x, &ops, consumedUnhandled, consumedCloses)
 				fl.bindClosurePair(x, &ops)
-				if isNoReturnCall(&x.Call) {
+				if noReturnKindOf(&x.Call) != callReturns {
 					terminatedEarly = true
 				}
 
 			case *ssa.Defer:
-				fl.lowerDefer(x, &ops, consumedUnhandled, consumedCloses)
+				fl.lowerDefer(x, &ops, consumedUnhandled, consumedCloses, deferRuns[bbIdx])
 
 			case *ssa.Go:
 				fl.lowerGo(x, &ops, consumedUnhandled)
@@ -1649,6 +1650,7 @@ func (fl *funcLowerer) lowerDefer(
 	ops *[]gusseterr.OpIR,
 	consumedUnhandled map[token.Pos]bool,
 	consumedCloses map[token.Pos]bool,
+	deferRuns bool,
 ) {
 	cc := &ins.Call
 	pos := cc.Pos()
@@ -1656,7 +1658,10 @@ func (fl *funcLowerer) lowerDefer(
 
 	if cl, key, ok := fl.matchCloseSite(cc, pos, consumedCloses); ok {
 		consumedCloses[key] = true
-		if recv := methodReceiverVal(cc); recv != nil {
+		// A defer whose every path ends in a process exit never runs its Close, so there is
+		// nothing to resolve at an exit; the site is consumed all the same, so no other pass
+		// reports it as a bare Close.
+		if recv := methodReceiverVal(cc); recv != nil && deferRuns {
 			sid := fl.pkg.addSite(cl.pos, cl.recvDesc, "")
 			*ops = append(*ops, gusseterr.OpIR{
 				Kind:    gusseterr.OpUnhandledClose,
@@ -2443,7 +2448,23 @@ func isIOReaderRead(cc *ssa.CallCommon) bool {
 	return ok && basic.Kind() == types.Byte && isErrorInterface(sig.Results().At(1).Type())
 }
 
-func isNoReturnCall(cc *ssa.CallCommon) bool {
+// callEnds says how a call that never returns to its caller ends the goroutine, which decides
+// whether the deferred calls of the functions on its stack run.
+type callEnds uint8
+
+const (
+	// callReturns is any call that comes back.
+	callReturns callEnds = iota
+	// callExitsProcess ends the whole process: os.Exit and log.Fatal*, as functions or methods of
+	// *log.Logger. No deferred call runs.
+	callExitsProcess
+	// callUnwinds leaves the function by unwinding its stack: runtime.Goexit, panic through
+	// log.Panic*, and testing's Fatal, Fatalf and FailNow (which call runtime.Goexit). Deferred
+	// calls run.
+	callUnwinds
+)
+
+func noReturnKindOf(cc *ssa.CallCommon) callEnds {
 	var pkgPath, typeName, fnName string
 	if cc.IsInvoke() && cc.Method != nil {
 		fnName = cc.Method.Name()
@@ -2460,18 +2481,58 @@ func isNoReturnCall(cc *ssa.CallCommon) bool {
 		}
 	}
 	if pkgPath == "os" && fnName == "Exit" {
-		return true
+		return callExitsProcess
+	}
+	if pkgPath == "log" && strings.HasPrefix(fnName, "Fatal") {
+		return callExitsProcess
 	}
 	if pkgPath == "runtime" && fnName == "Goexit" {
-		return true
+		return callUnwinds
 	}
-	if pkgPath == "log" && (strings.HasPrefix(fnName, "Fatal") || strings.HasPrefix(fnName, "Panic")) {
-		return true
+	if pkgPath == "log" && strings.HasPrefix(fnName, "Panic") {
+		return callUnwinds
 	}
 	if strings.Contains(typeName, "testing.") && (fnName == "Fatal" || fnName == "Fatalf" || fnName == "FailNow") {
-		return true
+		return callUnwinds
 	}
-	return false
+	return callReturns
+}
+
+// blocksWhereDefersRun marks the blocks from which a path leaves the function with its deferred
+// calls running: a return, a panic, or a call that unwinds. A block is false when every path
+// from it ends in a process exit, where no deferred call runs. A block that ends a path in any
+// other way (a stop with no successor) counts as running them, so only a path that visibly ends
+// in os.Exit or log.Fatal* changes an answer.
+func blocksWhereDefersRun(fn *ssa.Function) []bool {
+	runs := make([]bool, len(fn.Blocks))
+	exits := make([]bool, len(fn.Blocks))
+	var work []*ssa.BasicBlock
+	for i, b := range fn.Blocks {
+		kind := callReturns
+		for _, ins := range b.Instrs {
+			if call, ok := ins.(*ssa.Call); ok {
+				if kind = noReturnKindOf(&call.Call); kind != callReturns {
+					break
+				}
+			}
+		}
+		exits[i] = kind == callExitsProcess
+		if kind == callUnwinds || (kind == callReturns && len(b.Succs) == 0) {
+			runs[i] = true
+			work = append(work, b)
+		}
+	}
+	for len(work) > 0 {
+		b := work[len(work)-1]
+		work = work[:len(work)-1]
+		for _, p := range b.Preds {
+			if !runs[p.Index] && !exits[p.Index] {
+				runs[p.Index] = true
+				work = append(work, p)
+			}
+		}
+	}
+	return runs
 }
 
 func isStdlibInfallibleConstructor(pkgPath, name string) bool {

@@ -20,3 +20,9 @@ func TestC7ddBlankDiscardInLoop(t *testing.T) {
 func TestC7ddBlankDiscardAdversary(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddblankadv")
 }
+
+// ft-8f3c: a deferred Close is skipped when the function ends in os.Exit or log.Fatal*, so ERR005
+// is not reported on those paths; panic, runtime.Goexit, log.Panic* and every normal return keep it.
+func TestExitSkipsDeferredClose(t *testing.T) {
+	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errexitdefer")
+}
