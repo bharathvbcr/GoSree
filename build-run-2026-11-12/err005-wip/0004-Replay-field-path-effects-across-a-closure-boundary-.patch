@@ -1,0 +1,584 @@
+From 359cc6549bfd8363485e7ad32d78b02e65cee83c Mon Sep 17 00:00:00 2001
+From: BHARATH CHANDRA VADDARAM <bharath.vbcr@gmail.com>
+Date: Fri, 13 Nov 2026 02:28:06 -0600
+Subject: [PATCH 4/6] Replay field-path effects across a closure boundary and
+ test the edge shapes
+
+The closure summary carries the path under each captured variable, so `h.w.Write` in a closure
+meets `h.w.Close` in its creator and the reverse, on the same per-path slot the creator uses. A
+closure that stores to a captured variable (or to a path in it) now contributes neither writes nor
+closes for it: the close may be of the resource the store put there, and replaying it on the
+creator's flag reported `w = open(); w.Close()` inside a closure after the creator had written w.
+
+errc7ddedge pins each edge: a closure that writes then replaces the variable under a creator's
+deferred Close is a MISS (one slot per variable, and a deferred close is judged against the slot at
+exit, so replaying the write would also report the reassign-in-body shape that
+advfvbreak3b3c pins as clean), its no-closure twin reports, field paths in both directions,
+a different field, a by-reference holder, a replaced field, and a closing closure called twice,
+deferred, and in a loop, each with exactly one report per line.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ passes/errcheck/c7dd_test.go                  |   6 +
+ passes/errcheck/closureeffects.go             | 196 ++++++++++++------
+ passes/errcheck/lower.go                      |  24 ++-
+ passes/errcheck/testdata/src/errc7ddedge/a.go | 121 +++++++++++
+ 4 files changed, 279 insertions(+), 68 deletions(-)
+ create mode 100644 passes/errcheck/testdata/src/errc7ddedge/a.go
+
+diff --git a/passes/errcheck/c7dd_test.go b/passes/errcheck/c7dd_test.go
+index 382754e..a3219aa 100644
+--- a/passes/errcheck/c7dd_test.go
++++ b/passes/errcheck/c7dd_test.go
+@@ -27,3 +27,9 @@ func TestC7ddFieldPaths(t *testing.T) {
+ func TestC7ddShapes(t *testing.T) {
+ 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7dd")
+ }
++
++// ft-c7dd: field paths across a closure boundary, a closure that stores to the captured variable,
++// and a closing closure called more than once (one report per line).
++func TestC7ddEdges(t *testing.T) {
++	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddedge")
++}
+diff --git a/passes/errcheck/closureeffects.go b/passes/errcheck/closureeffects.go
+index 0c512f2..22e756e 100644
+--- a/passes/errcheck/closureeffects.go
++++ b/passes/errcheck/closureeffects.go
+@@ -2,6 +2,7 @@ package errcheck
+ 
+ import (
+ 	"go/token"
++	"strings"
+ 
+ 	"golang.org/x/tools/go/ssa"
+ 
+@@ -18,22 +19,29 @@ import (
+ // The summary is flow-insensitive on the writes (a write anywhere in the closure may happen) and
+ // leaves out what it cannot place: a close is replayed only where the closure demonstrably runs.
+ 
++// fvRes names a resource a closure reaches through one of its captured variables: the variable and
++// the field and dereference path from its value (the same path syntax as accessKey).
++type fvRes struct {
++	idx  int
++	path string
++}
++
+ type closeEffect struct {
+-	idx      int       // free-variable index of the resource that is closed
++	fvRes              // the resource that is closed
+ 	pos      token.Pos // the Close statement
+ 	desc     string    // the receiver as written
+ 	deferred bool      // the close is a defer statement, in the closure or in the creator
+ }
+ 
+ type closureEffects struct {
+-	writes []int
++	writes []fvRes
+ 	closes []closeEffect
+-	stores []int // captured variables the closure assigns to
++	stores []fvRes // captured variables, or paths in them, that the closure assigns to
+ }
+ 
+ // A closure that stores to a captured variable replaces the resource in it, so a write it makes may
+-// be to the old one: those writes are left out of the summary rather than replayed on the
+-// resource that the creator closes afterwards.
++// be to the old one and a close it makes may be of the new one: neither is replayed on the
++// resource that the creator holds, and the closure's own flow reports what it can see.
+ 
+ // astInfoFor scans the syntax of fn once, whichever of lowering and the closure summaries asks first.
+ func (b *packageBuilder) astInfoFor(fn *ssa.Function) *funcASTInfo {
+@@ -45,15 +53,55 @@ func (b *packageBuilder) astInfoFor(fn *ssa.Function) *funcASTInfo {
+ 	return ai
+ }
+ 
+-// fvIndexOf returns the index of the captured variable that v reads or is, or -1.
+-func fvIndexOf(fn *ssa.Function, v ssa.Value) int {
+-	if load, ok := v.(*ssa.UnOp); ok && load.Op == token.MUL {
+-		v = load.X
++func noCell(*ssa.Alloc) bool { return false }
++
++// fvResOf resolves v, inside the closure fn, to the captured variable it is reached from and the
++// path from that variable's value; idx is -1 when v is not reached from a captured variable.
++func fvResOf(fn *ssa.Function, v ssa.Value) fvRes {
++	k, _ := valueKeyOf(v, noCell)
++	if fv, ok := k.root.(*ssa.FreeVar); ok {
++		return fvRes{freeVarIndex(fn, fv), k.path}
+ 	}
+-	if fv, ok := v.(*ssa.FreeVar); ok {
+-		return freeVarIndex(fn, fv)
++	return fvRes{idx: -1}
++}
++
++// fvAddrOf is fvResOf for the address a that a store writes to.
++func fvAddrOf(fn *ssa.Function, a ssa.Value) fvRes {
++	k, ok := addrKeyOf(a, noCell)
++	if fv, isFV := k.root.(*ssa.FreeVar); ok && isFV {
++		return fvRes{freeVarIndex(fn, fv), k.path}
+ 	}
+-	return -1
++	return fvRes{idx: -1}
++}
++
++// bindingKey is where the creator of a closure keeps the variable it binds: a variable's own cell
++// (a local cell or a captured variable it passes on) is the root, any other value is read as is.
++func bindingKey(b ssa.Value, isCell func(*ssa.Alloc) bool) accessKey {
++	switch x := b.(type) {
++	case *ssa.FreeVar:
++		return accessKey{root: x}
++	case *ssa.Alloc:
++		if isCell(x) {
++			return accessKey{root: x}
++		}
++	}
++	k, _ := valueKeyOf(b, isCell)
++	return k
++}
++
++// bindingSlot is the creator's written-flag slot for the resource at path under binding.
++func (fl *funcLowerer) bindingSlot(binding ssa.Value, path string) uint32 {
++	if path == "" {
++		return fl.resourceSlot(binding)
++	}
++	k := bindingKey(binding, fl.isCell)
++	return fl.pathSlot(accessKey{k.root, k.path + path})
++}
++
++// shadowedBy reports whether a store to st replaces the resource at r: the store is to the same
++// variable at r's path or above it.
++func shadowedBy(st, r fvRes) bool {
++	return st.idx == r.idx && strings.HasPrefix(r.path, st.path)
+ }
+ 
+ // closuresRunBy returns the closures that ins runs: its callee, and the closures it takes as
+@@ -92,22 +140,43 @@ func (b *packageBuilder) closureEffectsFor(fn *ssa.Function) *closureEffects {
+ 		return e
+ 	}
+ 	ast := b.astInfoFor(fn)
+-	wrote := make(map[int]bool)
+-	stored := make(map[int]bool)
+-	addWrite := func(idx int) {
+-		if idx >= 0 && !wrote[idx] {
+-			wrote[idx] = true
+-			e.writes = append(e.writes, idx)
++	wrote := make(map[fvRes]bool)
++	stored := make(map[fvRes]bool)
++	addWrite := func(r fvRes) {
++		if r.idx >= 0 && !wrote[r] {
++			wrote[r] = true
++			e.writes = append(e.writes, r)
++		}
++	}
++	addStore := func(r fvRes) {
++		if r.idx >= 0 && !stored[r] {
++			stored[r] = true
++			e.stores = append(e.stores, r)
+ 		}
+ 	}
+ 	defer func() {
+-		kept := e.writes[:0]
+-		for _, idx := range e.writes {
+-			if !stored[idx] {
+-				kept = append(kept, idx)
++		shadowed := func(r fvRes) bool {
++			for _, st := range e.stores {
++				if shadowedBy(st, r) {
++					return true
++				}
++			}
++			return false
++		}
++		keptW := e.writes[:0]
++		for _, w := range e.writes {
++			if !shadowed(w) {
++				keptW = append(keptW, w)
+ 			}
+ 		}
+-		e.writes = kept
++		e.writes = keptW
++		keptC := e.closes[:0]
++		for _, c := range e.closes {
++			if !shadowed(c.fvRes) {
++				keptC = append(keptC, c)
++			}
++		}
++		e.closes = keptC
+ 	}()
+ 	for _, blk := range fn.Blocks {
+ 		if blk == fn.Recover {
+@@ -118,13 +187,15 @@ func (b *packageBuilder) closureEffectsFor(fn *ssa.Function) *closureEffects {
+ 			if m, ok := ins.(*ssa.MakeClosure); ok {
+ 				// A closure made here may run at any time: what it writes may happen.
+ 				if sub, ok := m.Fn.(*ssa.Function); ok {
+-					for _, j := range b.closureEffectsFor(sub).writes {
+-						addWrite(fvIndexOf(fn, m.Bindings[j]))
++					se := b.closureEffectsFor(sub)
++					for _, w := range se.writes {
++						if r := fvResOf(fn, m.Bindings[w.idx]); r.idx >= 0 {
++							addWrite(fvRes{r.idx, r.path + w.path})
++						}
+ 					}
+-					for _, j := range b.closureEffectsFor(sub).stores {
+-						if idx := fvIndexOf(fn, m.Bindings[j]); idx >= 0 {
+-							stored[idx] = true
+-							e.stores = append(e.stores, idx)
++					for _, st := range se.stores {
++						if r := fvResOf(fn, m.Bindings[st.idx]); r.idx >= 0 {
++							addStore(fvRes{r.idx, r.path + st.path})
+ 						}
+ 					}
+ 				}
+@@ -139,10 +210,7 @@ func (b *packageBuilder) closureEffectsFor(fn *ssa.Function) *closureEffects {
+ 			case *ssa.Go:
+ 				cc = &x.Call
+ 			case *ssa.Store:
+-				if fv, ok := x.Addr.(*ssa.FreeVar); ok && !stored[freeVarIndex(fn, fv)] {
+-					stored[freeVarIndex(fn, fv)] = true
+-					e.stores = append(e.stores, freeVarIndex(fn, fv))
+-				}
++				addStore(fvAddrOf(fn, x.Addr))
+ 				continue
+ 			default:
+ 				continue
+@@ -150,18 +218,18 @@ func (b *packageBuilder) closureEffectsFor(fn *ssa.Function) *closureEffects {
+ 			_, isGo := ins.(*ssa.Go)
+ 			_, isDefer := ins.(*ssa.Defer)
+ 			if recv := methodReceiverVal(cc); recv != nil && !isGo {
+-				if idx := fvIndexOf(fn, recv); idx >= 0 {
++				if r := fvResOf(fn, recv); r.idx >= 0 {
+ 					if isWriteMutatingMethod(cc) {
+-						addWrite(idx)
++						addWrite(r)
+ 					}
+ 					if isCloseMethodCall(cc) {
+ 						if cl, ok := ast.closes[cc.Pos()]; ok {
+-							e.closes = append(e.closes, closeEffect{idx: idx, pos: cl.pos, desc: cl.recvDesc, deferred: isDefer})
++							e.closes = append(e.closes, closeEffect{fvRes: r, pos: cl.pos, desc: cl.recvDesc, deferred: isDefer})
+ 						}
+ 					}
+ 				}
+ 			} else if recv != nil && isWriteMutatingMethod(cc) {
+-				addWrite(fvIndexOf(fn, recv))
++				addWrite(fvResOf(fn, recv))
+ 			}
+ 			if isGo {
+ 				continue
+@@ -172,8 +240,8 @@ func (b *packageBuilder) closureEffectsFor(fn *ssa.Function) *closureEffects {
+ 					continue
+ 				}
+ 				for _, c := range b.closureEffectsFor(sub).closes {
+-					if idx := fvIndexOf(fn, m.Bindings[c.idx]); idx >= 0 {
+-						e.closes = append(e.closes, closeEffect{idx: idx, pos: c.pos, desc: c.desc, deferred: isDefer || c.deferred})
++					if r := fvResOf(fn, m.Bindings[c.idx]); r.idx >= 0 {
++						e.closes = append(e.closes, closeEffect{fvRes: fvRes{r.idx, r.path + c.path}, pos: c.pos, desc: c.desc, deferred: isDefer || c.deferred})
+ 					}
+ 				}
+ 			}
+@@ -223,17 +291,17 @@ func (fl *funcLowerer) replayClosureEffects(ins ssa.Instruction, ops *[]gusseter
+ 				*ops = append(*ops, gusseterr.OpIR{
+ 					Kind:    gusseterr.OpUnhandledClose,
+ 					SiteID:  fl.pkg.addSite(c.pos, c.desc, ""),
+-					SlotA:   fl.resourceSlot(m.Bindings[c.idx]),
++					SlotA:   fl.bindingSlot(m.Bindings[c.idx], c.path),
+ 					IsDefer: isDefer || c.deferred,
+ 				})
+ 			}
+ 		}
+-		for _, idx := range eff.writes {
+-			if idx >= len(m.Bindings) {
++		for _, w := range eff.writes {
++			if w.idx >= len(m.Bindings) {
+ 				continue
+ 			}
+ 			fl.pkg.planWork++
+-			*ops = append(*ops, gusseterr.OpIR{Kind: gusseterr.OpMarkWritable, SlotA: fl.resourceSlot(m.Bindings[idx])})
++			*ops = append(*ops, gusseterr.OpIR{Kind: gusseterr.OpMarkWritable, SlotA: fl.bindingSlot(m.Bindings[w.idx], w.path)})
+ 		}
+ 	}
+ }
+@@ -242,15 +310,15 @@ func (fl *funcLowerer) replayClosureEffects(ins ssa.Instruction, ops *[]gusseter
+ // be written: directly in its own body, or by a closure it makes. It is built once per function,
+ // so asking about a closure costs a lookup, not a scan of the function.
+ type writeIndex struct {
+-	direct  map[ssa.Value]bool
+-	closure map[ssa.Value][]*ssa.MakeClosure
++	direct  map[accessKey]bool
++	closure map[accessKey][]*ssa.MakeClosure
+ }
+ 
+ func (b *packageBuilder) writeIndexFor(parent *ssa.Function) *writeIndex {
+ 	if wi, ok := b.writeIndexes[parent]; ok {
+ 		return wi
+ 	}
+-	wi := &writeIndex{direct: make(map[ssa.Value]bool), closure: make(map[ssa.Value][]*ssa.MakeClosure)}
++	wi := &writeIndex{direct: make(map[accessKey]bool), closure: make(map[accessKey][]*ssa.MakeClosure)}
+ 	b.writeIndexes[parent] = wi
+ 	for _, blk := range parent.Blocks {
+ 		if blk == parent.Recover {
+@@ -260,8 +328,10 @@ func (b *packageBuilder) writeIndexFor(parent *ssa.Function) *writeIndex {
+ 			b.planWork++
+ 			if m, ok := ins.(*ssa.MakeClosure); ok {
+ 				if sub, ok := m.Fn.(*ssa.Function); ok {
+-					for _, j := range b.closureEffectsFor(sub).writes {
+-						wi.closure[m.Bindings[j]] = append(wi.closure[m.Bindings[j]], m)
++					for _, w := range b.closureEffectsFor(sub).writes {
++						bk := bindingKey(m.Bindings[w.idx], isLocalCellAlloc)
++						k := accessKey{bk.root, bk.path + w.path}
++						wi.closure[k] = append(wi.closure[k], m)
+ 					}
+ 				}
+ 				continue
+@@ -278,10 +348,8 @@ func (b *packageBuilder) writeIndexFor(parent *ssa.Function) *writeIndex {
+ 				continue
+ 			}
+ 			if recv := methodReceiverVal(cc); recv != nil && isWriteMutatingMethod(cc) {
+-				if load, ok := recv.(*ssa.UnOp); ok && load.Op == token.MUL {
+-					recv = load.X
+-				}
+-				wi.direct[recv] = true
++				k, _ := valueKeyOf(recv, isLocalCellAlloc)
++				wi.direct[k] = true
+ 			}
+ 		}
+ 	}
+@@ -292,12 +360,14 @@ func (b *packageBuilder) writeIndexFor(parent *ssa.Function) *writeIndex {
+ // may be written anywhere in the creator, in a closure other than skip that it makes, or, when the
+ // creator is itself a closure, further out. It is flow-insensitive on purpose: it answers only for
+ // a closure whose place in the creator's flow is unknown.
+-func (b *packageBuilder) bindingMayBeWritten(parent *ssa.Function, skip *ssa.MakeClosure, binding ssa.Value) bool {
++func (b *packageBuilder) bindingMayBeWritten(parent *ssa.Function, skip *ssa.MakeClosure, binding ssa.Value, path string) bool {
+ 	wi := b.writeIndexFor(parent)
+-	if wi.direct[binding] {
++	bk := bindingKey(binding, isLocalCellAlloc)
++	k := accessKey{bk.root, bk.path + path}
++	if wi.direct[k] {
+ 		return true
+ 	}
+-	for _, m := range wi.closure[binding] {
++	for _, m := range wi.closure[k] {
+ 		if m != skip {
+ 			return true
+ 		}
+@@ -306,7 +376,7 @@ func (b *packageBuilder) bindingMayBeWritten(parent *ssa.Function, skip *ssa.Mak
+ 		if grand := parent.Parent(); grand != nil {
+ 			if gm := b.parentIndexFor(grand).closures[parent]; gm != nil {
+ 				if idx := freeVarIndex(parent, fv); idx >= 0 && idx < len(gm.Bindings) {
+-					return b.bindingMayBeWritten(grand, nil, gm.Bindings[idx])
++					return b.bindingMayBeWritten(grand, nil, gm.Bindings[idx], path)
+ 				}
+ 			}
+ 		}
+@@ -348,14 +418,18 @@ func (fl *funcLowerer) seedEscapedCloses() {
+ 	if !escapes {
+ 		return
+ 	}
+-	seeded := make(map[int]bool)
++	seeded := make(map[fvRes]bool)
+ 	for _, c := range eff.closes {
+-		if seeded[c.idx] || c.idx >= len(mc.Bindings) {
++		if seeded[c.fvRes] || c.idx >= len(mc.Bindings) {
+ 			continue
+ 		}
+-		seeded[c.idx] = true
+-		if fl.pkg.bindingMayBeWritten(parent, mc, mc.Bindings[c.idx]) {
+-			fl.constInits = append(fl.constInits, gusseterr.OpIR{Kind: gusseterr.OpMarkWritable, SlotA: fl.slot(fl.fn.FreeVars[c.idx])})
++		seeded[c.fvRes] = true
++		if fl.pkg.bindingMayBeWritten(parent, mc, mc.Bindings[c.idx], c.path) {
++			slot := fl.slot(fl.fn.FreeVars[c.idx])
++			if c.path != "" {
++				slot = fl.pathSlot(accessKey{root: fl.fn.FreeVars[c.idx], path: c.path})
++			}
++			fl.constInits = append(fl.constInits, gusseterr.OpIR{Kind: gusseterr.OpMarkWritable, SlotA: slot})
+ 		}
+ 	}
+ }
+diff --git a/passes/errcheck/lower.go b/passes/errcheck/lower.go
+index e77910c..f565f9a 100644
+--- a/passes/errcheck/lower.go
++++ b/passes/errcheck/lower.go
+@@ -308,39 +308,49 @@ func (fl *funcLowerer) pathSlot(k accessKey) uint32 {
+ // valueKey is the access path of the value v. Only a load or a field selection has a path; every
+ // other value is its own root with an empty path.
+ func (fl *funcLowerer) valueKey(v ssa.Value) (accessKey, bool) {
++	return valueKeyOf(v, fl.isCell)
++}
++
++func (fl *funcLowerer) addrKey(a ssa.Value) (accessKey, bool) {
++	return addrKeyOf(a, fl.isCell)
++}
++
++func (fl *funcLowerer) isCell(a *ssa.Alloc) bool { return fl.localCells[a] }
++
++func valueKeyOf(v ssa.Value, isCell func(*ssa.Alloc) bool) (accessKey, bool) {
+ 	switch x := v.(type) {
+ 	case *ssa.UnOp:
+ 		if x.Op == token.MUL {
+-			return fl.addrKey(x.X)
++			return addrKeyOf(x.X, isCell)
+ 		}
+ 	case *ssa.Field:
+-		if base, ok := fl.valueKey(x.X); ok {
++		if base, ok := valueKeyOf(x.X, isCell); ok {
+ 			return accessKey{base.root, base.path + "." + strconv.Itoa(x.Field)}, true
+ 		}
+ 	}
+ 	return accessKey{root: v}, true
+ }
+ 
+-// addrKey is the access path of the value stored at the address a. The address of a variable (a
++// addrKeyOf is the access path of the value stored at the address a. The address of a variable (a
+ // captured variable or a local cell) is the root itself; a field address extends the path of the
+ // pointer it selects from, and any other pointer is dereferenced.
+-func (fl *funcLowerer) addrKey(a ssa.Value) (accessKey, bool) {
++func addrKeyOf(a ssa.Value, isCell func(*ssa.Alloc) bool) (accessKey, bool) {
+ 	switch x := a.(type) {
+ 	case *ssa.FreeVar:
+ 		return accessKey{root: x}, true
+ 	case *ssa.Alloc:
+-		if fl.localCells[x] {
++		if isCell(x) {
+ 			return accessKey{root: x}, true
+ 		}
+ 	case *ssa.FieldAddr:
+-		if base, ok := fl.valueKey(x.X); ok {
++		if base, ok := valueKeyOf(x.X, isCell); ok {
+ 			return accessKey{base.root, base.path + "->" + strconv.Itoa(x.Field)}, true
+ 		}
+ 		return accessKey{}, false
+ 	case *ssa.IndexAddr:
+ 		return accessKey{}, false
+ 	}
+-	base, ok := fl.valueKey(a)
++	base, ok := valueKeyOf(a, isCell)
+ 	if !ok {
+ 		return accessKey{}, false
+ 	}
+diff --git a/passes/errcheck/testdata/src/errc7ddedge/a.go b/passes/errcheck/testdata/src/errc7ddedge/a.go
+new file mode 100644
+index 0000000..676307b
+--- /dev/null
++++ b/passes/errcheck/testdata/src/errc7ddedge/a.go
+@@ -0,0 +1,121 @@
++package errc7ddedge
++
++import "io"
++
++func open() io.WriteCloser { return nil }
++
++type holder struct{ w io.WriteCloser }
++
++// ---- (a) A closure that stores to the captured variable ----
++
++// MISS (ft-c7dd): the deferred Close is bound to the resource w holds when the defer runs, which
++// the closure writes and then replaces. Replaying the write on w's slot would also report the
++// reassigned-in-body shape that advfvbreak3b3c pins as clean, since both share one slot per
++// variable and a deferred close is judged against the slot's state at exit. Nothing is reported.
++func storeAfterWrite(w io.WriteCloser) {
++	defer w.Close()
++	func() {
++		_, _ = w.Write(nil)
++		w = open()
++	}()
++}
++
++// Twin without a closure: the deferred Close holds the old resource, written, and is reported.
++func storeAfterWriteTwin(w io.WriteCloser) {
++	defer w.Close() // want "ERR005"
++	_, _ = w.Write(nil)
++	w = open()
++}
++
++// The closure replaces the resource and closes the new one: nothing was written to it.
++func storeThenCloseInClosure(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	func() {
++		w = open()
++		w.Close()
++	}()
++}
++
++// ---- (b) A field path written in a closure, closed in the parent, and the reverse ----
++
++func fieldWriteInClosure(h *holder) {
++	defer h.w.Close() // want "ERR005"
++	func() { _, _ = h.w.Write(nil) }()
++}
++
++func fieldWriteInClosureTwin(h *holder) {
++	defer h.w.Close() // want "ERR005"
++	_, _ = h.w.Write(nil)
++}
++
++func fieldCloseInClosure(h *holder) {
++	_, _ = h.w.Write(nil)
++	func() { h.w.Close() }() // want "ERR005"
++}
++
++func fieldCloseInClosureTwin(h *holder) {
++	_, _ = h.w.Write(nil)
++	h.w.Close() // want "ERR005"
++}
++
++func fieldDeferredCloseInClosure(h *holder) {
++	_, _ = h.w.Write(nil)
++	defer func() { h.w.Close() }() // want "ERR005"
++}
++
++// A different field of the same holder is not the written one.
++type pair struct{ a, b io.WriteCloser }
++
++func otherFieldInClosure(p *pair) {
++	_, _ = p.a.Write(nil)
++	func() { p.b.Close() }()
++}
++
++// A holder captured by reference (the closure mutates it).
++type counted struct {
++	w io.WriteCloser
++	n int
++}
++
++func fieldByRefWriteInClosure() {
++	var h counted
++	h.w = open()
++	defer h.w.Close() // want "ERR005"
++	func() {
++		_, _ = h.w.Write(nil)
++		h.n++
++	}()
++}
++
++// The closure replaces the field after writing it: the write was to the old resource.
++func fieldReplacedInClosure(h *holder) {
++	func() {
++		_, _ = h.w.Write(nil)
++		h.w = open()
++	}()
++	h.w.Close()
++}
++
++// ---- (c) A closure that closes, called twice ----
++
++func closeCalledTwice(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	cl := func() { w.Close() } // want "ERR005"
++	cl()
++	cl()
++}
++
++func deferredCloseCalledTwice(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	cl := func() { defer w.Close() } // want "ERR005"
++	cl()
++	cl()
++}
++
++func closeCalledInLoop(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	cl := func() { w.Close() } // want "ERR005"
++	for range 3 {
++		cl()
++	}
++}
+-- 
+2.54.0 (Apple Git-157)
+

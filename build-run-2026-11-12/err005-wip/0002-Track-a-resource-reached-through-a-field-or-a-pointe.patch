@@ -1,0 +1,318 @@
+From 69eb7b639abd000a08a8e8fba3b4cd0c757fd087 Mon Sep 17 00:00:00 2001
+From: BHARATH CHANDRA VADDARAM <bharath.vbcr@gmail.com>
+Date: Fri, 13 Nov 2026 02:05:26 -0600
+Subject: [PATCH 2/6] Track a resource reached through a field or a pointer by
+ its access path
+
+The written flag of a resource lived on the slot of the SSA value that loaded it, so
+`h.w.Write(nil)` and `h.w.Close()` (two loads of one field) and `(*pw).Write` / `(*pw).Close`
+never met on one slot, in a function and in a closure alike, and ERR005 missed them. resourceSlot
+now keys such a resource on its root (a parameter, a captured variable, a local cell or any other
+value) plus the dereferences and field selections applied to it, and a store to the same path
+resets the slot to the stored value's written state, as a store to a captured variable already
+did. A different field of the same holder, a replaced field and a read-only resource stay silent.
+
+Four fixtures pinned the miss and flip in this commit, each with a ft-c7dd comment: advfv3b3c/a.go
+P4b and P4b2, advfvctl3b3c/c.go C4 (the fixture itself calls it a true positive) and
+advdeferend/adv.go's `(*T).done`, which is `generic` above it with a field in front.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ passes/errcheck/c7dd_test.go                  | 17 ++++
+ passes/errcheck/lower.go                      | 83 +++++++++++++++++++
+ .../errcheck/testdata/src/advdeferend/adv.go  |  2 +-
+ passes/errcheck/testdata/src/advfv3b3c/a.go   |  4 +-
+ .../errcheck/testdata/src/advfvctl3b3c/c.go   |  2 +-
+ .../errcheck/testdata/src/errc7ddfield/a.go   | 77 +++++++++++++++++
+ 6 files changed, 181 insertions(+), 4 deletions(-)
+ create mode 100644 passes/errcheck/testdata/src/errc7ddfield/a.go
+
+diff --git a/passes/errcheck/c7dd_test.go b/passes/errcheck/c7dd_test.go
+index 7a8f48f..93e83bb 100644
+--- a/passes/errcheck/c7dd_test.go
++++ b/passes/errcheck/c7dd_test.go
+@@ -13,3 +13,20 @@ import (
+ func TestC7ddBlankDiscardInLoop(t *testing.T) {
+ 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddblank")
+ }
++// ft-c7dd: `_, _ = w.Write(nil)` blanks the error explicitly, so a loop must not report it as an
++// overwritten unchecked error; a real overwrite in a loop is still reported.
++func TestC7ddBlankDiscardInLoop(t *testing.T) {
++	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddblank")
++}
++// ft-c7dd: every shape on the card, each next to its no-closure twin.
++func TestC7ddShapes(t *testing.T) {
++	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7dd")
++}
++
++
++// ft-c7dd: a resource reached through a field or a captured pointer keeps one written flag per
++// access path, so `h.w.Write` then `h.w.Close` and `(*pw).Write` then `(*pw).Close` report, in a
++// closure and in its no-closure twin.
++func TestC7ddFieldPaths(t *testing.T) {
++	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddfield")
++}
+diff --git a/passes/errcheck/lower.go b/passes/errcheck/lower.go
+index ec7f411..6692714 100644
+--- a/passes/errcheck/lower.go
++++ b/passes/errcheck/lower.go
+@@ -6,6 +6,7 @@ import (
+ 	"go/token"
+ 	"go/types"
+ 	"sort"
++	"strconv"
+ 	"strings"
+ 
+ 	"golang.org/x/tools/go/analysis"
+@@ -98,6 +99,7 @@ type funcLowerer struct {
+ 	ioReadErrVals    map[ssa.Value]bool
+ 	companionVals    map[ssa.Value]bool
+ 	pairDesc         map[ssa.Value]string // captured value cell -> description of the closure's fallible call
++	pathSlots        map[accessKey]uint32 // written-flag slot per (root, access path), see resourceSlot
+ 
+ 	lineIdx         *blockLineIndex
+ 	consumedBlanked map[token.Pos]bool
+@@ -137,6 +139,7 @@ func (b *packageBuilder) lowerFunc(funcIdx uint32, fn *ssa.Function) gusseterr.F
+ 		ioReadErrVals:    make(map[ssa.Value]bool),
+ 		companionVals:    make(map[ssa.Value]bool),
+ 		pairDesc:         make(map[ssa.Value]string),
++		pathSlots:        make(map[accessKey]uint32),
+ 
+ 		consumedBlanked: make(map[token.Pos]bool),
+ 	}
+@@ -264,7 +267,13 @@ func (fl *funcLowerer) rootSlot(v ssa.Value) uint32 {
+ // through another meet on one slot. Only the monotone written flag uses it: a captured variable can
+ // be reassigned by other code between loads, so nilness refinements must not flow across loads and
+ // stay on rootSlot.
++//
++// A resource reached through a field or a pointer (`h.w`, `(*pw)`) keeps its flag on the slot of
++// its access path, so two loads of `h.w` meet on one slot the way two loads of a variable do.
+ func (fl *funcLowerer) resourceSlot(v ssa.Value) uint32 {
++	if k, ok := fl.valueKey(v); ok && k.path != "" {
++		return fl.pathSlot(k)
++	}
+ 	if load, ok := v.(*ssa.UnOp); ok && load.Op == token.MUL {
+ 		if fv, ok := load.X.(*ssa.FreeVar); ok {
+ 			return fl.slot(fv)
+@@ -273,6 +282,64 @@ func (fl *funcLowerer) resourceSlot(v ssa.Value) uint32 {
+ 	return fl.rootSlot(v)
+ }
+ 
++// accessKey names a value by where it is read from: a root (a parameter, a captured variable, a
++// local cell or any other SSA value) and the dereferences and field selections applied to it.
++type accessKey struct {
++	root ssa.Value
++	path string
++}
++
++func (fl *funcLowerer) pathSlot(k accessKey) uint32 {
++	if s, ok := fl.pathSlots[k]; ok {
++		return s
++	}
++	s := fl.allocSlot(0)
++	fl.pathSlots[k] = s
++	return s
++}
++
++// valueKey is the access path of the value v. Only a load or a field selection has a path; every
++// other value is its own root with an empty path.
++func (fl *funcLowerer) valueKey(v ssa.Value) (accessKey, bool) {
++	switch x := v.(type) {
++	case *ssa.UnOp:
++		if x.Op == token.MUL {
++			return fl.addrKey(x.X)
++		}
++	case *ssa.Field:
++		if base, ok := fl.valueKey(x.X); ok {
++			return accessKey{base.root, base.path + "." + strconv.Itoa(x.Field)}, true
++		}
++	}
++	return accessKey{root: v}, true
++}
++
++// addrKey is the access path of the value stored at the address a. The address of a variable (a
++// captured variable or a local cell) is the root itself; a field address extends the path of the
++// pointer it selects from, and any other pointer is dereferenced.
++func (fl *funcLowerer) addrKey(a ssa.Value) (accessKey, bool) {
++	switch x := a.(type) {
++	case *ssa.FreeVar:
++		return accessKey{root: x}, true
++	case *ssa.Alloc:
++		if fl.localCells[x] {
++			return accessKey{root: x}, true
++		}
++	case *ssa.FieldAddr:
++		if base, ok := fl.valueKey(x.X); ok {
++			return accessKey{base.root, base.path + "->" + strconv.Itoa(x.Field)}, true
++		}
++		return accessKey{}, false
++	case *ssa.IndexAddr:
++		return accessKey{}, false
++	}
++	base, ok := fl.valueKey(a)
++	if !ok {
++		return accessKey{}, false
++	}
++	return accessKey{base.root, base.path + "*"}, true
++}
++
+ func (fl *funcLowerer) mem2regErrSlot(v *types.Var) uint32 {
+ 	if s, ok := fl.mem2regErrSlots[v]; ok {
+ 		return s
+@@ -1185,6 +1252,22 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
+ 							NilHint: gusseterr.AssignNilMayNil,
+ 						})
+ 					}
++					if k, ok := fl.addrKey(x.Addr); ok && k.path != "" {
++						// A store to a field or through a pointer replaces the resource that its
++						// path tracks: the slot takes the stored value's written state, as for a
++						// captured variable above.
++						src := gusseterr.NoneU32
++						if slotFlagsForType(x.Val.Type())&gusseterr.SlotIsError == 0 {
++							src = fl.resourceSlot(x.Val)
++						}
++						ops = append(ops, gusseterr.OpIR{
++							Kind:    gusseterr.OpAssignSlot,
++							SiteID:  0,
++							SlotA:   fl.pathSlot(k),
++							SlotB:   src,
++							NilHint: gusseterr.AssignNilMayNil,
++						})
++					}
+ 					if isErrorInterface(x.Val.Type()) || len(fl.valErrVars[x.Val]) > 0 {
+ 						fl.emitObserveErr(&ops, x.Val)
+ 					} else if !fl.closurePairStore(x) {
+diff --git a/passes/errcheck/testdata/src/advdeferend/adv.go b/passes/errcheck/testdata/src/advdeferend/adv.go
+index c23b340..4fad62c 100644
+--- a/passes/errcheck/testdata/src/advdeferend/adv.go
++++ b/passes/errcheck/testdata/src/advdeferend/adv.go
+@@ -72,7 +72,7 @@ func generic[T io.WriteCloser](w T) {
+ type T struct{ w io.WriteCloser }
+ 
+ func (t *T) done() {
+-	defer t.w.Close()
++	defer t.w.Close() // ft-c7dd: reported now, t.w is one resource, as for the generic twin above // want "ERR005"
+ 	_, _ = t.w.Write([]byte("x"))
+ }
+ 
+diff --git a/passes/errcheck/testdata/src/advfv3b3c/a.go b/passes/errcheck/testdata/src/advfv3b3c/a.go
+index ef31eb8..c615cf8 100644
+--- a/passes/errcheck/testdata/src/advfv3b3c/a.go
++++ b/passes/errcheck/testdata/src/advfv3b3c/a.go
+@@ -127,7 +127,7 @@ func byValue(w io.WriteCloser) func() {
+ func fieldLoad(h *holder) func() {
+ 	return func() {
+ 		_, _ = h.w.Write(nil)
+-		defer h.w.Close() // P4b
++		defer h.w.Close() // P4b ft-c7dd: reported now, the field path is one resource // want "ERR005"
+ 	}
+ }
+ 
+@@ -137,7 +137,7 @@ func fieldLoadByRef() func() {
+ 	h.w = open()
+ 	return func() {
+ 		_, _ = h.w.Write(nil)
+-		defer h.w.Close() // P4b2
++		defer h.w.Close() // P4b2 ft-c7dd: reported now, the field path is one resource // want "ERR005"
+ 		h.n++
+ 	}
+ }
+diff --git a/passes/errcheck/testdata/src/advfvctl3b3c/c.go b/passes/errcheck/testdata/src/advfvctl3b3c/c.go
+index 4806968..25c5288 100644
+--- a/passes/errcheck/testdata/src/advfvctl3b3c/c.go
++++ b/passes/errcheck/testdata/src/advfvctl3b3c/c.go
+@@ -32,7 +32,7 @@ func ptrIface(pw *io.WriteCloser) func() {
+ func ptrIfaceNoReassign(pw *io.WriteCloser) func() {
+ 	return func() {
+ 		_, _ = (*pw).Write(nil)
+-		(*pw).Close() // C4
++		(*pw).Close() // C4 ft-c7dd: reported now, *pw is one resource // want "ERR005"
+ 	}
+ }
+ 
+diff --git a/passes/errcheck/testdata/src/errc7ddfield/a.go b/passes/errcheck/testdata/src/errc7ddfield/a.go
+new file mode 100644
+index 0000000..ff14a83
+--- /dev/null
++++ b/passes/errcheck/testdata/src/errc7ddfield/a.go
+@@ -0,0 +1,77 @@
++package errc7ddfield
++
++import "io"
++
++func open() io.WriteCloser { return nil }
++
++// ---- Shape 3: field loads through a captured pointer ----
++
++type holder struct {
++	w io.WriteCloser
++	n int
++}
++
++func s3Field(h *holder) func() {
++	return func() {
++		_, _ = h.w.Write(nil)
++		defer h.w.Close() // want "ERR005"
++	}
++}
++
++func s3FieldTwin(h *holder) {
++	_, _ = h.w.Write(nil)
++	defer h.w.Close() // want "ERR005"
++}
++
++func s3FieldByRef() func() {
++	var h holder
++	h.w = open()
++	return func() {
++		_, _ = h.w.Write(nil)
++		defer h.w.Close() // want "ERR005"
++		h.n++
++	}
++}
++
++func s3PtrToIface(pw *io.WriteCloser) func() {
++	return func() {
++		_, _ = (*pw).Write(nil)
++		defer (*pw).Close() // want "ERR005"
++	}
++}
++
++func s3PtrToIfaceTwin(pw *io.WriteCloser) {
++	_, _ = (*pw).Write(nil)
++	defer (*pw).Close() // want "ERR005"
++}
++
++// The field is replaced between the write and the close: the new resource was never written.
++func s3FieldReassign(h *holder) {
++	_, _ = h.w.Write(nil)
++	h.w = open()
++	h.w.Close()
++}
++
++func s3FieldReassignClosure(h *holder) func() {
++	return func() {
++		_, _ = h.w.Write(nil)
++		h.w = open()
++		h.w.Close()
++	}
++}
++
++// Two different fields of one holder do not share a written flag.
++type pair struct{ a, b io.WriteCloser }
++
++func s3OtherField(p *pair) {
++	_, _ = p.a.Write(nil)
++	p.b.Close()
++}
++
++// A read-only resource reached through a field stays silent.
++type rholder struct{ r io.ReadCloser }
++
++func s3ReadOnlyField(h *rholder) {
++	_, _ = h.r.Read(nil)
++	defer h.r.Close()
++}
+-- 
+2.54.0 (Apple Git-157)
+

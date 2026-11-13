@@ -1,0 +1,898 @@
+From a06563587cfadd10954258a8323c4818a0642cc7 Mon Sep 17 00:00:00 2001
+From: BHARATH CHANDRA VADDARAM <bharath.vbcr@gmail.com>
+Date: Fri, 13 Nov 2026 02:20:23 -0600
+Subject: [PATCH 3/6] Carry the written flag across a closure boundary by
+ replaying the closure's effects in its creator
+
+A write and the Close that follows it only met when both sat in one function: a closure and its
+creator are lowered separately, so a closure that wrote what its creator closed (and the reverse),
+a Close in a closure nested one level in, and the body of a range-over-func against the function
+around it all missed ERR005.
+
+Each closure now gets a summary (closureeffects.go): the captured variables it may write, through
+the closures it makes and runs as well, and the Close calls whose error it drops. The creator
+replays the summary on its own slots for those variables where the closure runs: a write at every
+use of the closure (a call, a go statement, an escape), a close at a call, a defer or a call that
+takes the closure as an argument (a range-over-func body). A closure that is returned, stored or
+passed on and closes a captured resource cannot see its creator's flow, so its entry is seeded
+writable when the creator side may write that variable anywhere; the answer comes from a
+per-creator index, built once. A closure that stores to a captured variable contributes no
+writes, since they may be to the resource it replaces. The summary and the syntax scan are cached
+per function, and the work is counted in planWork and bounded by a linearity test.
+
+Twelve fixture markers pinned the miss and flip in this commit, each with a ft-c7dd comment:
+advfv3b3c/a.go P1b, P3a, P3b, P3b2, P3c and P4e2, advfvrange3b3c/r.go P5a, P5c, P5e and P5g,
+advsameline/a.go closureClose and errrangecapture/rc.go writtenAfterLoop (whose comment, which
+said the shape is a documented miss, is updated). tests/stress/testdata/src/er_w_rangecapture
+main.go:40 carries the same writtenAfterLoop shape as a MISS marker; it is held by another lane and
+needs promoting to HIT.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ passes/errcheck/c7dd_test.go                  |  17 +-
+ passes/errcheck/closureeffects.go             | 361 ++++++++++++++++++
+ passes/errcheck/closureplan_internal_test.go  |  42 +-
+ passes/errcheck/lower.go                      |  13 +-
+ passes/errcheck/testdata/src/advfv3b3c/a.go   |  12 +-
+ .../errcheck/testdata/src/advfvrange3b3c/r.go |   8 +-
+ passes/errcheck/testdata/src/advsameline/a.go |   2 +-
+ passes/errcheck/testdata/src/errc7dd/a.go     | 205 ++++++++++
+ .../testdata/src/errrangecapture/rc.go        |  10 +-
+ 9 files changed, 642 insertions(+), 28 deletions(-)
+ create mode 100644 passes/errcheck/closureeffects.go
+ create mode 100644 passes/errcheck/testdata/src/errc7dd/a.go
+
+diff --git a/passes/errcheck/c7dd_test.go b/passes/errcheck/c7dd_test.go
+index 93e83bb..382754e 100644
+--- a/passes/errcheck/c7dd_test.go
++++ b/passes/errcheck/c7dd_test.go
+@@ -13,16 +13,6 @@ import (
+ func TestC7ddBlankDiscardInLoop(t *testing.T) {
+ 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddblank")
+ }
+-// ft-c7dd: `_, _ = w.Write(nil)` blanks the error explicitly, so a loop must not report it as an
+-// overwritten unchecked error; a real overwrite in a loop is still reported.
+-func TestC7ddBlankDiscardInLoop(t *testing.T) {
+-	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddblank")
+-}
+-// ft-c7dd: every shape on the card, each next to its no-closure twin.
+-func TestC7ddShapes(t *testing.T) {
+-	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7dd")
+-}
+-
+ 
+ // ft-c7dd: a resource reached through a field or a captured pointer keeps one written flag per
+ // access path, so `h.w.Write` then `h.w.Close` and `(*pw).Write` then `(*pw).Close` report, in a
+@@ -30,3 +20,10 @@ func TestC7ddShapes(t *testing.T) {
+ func TestC7ddFieldPaths(t *testing.T) {
+ 	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddfield")
+ }
++
++// ft-c7dd: a write and a Close that sit in different functions (a closure and its creator, a
++// closure and a closure nested in it, a range-over-func body and the function around it) meet on
++// one resource, each shape next to its no-closure twin.
++func TestC7ddShapes(t *testing.T) {
++	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7dd")
++}
+diff --git a/passes/errcheck/closureeffects.go b/passes/errcheck/closureeffects.go
+new file mode 100644
+index 0000000..0c512f2
+--- /dev/null
++++ b/passes/errcheck/closureeffects.go
+@@ -0,0 +1,361 @@
++package errcheck
++
++import (
++	"go/token"
++
++	"golang.org/x/tools/go/ssa"
++
++	"github.com/bharathvbcr/gosree/internal/gusseterr"
++)
++
++// A closure and the function that creates it are lowered separately, so the written flag of a
++// resource they share (ERR005) does not cross the boundary by itself. A closureEffects summarises
++// what one closure does to the variables it captures: which it may write, and which Close calls
++// whose error it drops. The creator replays those effects at the places the closure runs, on the
++// slots of the variables it passed in, so a write in a closure meets the Close of its creator and a
++// write of the creator meets the Close in the closure.
++//
++// The summary is flow-insensitive on the writes (a write anywhere in the closure may happen) and
++// leaves out what it cannot place: a close is replayed only where the closure demonstrably runs.
++
++type closeEffect struct {
++	idx      int       // free-variable index of the resource that is closed
++	pos      token.Pos // the Close statement
++	desc     string    // the receiver as written
++	deferred bool      // the close is a defer statement, in the closure or in the creator
++}
++
++type closureEffects struct {
++	writes []int
++	closes []closeEffect
++	stores []int // captured variables the closure assigns to
++}
++
++// A closure that stores to a captured variable replaces the resource in it, so a write it makes may
++// be to the old one: those writes are left out of the summary rather than replayed on the
++// resource that the creator closes afterwards.
++
++// astInfoFor scans the syntax of fn once, whichever of lowering and the closure summaries asks first.
++func (b *packageBuilder) astInfoFor(fn *ssa.Function) *funcASTInfo {
++	if ai, ok := b.astInfos[fn]; ok {
++		return ai
++	}
++	ai := scanFuncAST(b.pass, fn.Syntax())
++	b.astInfos[fn] = ai
++	return ai
++}
++
++// fvIndexOf returns the index of the captured variable that v reads or is, or -1.
++func fvIndexOf(fn *ssa.Function, v ssa.Value) int {
++	if load, ok := v.(*ssa.UnOp); ok && load.Op == token.MUL {
++		v = load.X
++	}
++	if fv, ok := v.(*ssa.FreeVar); ok {
++		return freeVarIndex(fn, fv)
++	}
++	return -1
++}
++
++// closuresRunBy returns the closures that ins runs: its callee, and the closures it takes as
++// arguments (a range-over-func body, a callback), which run while the call does.
++func closuresRunBy(ins ssa.Instruction) []*ssa.MakeClosure {
++	var cc *ssa.CallCommon
++	switch x := ins.(type) {
++	case *ssa.Call:
++		cc = &x.Call
++	case *ssa.Defer:
++		cc = &x.Call
++	case *ssa.Go:
++		cc = &x.Call
++	default:
++		return nil
++	}
++	var out []*ssa.MakeClosure
++	if m, ok := cc.Value.(*ssa.MakeClosure); ok && !cc.IsInvoke() {
++		out = append(out, m)
++	}
++	for _, arg := range cc.Args {
++		if m, ok := arg.(*ssa.MakeClosure); ok {
++			out = append(out, m)
++		}
++	}
++	return out
++}
++
++func (b *packageBuilder) closureEffectsFor(fn *ssa.Function) *closureEffects {
++	if e, ok := b.effects[fn]; ok {
++		return e
++	}
++	e := &closureEffects{}
++	b.effects[fn] = e
++	if len(fn.FreeVars) == 0 || len(fn.Blocks) == 0 {
++		return e
++	}
++	ast := b.astInfoFor(fn)
++	wrote := make(map[int]bool)
++	stored := make(map[int]bool)
++	addWrite := func(idx int) {
++		if idx >= 0 && !wrote[idx] {
++			wrote[idx] = true
++			e.writes = append(e.writes, idx)
++		}
++	}
++	defer func() {
++		kept := e.writes[:0]
++		for _, idx := range e.writes {
++			if !stored[idx] {
++				kept = append(kept, idx)
++			}
++		}
++		e.writes = kept
++	}()
++	for _, blk := range fn.Blocks {
++		if blk == fn.Recover {
++			continue
++		}
++		for _, ins := range blk.Instrs {
++			b.planWork++
++			if m, ok := ins.(*ssa.MakeClosure); ok {
++				// A closure made here may run at any time: what it writes may happen.
++				if sub, ok := m.Fn.(*ssa.Function); ok {
++					for _, j := range b.closureEffectsFor(sub).writes {
++						addWrite(fvIndexOf(fn, m.Bindings[j]))
++					}
++					for _, j := range b.closureEffectsFor(sub).stores {
++						if idx := fvIndexOf(fn, m.Bindings[j]); idx >= 0 {
++							stored[idx] = true
++							e.stores = append(e.stores, idx)
++						}
++					}
++				}
++				continue
++			}
++			var cc *ssa.CallCommon
++			switch x := ins.(type) {
++			case *ssa.Call:
++				cc = &x.Call
++			case *ssa.Defer:
++				cc = &x.Call
++			case *ssa.Go:
++				cc = &x.Call
++			case *ssa.Store:
++				if fv, ok := x.Addr.(*ssa.FreeVar); ok && !stored[freeVarIndex(fn, fv)] {
++					stored[freeVarIndex(fn, fv)] = true
++					e.stores = append(e.stores, freeVarIndex(fn, fv))
++				}
++				continue
++			default:
++				continue
++			}
++			_, isGo := ins.(*ssa.Go)
++			_, isDefer := ins.(*ssa.Defer)
++			if recv := methodReceiverVal(cc); recv != nil && !isGo {
++				if idx := fvIndexOf(fn, recv); idx >= 0 {
++					if isWriteMutatingMethod(cc) {
++						addWrite(idx)
++					}
++					if isCloseMethodCall(cc) {
++						if cl, ok := ast.closes[cc.Pos()]; ok {
++							e.closes = append(e.closes, closeEffect{idx: idx, pos: cl.pos, desc: cl.recvDesc, deferred: isDefer})
++						}
++					}
++				}
++			} else if recv != nil && isWriteMutatingMethod(cc) {
++				addWrite(fvIndexOf(fn, recv))
++			}
++			if isGo {
++				continue
++			}
++			for _, m := range closuresRunBy(ins) {
++				sub, ok := m.Fn.(*ssa.Function)
++				if !ok {
++					continue
++				}
++				for _, c := range b.closureEffectsFor(sub).closes {
++					if idx := fvIndexOf(fn, m.Bindings[c.idx]); idx >= 0 {
++						e.closes = append(e.closes, closeEffect{idx: idx, pos: c.pos, desc: c.desc, deferred: isDefer || c.deferred})
++					}
++				}
++			}
++		}
++	}
++	return e
++}
++
++// replayClosureEffects emits, at the instruction ins of the creator, the effects of every closure
++// that ins uses. A write is replayed at every use of the closure, a call, a go statement or an
++// escape alike, because the closure may run from there on. A close is replayed only where the
++// closure runs inside the creator's own flow: a call, a defer or a call that takes it as an
++// argument. The slot of each effect is the creator's slot for the variable the closure captured.
++func (fl *funcLowerer) replayClosureEffects(ins ssa.Instruction, ops *[]gusseterr.OpIR) {
++	if _, isPhi := ins.(*ssa.Phi); isPhi {
++		return
++	}
++	var used []*ssa.MakeClosure
++	for _, op := range ins.Operands(nil) {
++		if m, ok := (*op).(*ssa.MakeClosure); ok {
++			used = append(used, m)
++		}
++	}
++	if len(used) == 0 {
++		return
++	}
++	runs := make(map[*ssa.MakeClosure]bool)
++	_, isGo := ins.(*ssa.Go)
++	_, isDefer := ins.(*ssa.Defer)
++	if !isGo {
++		for _, m := range closuresRunBy(ins) {
++			runs[m] = true
++		}
++	}
++	for _, m := range used {
++		sub, ok := m.Fn.(*ssa.Function)
++		if !ok {
++			continue
++		}
++		eff := fl.pkg.closureEffectsFor(sub)
++		if runs[m] {
++			for _, c := range eff.closes {
++				if c.idx >= len(m.Bindings) {
++					continue
++				}
++				fl.pkg.planWork++
++				*ops = append(*ops, gusseterr.OpIR{
++					Kind:    gusseterr.OpUnhandledClose,
++					SiteID:  fl.pkg.addSite(c.pos, c.desc, ""),
++					SlotA:   fl.resourceSlot(m.Bindings[c.idx]),
++					IsDefer: isDefer || c.deferred,
++				})
++			}
++		}
++		for _, idx := range eff.writes {
++			if idx >= len(m.Bindings) {
++				continue
++			}
++			fl.pkg.planWork++
++			*ops = append(*ops, gusseterr.OpIR{Kind: gusseterr.OpMarkWritable, SlotA: fl.resourceSlot(m.Bindings[idx])})
++		}
++	}
++}
++
++// writeIndex records, for one enclosing function, which of the variables it passes to closures may
++// be written: directly in its own body, or by a closure it makes. It is built once per function,
++// so asking about a closure costs a lookup, not a scan of the function.
++type writeIndex struct {
++	direct  map[ssa.Value]bool
++	closure map[ssa.Value][]*ssa.MakeClosure
++}
++
++func (b *packageBuilder) writeIndexFor(parent *ssa.Function) *writeIndex {
++	if wi, ok := b.writeIndexes[parent]; ok {
++		return wi
++	}
++	wi := &writeIndex{direct: make(map[ssa.Value]bool), closure: make(map[ssa.Value][]*ssa.MakeClosure)}
++	b.writeIndexes[parent] = wi
++	for _, blk := range parent.Blocks {
++		if blk == parent.Recover {
++			continue
++		}
++		for _, ins := range blk.Instrs {
++			b.planWork++
++			if m, ok := ins.(*ssa.MakeClosure); ok {
++				if sub, ok := m.Fn.(*ssa.Function); ok {
++					for _, j := range b.closureEffectsFor(sub).writes {
++						wi.closure[m.Bindings[j]] = append(wi.closure[m.Bindings[j]], m)
++					}
++				}
++				continue
++			}
++			var cc *ssa.CallCommon
++			switch x := ins.(type) {
++			case *ssa.Call:
++				cc = &x.Call
++			case *ssa.Defer:
++				cc = &x.Call
++			case *ssa.Go:
++				cc = &x.Call
++			default:
++				continue
++			}
++			if recv := methodReceiverVal(cc); recv != nil && isWriteMutatingMethod(cc) {
++				if load, ok := recv.(*ssa.UnOp); ok && load.Op == token.MUL {
++					recv = load.X
++				}
++				wi.direct[recv] = true
++			}
++		}
++	}
++	return wi
++}
++
++// bindingMayBeWritten reports whether the variable that the creator of a closure passes as binding
++// may be written anywhere in the creator, in a closure other than skip that it makes, or, when the
++// creator is itself a closure, further out. It is flow-insensitive on purpose: it answers only for
++// a closure whose place in the creator's flow is unknown.
++func (b *packageBuilder) bindingMayBeWritten(parent *ssa.Function, skip *ssa.MakeClosure, binding ssa.Value) bool {
++	wi := b.writeIndexFor(parent)
++	if wi.direct[binding] {
++		return true
++	}
++	for _, m := range wi.closure[binding] {
++		if m != skip {
++			return true
++		}
++	}
++	if fv, ok := binding.(*ssa.FreeVar); ok {
++		if grand := parent.Parent(); grand != nil {
++			if gm := b.parentIndexFor(grand).closures[parent]; gm != nil {
++				if idx := freeVarIndex(parent, fv); idx >= 0 && idx < len(gm.Bindings) {
++					return b.bindingMayBeWritten(grand, nil, gm.Bindings[idx])
++				}
++			}
++		}
++	}
++	return false
++}
++
++// seedEscapedCloses marks, at the entry of a closure that closes a captured resource but is not
++// only run inside its creator's flow (it is returned, stored or passed on), the resources that the
++// creator side may have written. The closure cannot see that flow, and a Close error dropped on a
++// resource that may have been written is the unsafe side to miss.
++func (fl *funcLowerer) seedEscapedCloses() {
++	parent := fl.fn.Parent()
++	if parent == nil || len(fl.fn.FreeVars) == 0 {
++		return
++	}
++	eff := fl.pkg.closureEffectsFor(fl.fn)
++	if len(eff.closes) == 0 {
++		return
++	}
++	mc := fl.pkg.parentIndexFor(parent).closures[fl.fn]
++	if mc == nil {
++		return
++	}
++	escapes := false
++	for _, ref := range liveReferrers(mc) {
++		fl.pkg.planWork++
++		inFlow := false
++		for _, run := range closuresRunBy(ref) {
++			if run == mc {
++				inFlow = true
++			}
++		}
++		if _, isGo := ref.(*ssa.Go); isGo || !inFlow {
++			escapes = true
++			break
++		}
++	}
++	if !escapes {
++		return
++	}
++	seeded := make(map[int]bool)
++	for _, c := range eff.closes {
++		if seeded[c.idx] || c.idx >= len(mc.Bindings) {
++			continue
++		}
++		seeded[c.idx] = true
++		if fl.pkg.bindingMayBeWritten(parent, mc, mc.Bindings[c.idx]) {
++			fl.constInits = append(fl.constInits, gusseterr.OpIR{Kind: gusseterr.OpMarkWritable, SlotA: fl.slot(fl.fn.FreeVars[c.idx])})
++		}
++	}
++}
+diff --git a/passes/errcheck/closureplan_internal_test.go b/passes/errcheck/closureplan_internal_test.go
+index 03e1419..1b244be 100644
+--- a/passes/errcheck/closureplan_internal_test.go
++++ b/passes/errcheck/closureplan_internal_test.go
+@@ -23,7 +23,13 @@ func closurePlanWork(t *testing.T, n int) uint64 {
+ 		fmt.Fprintf(&b, "\tvar v%[1]d *T\n\tvar e%[1]d error\n\tfunc() { v%[1]d, e%[1]d = workV() }()\n\tif e%[1]d == nil {\n\t\tn += use(v%[1]d)\n\t}\n\tif c[%[1]d] {\n\t\treturn n\n\t}\n", i)
+ 	}
+ 	b.WriteString("\treturn n\n}\n")
+-	dir, cleanup, err := analysistest.WriteFiles(map[string]string{"big/big.go": b.String()})
++	return planWorkOf(t, b.String())
++}
++
++// planWorkOf analyzes one package, big/big.go, and returns the plan work counter.
++func planWorkOf(t *testing.T, src string) uint64 {
++	t.Helper()
++	dir, cleanup, err := analysistest.WriteFiles(map[string]string{"big/big.go": src})
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -53,3 +59,37 @@ func TestClosurePlanWorkIsLinear(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// closureEffectsSource is one function holding n resources, each passed to a closure that writes it,
++// a closure that is called and closes it, and a closure that is kept and closes it later, so every
++// effect path (a replay at a call, a replay at an escape, the entry seed of an escaped closure) runs
++// n times against one parent.
++func closureEffectsSource(n int) string {
++	var b strings.Builder
++	b.WriteString("package big\n\nimport \"io\"\n\nfunc Big(ws []io.WriteCloser) []func() {\n\tvar keep []func()\n")
++	for i := 0; i < n; i++ {
++		fmt.Fprintf(&b, "\tr%[1]d := ws[%[1]d]\n\tfunc() { _, _ = r%[1]d.Write(nil) }()\n\tfunc() { r%[1]d.Close() }()\n\tkeep = append(keep, func() { r%[1]d.Close() })\n", i)
++	}
++	b.WriteString("\treturn keep\n}\n")
++	return b.String()
++}
++
++// Summarising closures and replaying them costs the size of the closures, not closures times the
++// size of the parent: the work per closure is the same constant at 500, 2,000 and 8,000 closures in
++// one parent.
++func TestClosureEffectsWorkIsLinear(t *testing.T) {
++	var per []uint64
++	for _, n := range []int{500, 2000, 8000} {
++		w := planWorkOf(t, closureEffectsSource(n))
++		if w == 0 {
++			t.Fatalf("n=%d: no plan work recorded", n)
++		}
++		t.Logf("n=%d resources: plan work %d (%d per resource)", n, w, w/uint64(n))
++		per = append(per, w/uint64(n))
++	}
++	for i := 1; i < len(per); i++ {
++		if per[i] > per[0]+per[0]/10 {
++			t.Fatalf("work per resource grows with the parent: %v", per)
++		}
++	}
++}
+diff --git a/passes/errcheck/lower.go b/passes/errcheck/lower.go
+index 6692714..e77910c 100644
+--- a/passes/errcheck/lower.go
++++ b/passes/errcheck/lower.go
+@@ -28,6 +28,10 @@ type packageBuilder struct {
+ 	// blocks and referrers visited while building them (a deterministic cost measure for tests).
+ 	parentIndexes map[*ssa.Function]*parentIndex
+ 	planWork      uint64
++	// effects and astInfos cache the per-closure summaries and the per-function syntax facts.
++	effects      map[*ssa.Function]*closureEffects
++	writeIndexes map[*ssa.Function]*writeIndex
++	astInfos     map[*ssa.Function]*funcASTInfo
+ }
+ 
+ func newPackageBuilder(pass *analysis.Pass, funcs []*ssa.Function) *packageBuilder {
+@@ -43,6 +47,9 @@ func newPackageBuilder(pass *analysis.Pass, funcs []*ssa.Function) *packageBuild
+ 		blankedBySite: make(map[uint32]siteMeta),
+ 		closurePlans:  make(map[*ssa.Function]*closurePlan),
+ 		parentIndexes: make(map[*ssa.Function]*parentIndex),
++		effects:       make(map[*ssa.Function]*closureEffects),
++		writeIndexes:  make(map[*ssa.Function]*writeIndex),
++		astInfos:      make(map[*ssa.Function]*funcASTInfo),
+ 	}
+ 	return b
+ }
+@@ -118,7 +125,7 @@ func (b *packageBuilder) lowerFunc(funcIdx uint32, fn *ssa.Function) gusseterr.F
+ 		return gusseterr.FuncIR{Flags: flags}
+ 	}
+ 
+-	astInfo := scanFuncAST(b.pass, fn.Syntax())
++	astInfo := b.astInfoFor(fn)
+ 	_, usedVars := scanBlankDiscardedAndUsedVars(b.pass, fn.Syntax())
+ 
+ 	fl := &funcLowerer{
+@@ -1155,6 +1162,7 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
+ 	fl.seedBoxedConcreteErr()
+ 	fl.seedIOReadErrVals()
+ 	fl.seedClosurePairs()
++	fl.seedEscapedCloses()
+ 	fl.seedCompanionVals()
+ 
+ 	nBlocks := len(fl.fn.Blocks)
+@@ -1192,6 +1200,9 @@ func (fl *funcLowerer) build(flags uint8) gusseterr.FuncIR {
+ 
+ 		terminatedEarly := false
+ 		for _, ins := range b.Instrs {
++			if _, dbg := ins.(*ssa.DebugRef); !dbg {
++				fl.replayClosureEffects(ins, &ops)
++			}
+ 			switch x := ins.(type) {
+ 			case *ssa.Phi:
+ 				dst := fl.slot(x)
+diff --git a/passes/errcheck/testdata/src/advfv3b3c/a.go b/passes/errcheck/testdata/src/advfv3b3c/a.go
+index c615cf8..c49b42a 100644
+--- a/passes/errcheck/testdata/src/advfv3b3c/a.go
++++ b/passes/errcheck/testdata/src/advfv3b3c/a.go
+@@ -12,7 +12,7 @@ func open() io.WriteCloser { return nil }
+ // P1b: two closures share one captured variable; one writes, the other closes.
+ func twoClosures(w io.WriteCloser) (func(), func()) {
+ 	write := func() { _, _ = w.Write(nil) }
+-	cl := func() { defer w.Close() } // P1b
++	cl := func() { defer w.Close() } // P1b // ft-c7dd: reported now, the write and the Close meet on one resource across the closure boundary // want "ERR005"
+ 	return write, cl
+ }
+ 
+@@ -84,26 +84,26 @@ func replacedBetween(w io.WriteCloser) {
+ 
+ // P3a: the enclosing function defers Close; a closure it calls does the write.
+ func enclosingDefersClosureWrites(f *os.File) {
+-	defer f.Close() // P3a
++	defer f.Close() // P3a // ft-c7dd: reported now, the write and the Close meet on one resource across the closure boundary // want "ERR005"
+ 	func() { _, _ = f.Write(nil) }()
+ }
+ 
+ // P3b: the closure closes; the enclosing function writes.
+ func closureClosesEnclosingWrites(f *os.File) {
+ 	_, _ = f.Write(nil)
+-	func() { f.Close() }() // P3b
++	func() { f.Close() }() // P3b // ft-c7dd: reported now, the write and the Close meet on one resource across the closure boundary // want "ERR005"
+ }
+ 
+ // P3b2: deferred closure closes, enclosing writes.
+ func deferredClosureCloses(f *os.File) {
+-	defer func() { f.Close() }() // P3b2
++	defer func() { f.Close() }() // P3b2 // ft-c7dd: reported now, the write and the Close meet on one resource across the closure boundary // want "ERR005"
+ 	_, _ = f.Write(nil)
+ }
+ 
+ // P3c: local captured var, closure defers close, enclosing writes after creating closure.
+ func localCaptured() {
+ 	f, _ := os.Create("x")           // want "ERR002"
+-	cl := func() { defer f.Close() } // P3c
++	cl := func() { defer f.Close() } // P3c // ft-c7dd: reported now, the write and the Close meet on one resource across the closure boundary // want "ERR005"
+ 	_, _ = f.Write(nil)
+ 	cl()
+ }
+@@ -184,7 +184,7 @@ func nestedSplit(w io.WriteCloser) func() func() {
+ 	return func() func() {
+ 		_, _ = w.Write(nil)
+ 		return func() {
+-			w.Close() // P4e2
++			w.Close() // P4e2 // ft-c7dd: reported now, the write and the Close meet on one resource across the closure boundary // want "ERR005"
+ 		}
+ 	}
+ }
+diff --git a/passes/errcheck/testdata/src/advfvrange3b3c/r.go b/passes/errcheck/testdata/src/advfvrange3b3c/r.go
+index a308844..1c34152 100644
+--- a/passes/errcheck/testdata/src/advfvrange3b3c/r.go
++++ b/passes/errcheck/testdata/src/advfvrange3b3c/r.go
+@@ -17,7 +17,7 @@ func seq(n int) iter.Seq[int] {
+ 
+ // P5a: the body writes; the close is deferred BEFORE the loop in the enclosing function.
+ func deferBeforeLoopBodyWrites(w io.WriteCloser) {
+-	defer w.Close() // P5a
++	defer w.Close() // P5a // ft-c7dd: reported now, the write and the Close meet on one resource across the closure boundary // want "ERR005"
+ 	for range seq(2) {
+ 		_, _ = w.Write(nil)
+ 	}
+@@ -46,7 +46,7 @@ func closureInBody(w io.WriteCloser) {
+ func bodyWritesClosureCloses(w io.WriteCloser) {
+ 	for range seq(2) {
+ 		_, _ = w.Write(nil)
+-		func() { w.Close() }() // P5c
++		func() { w.Close() }() // P5c // ft-c7dd: reported now, the write and the Close meet on one resource across the closure boundary // want "ERR005"
+ 	}
+ }
+ 
+@@ -54,7 +54,7 @@ func bodyWritesClosureCloses(w io.WriteCloser) {
+ func writeInClosureDeferInBody(w io.WriteCloser) {
+ 	write := func() { _, _ = w.Write(nil) }
+ 	for range seq(2) {
+-		defer w.Close() // P5e
++		defer w.Close() // P5e // ft-c7dd: reported now, the write and the Close meet on one resource across the closure boundary // want "ERR005"
+ 		write()
+ 	}
+ }
+@@ -73,7 +73,7 @@ func rangeInClosure(w io.WriteCloser) func() {
+ func rangeInClosureWriteAfter(w io.WriteCloser) func() {
+ 	return func() {
+ 		for range seq(2) {
+-			defer w.Close() // P5g
++			defer w.Close() // P5g // ft-c7dd: reported now, the write and the Close meet on one resource across the closure boundary // want "ERR005"
+ 		}
+ 		_, _ = w.Write(nil)
+ 	}
+diff --git a/passes/errcheck/testdata/src/advsameline/a.go b/passes/errcheck/testdata/src/advsameline/a.go
+index d40fd33..3f09a50 100644
+--- a/passes/errcheck/testdata/src/advsameline/a.go
++++ b/passes/errcheck/testdata/src/advsameline/a.go
+@@ -46,7 +46,7 @@ func chainDefer(w io.WriteCloser) {
+ 
+ func closureClose(w io.WriteCloser) {
+ 	_, _ = w.Write(nil)
+-	defer func() { w.Close() }()
++	defer func() { w.Close() }() // ft-c7dd: reported now, the deferred closure closes what its creator wrote // want "ERR005"
+ }
+ 
+ func blankedPair() {
+diff --git a/passes/errcheck/testdata/src/errc7dd/a.go b/passes/errcheck/testdata/src/errc7dd/a.go
+new file mode 100644
+index 0000000..d11ee60
+--- /dev/null
++++ b/passes/errcheck/testdata/src/errc7dd/a.go
+@@ -0,0 +1,205 @@
++package errc7dd
++
++import (
++	"io"
++	"iter"
++	"os"
++)
++
++func open() io.WriteCloser { return nil }
++
++func seq(n int) iter.Seq[int] {
++	return func(yield func(int) bool) {
++		for i := range n {
++			if !yield(i) {
++				return
++			}
++		}
++	}
++}
++
++// ---- Shape 1: parent defers Close, a closure does the write ----
++
++func s1Closure(f *os.File) {
++	defer f.Close() // want "ERR005"
++	func() { _, _ = f.Write(nil) }()
++}
++
++func s1Twin(f *os.File) {
++	defer f.Close() // want "ERR005"
++	_, _ = f.Write(nil)
++}
++
++// ---- Shape 2: closure closes, parent writes ----
++
++func s2Direct(f *os.File) {
++	_, _ = f.Write(nil)
++	func() { f.Close() }() // want "ERR005"
++}
++
++func s2Twin(f *os.File) {
++	_, _ = f.Write(nil)
++	f.Close() // want "ERR005"
++}
++
++func s2Deferred(f *os.File) {
++	defer func() { f.Close() }() // want "ERR005"
++	_, _ = f.Write(nil)
++}
++
++func s2Local() {
++	f, _ := os.Create("x")           // want "ERR002"
++	cl := func() { defer f.Close() } // want "ERR005"
++	_, _ = f.Write(nil)
++	cl()
++}
++
++// ---- Shape 4: nested closures ----
++
++func s4Nested(w io.WriteCloser) func() func() {
++	return func() func() {
++		_, _ = w.Write(nil)
++		return func() {
++			w.Close() // want "ERR005"
++		}
++	}
++}
++
++func s4NestedTwin(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++// ---- Shape 5: range-over-func ----
++
++func s5DeferBefore(w io.WriteCloser) {
++	defer w.Close() // want "ERR005"
++	for range seq(2) {
++		_, _ = w.Write(nil)
++	}
++}
++
++func s5DeferBeforeTwin(w io.WriteCloser) {
++	defer w.Close() // want "ERR005"
++	for i := 0; i < 2; i++ {
++		_, _ = w.Write(nil)
++	}
++}
++
++func s5BodyWritesClosureCloses(w io.WriteCloser) {
++	for range seq(2) {
++		_, _ = w.Write(nil)
++		func() { w.Close() }() // want "ERR005"
++	}
++}
++
++func s5WriteInClosureDeferInBody(w io.WriteCloser) {
++	write := func() { _, _ = w.Write(nil) }
++	for range seq(2) {
++		defer w.Close() // want "ERR005"
++		write()
++	}
++}
++
++func s5WriteAfterLoopInClosure(w io.WriteCloser) func() {
++	return func() {
++		for range seq(2) {
++			defer w.Close() // want "ERR005"
++		}
++		_, _ = w.Write(nil)
++	}
++}
++
++func s5WriteAfterLoopTwin(w io.WriteCloser) {
++	for i := 0; i < 2; i++ {
++		defer w.Close() // want "ERR005"
++	}
++	_, _ = w.Write(nil)
++}
++
++// ---- Ordering: the closure's effects land where it runs ----
++
++// The variable is replaced after the closure is made and before it runs, so the write that the
++// closure makes lands on the new resource: a mark at the closure's creation would have been erased.
++func orderReplaceBeforeCall(w io.WriteCloser) {
++	write := func() { _, _ = w.Write(nil) }
++	w = open()
++	write()
++	w.Close() // want "ERR005"
++}
++
++func orderReplaceBeforeCallTwin(w io.WriteCloser) {
++	w = open()
++	_, _ = w.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++// The closure runs only after the Close: no write has happened when the resource is closed.
++func orderCloseBeforeCall(w io.WriteCloser) {
++	write := func() { _, _ = w.Write(nil) }
++	w.Close()
++	write()
++}
++
++// The closure writes, then the variable is replaced: the new resource was never written.
++func orderReplaceAfterCall(w io.WriteCloser) {
++	write := func() { _, _ = w.Write(nil) }
++	write()
++	w = open()
++	w.Close()
++}
++
++func orderReplaceAfterCallTwin(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	w = open()
++	w.Close()
++}
++
++// A closure that only reads leaves the resource read-only.
++func readOnlyClosure(r io.ReadCloser) {
++	defer r.Close()
++	func() { _, _ = r.Read(nil) }()
++}
++
++func readOnlyClosureTwin(r io.ReadCloser) {
++	defer r.Close()
++	_, _ = r.Read(nil)
++}
++
++// A closure that closes a resource nothing has written stays silent, called or returned.
++func closeOnlyClosure(w io.WriteCloser) func() {
++	func() { w.Close() }()
++	return func() { w.Close() }
++}
++
++// The close is checked: nothing is dropped, whoever wrote.
++func checkedCloseInClosure(w io.WriteCloser) error {
++	_, _ = w.Write(nil)
++	return func() error { return w.Close() }()
++}
++
++// ---- A captured variable assigned from a producer inside a closure, then closed ----
++
++func capturedCreate(p string) func() error {
++	var f *os.File
++	return func() error {
++		var err error
++		// Known false positive, not this card's: the closure stores the file to a captured variable
++		// before its own local err is checked (ft-420d's pair plan needs both in captured cells).
++		f, err = os.Create(p) // want "ERR002"
++		if err != nil {
++			return err
++		}
++		defer f.Close() // want "ERR005"
++		return nil
++	}
++}
++
++func capturedCreateTwin(p string) error {
++	f, err := os.Create(p)
++	if err != nil {
++		return err
++	}
++	defer f.Close() // want "ERR005"
++	return nil
++}
+diff --git a/passes/errcheck/testdata/src/errrangecapture/rc.go b/passes/errcheck/testdata/src/errrangecapture/rc.go
+index 36aed2e..0334ead 100644
+--- a/passes/errcheck/testdata/src/errrangecapture/rc.go
++++ b/passes/errcheck/testdata/src/errrangecapture/rc.go
+@@ -23,16 +23,16 @@ func writtenInBody(w io.WriteCloser) {
+ 	}
+ }
+ 
+-// MISS: a deferred call in a range-over-func body runs when the enclosing function returns (Go
++// A deferred call in a range-over-func body runs when the enclosing function returns (Go
+ // spec, "Defer statements": deferred functions run immediately before the surrounding function
+ // returns; confirmed with go1.27.3, where "after loop" prints before the body's deferred call), so
+ // the write below happens before the close and the close drops a flush error. The analysis
+-// resolves a body's deferred closes at the yield function's synthetic return, where this write is
+-// not visible, so nothing is reported. This test expects no diagnostic; when the close is
+-// resolved at the enclosing function's exits, add the want here.
++// resolved a body's deferred closes at the yield function's synthetic return, where this write is
++// not visible, so nothing was reported. ft-c7dd replays the body's deferred close in the enclosing
++// function, where the write is visible, and the want below holds.
+ func writtenAfterLoop(w io.WriteCloser) {
+ 	for range seq(2) {
+-		defer w.Close()
++		defer w.Close() // ft-c7dd: reported now, the body defer is resolved with the write after the loop // want "ERR005"
+ 	}
+ 	_, _ = w.Write(nil)
+ }
+-- 
+2.54.0 (Apple Git-157)
+

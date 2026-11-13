@@ -1,0 +1,1473 @@
+From beb8a61b1cf55efda2095bbe108af2ccfcf558c1 Mon Sep 17 00:00:00 2001
+From: BHARATH CHANDRA VADDARAM <bharath.vbcr@gmail.com>
+Date: Fri, 13 Nov 2026 02:43:58 -0600
+Subject: [PATCH 6/6] Add the adversarial review of ft-c7dd: ten new false
+ positives, three new misses, a duplicate and a gap
+
+Defended shapes (access paths, ERR003 blank discards, closure replay, range-over-func, scale,
+determinism and engine parity) pass; the Break tests fail on purpose and each asserts the correct
+result against the unmodified tip 90fa6e9.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ passes/errcheck/adv_c7dd_internal_test.go     | 103 +++
+ passes/errcheck/adv_c7dd_test.go              | 102 +++
+ passes/errcheck/testdata/adv_c7dd.golden      |  88 +++
+ passes/errcheck/testdata/src/errc7ddadv/a.go  | 743 ++++++++++++++++++
+ passes/errcheck/testdata/src/errc7ddadv/b.go  | 102 +++
+ .../errcheck/testdata/src/errc7ddadvdup/a.go  |  56 ++
+ .../errcheck/testdata/src/errc7ddadvfp/a.go   | 108 +++
+ .../errcheck/testdata/src/errc7ddadvgap/a.go  |  40 +
+ .../errcheck/testdata/src/errc7ddadvmiss/a.go |  42 +
+ 9 files changed, 1384 insertions(+)
+ create mode 100644 passes/errcheck/adv_c7dd_internal_test.go
+ create mode 100644 passes/errcheck/adv_c7dd_test.go
+ create mode 100644 passes/errcheck/testdata/adv_c7dd.golden
+ create mode 100644 passes/errcheck/testdata/src/errc7ddadv/a.go
+ create mode 100644 passes/errcheck/testdata/src/errc7ddadv/b.go
+ create mode 100644 passes/errcheck/testdata/src/errc7ddadvdup/a.go
+ create mode 100644 passes/errcheck/testdata/src/errc7ddadvfp/a.go
+ create mode 100644 passes/errcheck/testdata/src/errc7ddadvgap/a.go
+ create mode 100644 passes/errcheck/testdata/src/errc7ddadvmiss/a.go
+
+diff --git a/passes/errcheck/adv_c7dd_internal_test.go b/passes/errcheck/adv_c7dd_internal_test.go
+new file mode 100644
+index 0000000..7f2fe7e
+--- /dev/null
++++ b/passes/errcheck/adv_c7dd_internal_test.go
+@@ -0,0 +1,103 @@
++package errcheck
++
++import (
++	"fmt"
++	"strings"
++	"testing"
++)
++
++// Adversarial scale checks for ft-c7dd. They read the deterministic plan-work counter, never a
++// clock. planWorkOf and closurePlanWorkHook come from closureplan_internal_test.go.
++
++// fieldClosureSrc builds one function whose closure writes each of nFields distinct fields of a
++// captured holder and is called `uses` times, then closes the first field.
++func fieldClosureSrc(nFields, uses int) string {
++	var b strings.Builder
++	b.WriteString("package big\n\nimport \"io\"\n\ntype H struct {\n")
++	for i := 0; i < nFields; i++ {
++		fmt.Fprintf(&b, "\tf%d io.WriteCloser\n", i)
++	}
++	b.WriteString("}\n\nfunc Big(h *H) {\n\tw := func() {\n")
++	for i := 0; i < nFields; i++ {
++		fmt.Fprintf(&b, "\t\t_, _ = h.f%d.Write(nil)\n", i)
++	}
++	b.WriteString("\t}\n")
++	for i := 0; i < uses; i++ {
++		b.WriteString("\tw()\n")
++	}
++	b.WriteString("\th.f0.Close()\n}\n")
++	return b.String()
++}
++
++// manyClosuresSrc builds one function with n closures that all write one captured resource, and a
++// Close of that resource at the end.
++func manyClosuresSrc(n int) string {
++	var b strings.Builder
++	b.WriteString("package big\n\nimport \"io\"\n\nfunc Big(w io.WriteCloser) {\n")
++	for i := 0; i < n; i++ {
++		b.WriteString("\tfunc() { _, _ = w.Write(nil) }()\n")
++	}
++	b.WriteString("\tw.Close()\n}\n")
++	return b.String()
++}
++
++// nestedSrc builds closures nested depth deep, each writing its own captured variable.
++func nestedSrc(depth int) string {
++	var b strings.Builder
++	b.WriteString("package big\n\nimport \"io\"\n\nfunc Big(")
++	for i := 0; i < depth; i++ {
++		if i > 0 {
++			b.WriteString(", ")
++		}
++		fmt.Fprintf(&b, "w%d", i)
++	}
++	b.WriteString(" io.WriteCloser) {\n")
++	for i := 0; i < depth; i++ {
++		fmt.Fprintf(&b, "%sfunc() {\n%s_, _ = w%d.Write(nil)\n", strings.Repeat("\t", i+1), strings.Repeat("\t", i+2), i)
++	}
++	for i := depth - 1; i >= 0; i-- {
++		fmt.Fprintf(&b, "%s}()\n", strings.Repeat("\t", i+1))
++	}
++	b.WriteString("}\n")
++	return b.String()
++}
++
++func TestAdvC7ddScaleCounters(t *testing.T) {
++	t.Run("fields-x-uses", func(t *testing.T) {
++		for _, c := range [][2]int{{100, 1}, {100, 10}, {400, 1}, {400, 10}, {1000, 1}, {1000, 10}, {2000, 1}, {2000, 10}} {
++			w := planWorkOf(t, fieldClosureSrc(c[0], c[1]))
++			t.Logf("fields=%d uses=%d plan work %d (fields*uses=%d)", c[0], c[1], w, c[0]*c[1])
++		}
++	})
++	t.Run("many-closures-one-resource", func(t *testing.T) {
++		var per []uint64
++		for _, n := range []int{100, 400, 1600} {
++			w := planWorkOf(t, manyClosuresSrc(n))
++			t.Logf("closures=%d plan work %d (%d per closure)", n, w, w/uint64(n))
++			per = append(per, w/uint64(n))
++		}
++		for i := 1; i < len(per); i++ {
++			if per[i] > per[0]+per[0]/10 {
++				t.Fatalf("work per closure grows with the number of closures sharing one resource: %v", per)
++			}
++		}
++	})
++}
++
++// BREAK: the effect summary of a closure lists every write of the closures nested in it, so with
++// each level writing its own captured variable the work per level grows with the depth (37, 50, 75
++// and 125 per level at depths 25, 50, 100 and 200) and the total is quadratic. The counter, not a
++// clock, is asserted.
++func TestAdvC7ddBreakNestedDepthWork(t *testing.T) {
++	var per []uint64
++	for _, d := range []int{25, 50, 100, 200} {
++		w := planWorkOf(t, nestedSrc(d))
++		t.Logf("depth=%d plan work %d (%d per level)", d, w, w/uint64(d))
++		per = append(per, w/uint64(d))
++	}
++	for i := 1; i < len(per); i++ {
++		if per[i] > per[0]*2 {
++			t.Fatalf("work per nesting level grows with the depth: %v", per)
++		}
++	}
++}
+diff --git a/passes/errcheck/adv_c7dd_test.go b/passes/errcheck/adv_c7dd_test.go
+new file mode 100644
+index 0000000..1746957
+--- /dev/null
++++ b/passes/errcheck/adv_c7dd_test.go
+@@ -0,0 +1,102 @@
++package errcheck_test
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"testing"
++
++	"golang.org/x/tools/go/analysis/analysistest"
++
++	"github.com/bharathvbcr/gosree/passes/errcheck"
++)
++
++// Adversarial review of ft-c7dd (567e3d5..498984f), against the unmodified tip 90fa6e9. Every shape
++// is written next to its plain twin; a closure or field form whose diagnostics differ from its
++// twin's is a finding. The Break tests fail at 498984f on purpose: each asserts the correct result.
++
++// Shapes the fix handles as its twin does, plus the pre-existing limitations (commented MISS) and
++// the pre-existing false positive of a slot defined inside a loop (pinned with a want).
++func TestAdvC7ddDefended(t *testing.T) {
++	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddadv")
++}
++
++// BREAK (new false positives): nothing in errc7ddadvfp is reported on 90fa6e9, and in every
++// function the Close is of a resource that was not written. The package has no want markers.
++//
++//	callReset, ptrArgReset, ptrArgResetLocal, otherHolderParam: a call or an unknown alias replaces
++//	the resource, so the path's written flag is stale (the path slot is reset only by a store the
++//	function itself makes, lower.go:1276).
++//	holderReassignedCaptured: loads of a captured holder variable share one root cell, so a write
++//	through the old holder is carried to the new one (valueKeyOf, lower.go:320).
++//	escapeBranch, escapeReplaced: seedEscapedCloses seeds from bindingMayBeWritten, which is
++//	flow-insensitive (closureeffects.go, bindingMayBeWritten).
++//	deferInClosureThenWrite: a defer inside a closure is replayed as a deferred close of the
++//	creator, judged at the creator's exit (replayClosureEffects, closureeffects.go:295, IsDefer: isDefer || c.deferred).
++//	compareIsNotARun, registeredThenClosed: writes are replayed at every use of the closure value.
++func TestAdvC7ddBreakNewFalsePositives(t *testing.T) {
++	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddadvfp")
++}
++
++// BREAK (new misses): each ERR005 here is reported on 90fa6e9 and silent at 498984f. The alias
++// holds the written resource; the later store to the field or pointer resets the path slot that
++// the alias's load is keyed to (lower.go, the Store case, and resourceSlot's valueKey). The plain
++// twin aliasThenReplaceTwin is still reported.
++func TestAdvC7ddBreakNewMiss(t *testing.T) {
++	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddadvmiss")
++}
++
++// BREAK (gap, not new): 90fa6e9 is silent here too, but the fix's claim is that a resource reached
++// through a field path is tracked, and a field of a field is not: valueKeyOf does not flatten a
++// chain of FieldAddr, so each use has its own root.
++func TestAdvC7ddBreakGapNestedField(t *testing.T) {
++	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddadvgap")
++}
++
++// BREAK (duplicate diagnostics): a deferred closure that writes and then closes reports the Close
++// from the closure's own flow and again, as a deferred close, from the creator's replay.
++func TestAdvC7ddBreakDuplicateDeferredClose(t *testing.T) {
++	analysistest.Run(t, analysistest.TestData(), errcheck.Analyzer, "errc7ddadvdup")
++}
++
++// diagnosticsOf runs the analyzer on the packages and returns every diagnostic, in the order the
++// framework reports them, as "file:line:col: message".
++func diagnosticsOf(t *testing.T, pkgs ...string) []string {
++	t.Helper()
++	var out []string
++	for _, r := range analysistest.Run(&recordT{}, analysistest.TestData(), errcheck.Analyzer, pkgs...) {
++		for _, d := range r.Diagnostics {
++			p := r.Pass.Fset.Position(d.Pos)
++			out = append(out, fmt.Sprintf("%s:%d:%d: %s", filepath.Base(p.Filename), p.Line, p.Column, d.Message))
++		}
++	}
++	return out
++}
++
++// Ten runs give identical diagnostics in identical order, and the diagnostics equal the golden
++// list, which both engines (cgo/Rust and CGO_ENABLED=0/oracle) must reproduce byte for byte.
++func TestAdvC7ddDeterminismAndEngineParity(t *testing.T) {
++	pkgs := []string{"errc7ddadv", "errc7ddadvfp", "errc7ddadvmiss", "errc7ddadvgap", "errc7ddadvdup"}
++	first := diagnosticsOf(t, pkgs...)
++	if len(first) == 0 {
++		t.Fatal("no diagnostics")
++	}
++	for i := 1; i < 10; i++ {
++		got := diagnosticsOf(t, pkgs...)
++		if strings.Join(got, "\n") != strings.Join(first, "\n") {
++			t.Fatalf("run %d differs from run 0:\n%s\n---\n%s", i, strings.Join(got, "\n"), strings.Join(first, "\n"))
++		}
++	}
++	sorted := append([]string(nil), first...)
++	sort.Strings(sorted)
++	golden := filepath.Join(analysistest.TestData(), "adv_c7dd.golden")
++	want, err := os.ReadFile(golden)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := strings.Join(sorted, "\n") + "\n"; got != string(want) {
++		t.Fatalf("diagnostics differ from %s:\n%s", golden, got)
++	}
++}
+diff --git a/passes/errcheck/testdata/adv_c7dd.golden b/passes/errcheck/testdata/adv_c7dd.golden
+new file mode 100644
+index 0000000..1bec879
+--- /dev/null
++++ b/passes/errcheck/testdata/adv_c7dd.golden
+@@ -0,0 +1,88 @@
++a.go:101:2: ERR005: Close() on writable resource w discards flush error
++a.go:104:2: ERR005: Close() on writable resource e discards flush error
++a.go:111:2: ERR005: Close() on writable resource e discards flush error
++a.go:116:2: ERR005: Close() on writable resource w discards flush error
++a.go:11:3: ERR005: Close() on writable resource w discards flush error
++a.go:11:3: ERR005: deferred Close() on writable resource w discards flush error
++a.go:128:2: ERR005: Close() on writable resource w discards flush error
++a.go:144:2: ERR005: Close() on writable resource w discards flush error
++a.go:156:2: ERR005: Close() on writable resource h.w discards flush error
++a.go:161:2: ERR005: Close() on writable resource h.w discards flush error
++a.go:166:2: ERR005: Close() on writable resource w discards flush error
++a.go:17:2: ERR005: Close() on writable resource w discards flush error
++a.go:20:2: ERR005: Close() on writable resource h.w discards flush error
++a.go:214:4: ERR005: Close() on writable resource w discards flush error
++a.go:226:31: ERR003: assignment to 'err' overwrites an earlier unchecked error
++a.go:235:9: ERR003: assignment to 'err' overwrites an earlier unchecked error
++a.go:23:2: ERR005: Close() on writable resource a discards flush error
++a.go:24:4: ERR005: Close() on writable resource w discards flush error
++a.go:24:4: ERR005: deferred Close() on writable resource w discards flush error
++a.go:262:19: ERR003: assignment to 'err' overwrites an earlier unchecked error
++a.go:27:2: ERR005: Close() on writable resource h.w discards flush error
++a.go:298:13: ERR003: assignment to 'err' overwrites an earlier unchecked error
++a.go:314:14: ERR003: assignment to 'err' overwrites an earlier unchecked error
++a.go:324:2: ERR002: companion value from companion value is used after discarding its error with '_'
++a.go:32:3: ERR005: deferred Close() on writable resource w discards flush error
++a.go:336:19: ERR003: assignment to 'err' overwrites an earlier unchecked error
++a.go:33:2: ERR005: Close() on writable resource w discards flush error
++a.go:352:10: ERR003: assignment to 'err' overwrites an earlier unchecked error
++a.go:367:2: ERR005: Close() on writable resource w discards flush error
++a.go:374:2: ERR005: Close() on writable resource w discards flush error
++a.go:382:2: ERR005: Close() on writable resource w discards flush error
++a.go:387:18: ERR005: Close() on writable resource w discards flush error
++a.go:393:2: ERR005: Close() on writable resource w discards flush error
++a.go:39:2: ERR005: Close() on writable resource h.w discards flush error
++a.go:39:3: ERR005: Close() on writable resource w discards flush error
++a.go:405:2: ERR005: Close() on writable resource w discards flush error
++a.go:40:2: ERR005: Close() on writable resource h.w discards flush error
++a.go:412:2: ERR005: Close() on writable resource w discards flush error
++a.go:420:2: ERR005: Close() on writable resource w discards flush error
++a.go:428:2: ERR005: Close() on writable resource w discards flush error
++a.go:434:2: ERR005: Close() on writable resource w discards flush error
++a.go:443:2: ERR005: deferred Close() on writable resource w discards flush error
++a.go:452:2: ERR005: deferred Close() on writable resource w discards flush error
++a.go:459:3: ERR005: Close() on writable resource w discards flush error
++a.go:45:2: ERR005: Close() on writable resource h.w discards flush error
++a.go:46:3: ERR005: Close() on writable resource w discards flush error
++a.go:46:3: ERR005: deferred Close() on writable resource w discards flush error
++a.go:474:18: ERR005: deferred Close() on writable resource w discards flush error
++a.go:482:3: ERR005: deferred Close() on writable resource w discards flush error
++a.go:494:2: ERR005: deferred Close() on writable resource w discards flush error
++a.go:504:2: ERR005: deferred Close() on writable resource w discards flush error
++a.go:51:2: ERR005: Close() on writable resource w discards flush error
++a.go:530:2: ERR005: Close() on writable resource w discards flush error
++a.go:539:2: ERR005: Close() on writable resource w discards flush error
++a.go:548:2: ERR005: Close() on writable resource w discards flush error
++a.go:54:3: ERR005: deferred Close() on writable resource w discards flush error
++a.go:554:3: ERR005: Close() on writable resource w discards flush error
++a.go:55:2: ERR005: Close() on writable resource h.w discards flush error
++a.go:561:3: ERR005: Close() on writable resource w discards flush error
++a.go:57:2: ERR005: Close() on writable resource h.w discards flush error
++a.go:588:3: ERR005: Close() on writable resource w discards flush error
++a.go:597:3: ERR005: Close() on writable resource w discards flush error
++a.go:608:2: ERR005: Close() on writable resource w discards flush error
++a.go:612:2: ERR005: deferred Close() on writable resource w discards flush error
++a.go:63:2: ERR005: Close() on writable resource w discards flush error
++a.go:65:18: ERR005: Close() on writable resource w discards flush error
++a.go:684:18: ERR005: Close() on writable resource w discards flush error
++a.go:694:11: ERR005: deferred Close() on writable resource w discards flush error
++a.go:699:17: ERR005: deferred Close() on writable resource w discards flush error
++a.go:715:2: ERR001: error return from cl() is discarded without handling (bind and check err, or assign to _ to discard explicitly)
++a.go:729:2: ERR005: Close() on writable resource h.w discards flush error
++a.go:72:18: ERR005: Close() on writable resource w discards flush error
++a.go:77:17: ERR005: deferred Close() on writable resource w discards flush error
++a.go:93:2: ERR005: Close() on writable resource b discards flush error
++a.go:93:2: ERR005: Close() on writable resource w discards flush error
++a.go:99:2: ERR005: Close() on writable resource e discards flush error
++b.go:100:3: ERR005: Close() on writable resource w discards flush error
++b.go:13:3: ERR005: Close() on writable resource w discards flush error
++b.go:22:2: ERR005: Close() on writable resource w discards flush error
++b.go:28:12: ERR005: Close() on writable resource w discards flush error
++b.go:34:2: ERR005: Close() on writable resource w discards flush error
++b.go:46:2: ERR005: Close() on writable resource h.w discards flush error
++b.go:57:2: ERR005: Close() on writable resource w discards flush error
++b.go:68:2: ERR005: Close() on writable resource w discards flush error
++b.go:74:2: ERR005: Close() on writable resource w discards flush error
++b.go:81:16: ERR005: Close() on writable resource w discards flush error
++b.go:90:17: ERR005: Close() on writable resource w discards flush error
++b.go:99:3: ERR005: Close() on writable resource h.w discards flush error
+diff --git a/passes/errcheck/testdata/src/errc7ddadv/a.go b/passes/errcheck/testdata/src/errc7ddadv/a.go
+new file mode 100644
+index 0000000..fefd5d2
+--- /dev/null
++++ b/passes/errcheck/testdata/src/errc7ddadv/a.go
+@@ -0,0 +1,743 @@
++package errc7ddadv
++
++import (
++	"io"
++	"iter"
++	"os"
++	"slices"
++	"sort"
++)
++
++type H struct{ w io.WriteCloser }
++type H2 struct {
++	H
++	n int
++}
++type EW struct{ io.WriteCloser }
++type EF struct{ *os.File }
++type IW interface {
++	Write([]byte) (int, error)
++	Close() error
++}
++type HI struct{ w IW }
++type G[T io.WriteCloser] struct{ w T }
++
++func open() io.WriteCloser { return nil }
++func g() error             { return nil }
++func mk() []byte           { return nil }
++func must(error) []byte    { return nil }
++
++func seq(n int) iter.Seq[int] {
++	return func(yield func(int) bool) {
++		for i := range n {
++			if !yield(i) {
++				return
++			}
++		}
++	}
++}
++
++// ================= 1. access paths: aliasing =================
++
++func ap01Alias(h *H) {
++	a := h.w
++	_, _ = a.Write(nil)
++	h.w.Close() // want "ERR005"
++}
++
++func ap01AliasTwin(w io.WriteCloser) {
++	a := w
++	_, _ = a.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++func ap02PtrAlias(h *H) {
++	p := &h.w
++	_, _ = (*p).Write(nil)
++	h.w.Close() // want "ERR005"
++}
++
++func ap02PtrAliasTwin(w io.WriteCloser) {
++	p := &w
++	_, _ = (*p).Write(nil)
++	w.Close() // want "ERR005"
++}
++
++// A reassignment through the alias is a store to the same path: the written flag is reset.
++func ap03StoreThroughAlias(h *H) {
++	p := &h.w
++	_, _ = h.w.Write(nil)
++	*p = open()
++	h.w.Close()
++}
++
++func ap03StoreThroughAliasTwin(w io.WriteCloser) {
++	p := &w
++	_, _ = w.Write(nil)
++	*p = open()
++	w.Close()
++}
++
++// Two holders share one resource: the write and the Close are on different paths.
++// MISS (pre-existing: 90fa6e9 also reports nothing).
++func ap04TwoHolders(w io.WriteCloser, h1, h2 *H) {
++	h1.w = w
++	h2.w = w
++	_, _ = h1.w.Write(nil)
++	h2.w.Close()
++}
++
++func ap04TwoHoldersTwin(w io.WriteCloser) {
++	a, b := w, w
++	_, _ = a.Write(nil)
++	b.Close() // want "ERR005"
++}
++
++// Embedded fields and promoted methods.
++func ap05EmbeddedIface(e *EW) {
++	_, _ = e.Write(nil)
++	e.Close() // want "ERR005"
++}
++
++func ap05EmbeddedFile(e *EF) {
++	_, _ = e.Write(nil)
++	e.Close() // want "ERR005"
++}
++
++func ap05EmbeddedValue() {
++	var e EW
++	e.WriteCloser = open()
++	_, _ = e.Write(nil)
++	e.Close() // want "ERR005"
++}
++
++func ap05EmbeddedTwin(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++// Map values and slice elements.
++func ap06MapElem(m map[string]io.WriteCloser, k string) {
++	_, _ = m[k].Write(nil)
++	m[k].Close() // MISS (pre-existing)
++}
++
++func ap06MapElemTwin(m map[string]io.WriteCloser, k string) {
++	w := m[k]
++	_, _ = w.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++func ap06SliceElem(s []io.WriteCloser, i int) {
++	_, _ = s[i].Write(nil)
++	s[i].Close() // MISS (pre-existing)
++}
++
++func ap06SliceElemField(s []*H, i int) {
++	_, _ = s[i].w.Write(nil)
++	s[i].w.Close() // MISS (pre-existing)
++}
++
++func ap06SliceElemTwin(s []io.WriteCloser, i int) {
++	w := s[i]
++	_, _ = w.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++// Distinct elements are not the written one.
++func ap06SliceOther(s []*H) {
++	_, _ = s[0].w.Write(nil)
++	s[1].w.Close()
++}
++
++// Interface-typed fields and generic holders.
++func ap07IfaceField(h *HI) {
++	_, _ = h.w.Write(nil)
++	h.w.Close() // want "ERR005"
++}
++
++func ap07Generic[T io.WriteCloser](h *G[T]) {
++	_, _ = h.w.Write(nil)
++	h.w.Close() // want "ERR005"
++}
++
++func ap07GenericTwin[T io.WriteCloser](w T) {
++	_, _ = w.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++func ap07GenericUse() {
++	ap07Generic(&G[*os.File]{})
++}
++
++// Different fields of one holder are different resources.
++type two struct{ a, b io.WriteCloser }
++
++func ap08OtherField(t *two) {
++	_, _ = t.a.Write(nil)
++	t.b.Close()
++}
++
++// ================= 1b. reassignment the path cannot see =================
++
++// The holder replaces its resource inside a method: the Close is of a fresh, unwritten resource.
++// The holder variable itself is reassigned between the write and the Close: another resource.
++func ap10HolderReassigned(h, other *H) {
++	_, _ = h.w.Write(nil)
++	h = other
++	h.w.Close()
++}
++
++func ap10HolderReassignedTwin(w, other io.WriteCloser) {
++	_, _ = w.Write(nil)
++	w = other
++	w.Close()
++}
++
++// A loop over holders: each holder is written or closed, never both.
++func ap11LoopHolders(hs []*H, done []bool) {
++	for i, h := range hs {
++		if done[i] {
++			h.w.Close()
++		} else {
++			_, _ = h.w.Write(nil)
++		}
++	}
++}
++
++// FALSE POSITIVE, pre-existing on 90fa6e9 and pinned here: the flag of a slot defined inside the
++// loop survives the back edge, so the Close of one element sees the write of another. The field
++// form above is clean.
++func ap11LoopHoldersTwin(ws []io.WriteCloser, done []bool) {
++	for i, w := range ws {
++		if done[i] {
++			w.Close() // want "ERR005"
++		} else {
++			_, _ = w.Write(nil)
++		}
++	}
++}
++
++// ================= 2. ERR003 blank =================
++
++func e3SameLine(w io.Writer) error {
++	var err error
++	for i := 0; i < 2; i++ {
++		_, _ = w.Write(nil); err = g() // want "ERR003"
++	}
++	return err
++}
++
++func e3SameLineTwin(w io.Writer) error {
++	var err error
++	_, _ = w.Write(nil)
++	err = g()
++	err = g() // want "ERR003"
++	return err
++}
++
++func e3Nested(w io.Writer) {
++	for i := 0; i < 2; i++ {
++		_, _ = w.Write(must(g()))
++	}
++}
++
++func e3NestedArgs(w io.Writer) {
++	for i := 0; i < 2; i++ {
++		_, _ = w.Write(mk())
++	}
++}
++
++func e3MultiLine(w io.Writer) {
++	for i := 0; i < 2; i++ {
++		_, _ = w.Write(
++			nil,
++		)
++	}
++}
++
++func e3MultiLineReal(w io.Writer) {
++	var err error
++	for i := 0; i < 2; i++ {
++		_, err = w.Write( // want "ERR003"
++			nil,
++		)
++	}
++	_ = err
++}
++
++func e3ClosureInLoop(w io.Writer) {
++	for i := 0; i < 2; i++ {
++		func() { _, _ = w.Write(nil) }()
++	}
++}
++
++func e3ClosureInLoopReal(w io.Writer) {
++	var err error
++	for i := 0; i < 2; i++ {
++		func() { _, err = w.Write(nil) }() // not reported on 90fa6e9 either
++	}
++	_ = err
++}
++
++func e3Generic[T io.Writer](w T) {
++	for i := 0; i < 2; i++ {
++		_, _ = w.Write(nil)
++	}
++}
++
++func e3GenericFunc[T any](f func() (T, error)) {
++	for i := 0; i < 2; i++ {
++		_, _ = f()
++	}
++}
++
++func e3GenericReal[T any](f func() (T, error)) {
++	var err error
++	for i := 0; i < 2; i++ {
++		_, err = f() // want "ERR003"
++	}
++	_ = err
++}
++
++func e3MethodValue(w io.Writer) {
++	wr := w.Write
++	for i := 0; i < 2; i++ {
++		_, _ = wr(nil)
++	}
++}
++
++func e3MethodValueReal(w io.Writer) {
++	wr := w.Write
++	var err error
++	for i := 0; i < 2; i++ {
++		_, err = wr(nil) // want "ERR003"
++	}
++	_ = err
++}
++
++func e3BoundN(w io.Writer) int {
++	var n int
++	for i := 0; i < 2; i++ {
++		n, _ = w.Write(nil)
++	}
++	return n // want "ERR002"
++}
++
++func e3TwoSingles() {
++	for i := 0; i < 2; i++ {
++		_, _ = g(), g()
++	}
++}
++
++func e3RealOverwrite(w io.Writer) {
++	var err error
++	for i := 0; i < 2; i++ {
++		_, err = w.Write(nil) // want "ERR003"
++	}
++	_ = err
++}
++
++func e3IfInit(w io.Writer) {
++	for i := 0; i < 2; i++ {
++		if _, _ = w.Write(nil); i > 0 {
++			continue
++		}
++	}
++}
++
++func e3Plain(w io.Writer) error {
++	var err error
++	for i := 0; i < 2; i++ {
++		err = g() // want "ERR003"
++	}
++	return err
++}
++
++// ================= 3. closure replay =================
++
++func c01LoopCreated(w io.WriteCloser) {
++	var fs []func()
++	for i := 0; i < 2; i++ {
++		fs = append(fs, func() { _, _ = w.Write(nil) })
++	}
++	for _, f := range fs {
++		f()
++	}
++	w.Close() // want "ERR005"
++}
++
++func c01LoopCreatedTwin(w io.WriteCloser) {
++	for i := 0; i < 2; i++ {
++		_, _ = w.Write(nil)
++	}
++	w.Close() // want "ERR005"
++}
++
++type cbHolder struct{ cb func() }
++
++func c02Field(w io.WriteCloser, c *cbHolder) {
++	c.cb = func() { _, _ = w.Write(nil) }
++	c.cb()
++	w.Close() // want "ERR005"
++}
++
++func c02FieldCloser(w io.WriteCloser, c *cbHolder) {
++	_, _ = w.Write(nil)
++	c.cb = func() { w.Close() } // want "ERR005"
++	c.cb()
++}
++
++func c02FieldCloserTwin(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++func c03Recursive(w io.WriteCloser) {
++	var f func(n int)
++	f = func(n int) {
++		if n > 0 {
++			_, _ = w.Write(nil)
++			f(n - 1)
++		}
++	}
++	f(2)
++	w.Close() // want "ERR005"
++}
++
++func c03RecursiveTwin(w io.WriteCloser) {
++	for n := 2; n > 0; n-- {
++		_, _ = w.Write(nil)
++	}
++	w.Close() // want "ERR005"
++}
++
++func c04SortSlice(w io.WriteCloser, s []int) {
++	sort.Slice(s, func(i, j int) bool {
++		_, _ = w.Write(nil)
++		return s[i] < s[j]
++	})
++	w.Close() // want "ERR005"
++}
++
++func c04SortFunc(w io.WriteCloser, s []int) {
++	slices.SortFunc(s, func(a, b int) int {
++		_, _ = w.Write(nil)
++		return a - b
++	})
++	w.Close() // want "ERR005"
++}
++
++func c04SortSliceTwin(w io.WriteCloser, s []int) {
++	_, _ = w.Write(nil)
++	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
++	w.Close() // want "ERR005"
++}
++
++func c04SortSliceNoWrite(w io.WriteCloser, s []int) {
++	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
++	w.Close()
++}
++
++func c05GoWrite(w io.WriteCloser, done chan struct{}) {
++	defer w.Close() // want "ERR005"
++	go func() {
++		_, _ = w.Write(nil)
++		close(done)
++	}()
++	<-done
++}
++
++func c05GoWriteTwin(w io.WriteCloser) {
++	defer w.Close() // want "ERR005"
++	_, _ = w.Write(nil)
++}
++
++func c05GoClose(w io.WriteCloser, done chan struct{}) {
++	_, _ = w.Write(nil)
++	go func() {
++		w.Close() // want "ERR005"
++		close(done)
++	}()
++	<-done
++}
++
++func c05GoNoWrite(w io.WriteCloser, done chan struct{}) {
++	defer w.Close()
++	go func() { close(done) }()
++	<-done
++}
++
++func c06DeferLoop() {
++	for i := 0; i < 2; i++ {
++		w := open()
++		defer func() { w.Close() }() // want "ERR005"
++		_, _ = w.Write(nil)
++	}
++}
++
++func c06DeferLoopTwin() {
++	for i := 0; i < 2; i++ {
++		w := open()
++		defer w.Close() // want "ERR005"
++		_, _ = w.Write(nil)
++	}
++}
++
++func c06DeferLoopNoWrite(ws []io.WriteCloser) {
++	for _, w := range ws {
++		defer func() { w.Close() }()
++	}
++}
++
++func c07RangeBreak(w io.WriteCloser) {
++	defer w.Close() // want "ERR005"
++	for i := range seq(3) {
++		if i == 1 {
++			break
++		}
++		_, _ = w.Write(nil)
++	}
++}
++
++func c07RangeBreakTwin(w io.WriteCloser) {
++	defer w.Close() // want "ERR005"
++	for i := 0; i < 3; i++ {
++		if i == 1 {
++			break
++		}
++		_, _ = w.Write(nil)
++	}
++}
++
++func c07RangeReturn(w io.WriteCloser) error {
++	for i := range seq(3) {
++		if i == 1 {
++			return nil
++		}
++		_, _ = w.Write(nil)
++	}
++	return w.Close() // ok: checked
++}
++
++func c07RangeReturnDrop(w io.WriteCloser) {
++	for i := range seq(3) {
++		if i == 1 {
++			return
++		}
++		_, _ = w.Write(nil)
++	}
++	w.Close() // want "ERR005"
++}
++
++func c07Nested(w io.WriteCloser) {
++	for range seq(2) {
++		for range seq(2) {
++			_, _ = w.Write(nil)
++		}
++	}
++	w.Close() // want "ERR005"
++}
++
++func c07NestedTwin(w io.WriteCloser) {
++	for range 2 {
++		for range 2 {
++			_, _ = w.Write(nil)
++		}
++	}
++	w.Close() // want "ERR005"
++}
++
++func c07CloseInBody(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	for range seq(1) {
++		w.Close() // want "ERR005"
++	}
++}
++
++func c07CloseInBodyTwin(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	for range 1 {
++		w.Close() // want "ERR005"
++	}
++}
++
++func c07CloseInBodyNoWrite(w io.WriteCloser) {
++	for range seq(1) {
++		w.Close()
++	}
++}
++
++func c07WriteAfterClose(w io.WriteCloser) {
++	for range seq(1) {
++		w.Close()
++	}
++	_, _ = w.Write(nil)
++}
++
++func c07CloseBeforeWriteLoop(w io.WriteCloser) {
++	w.Close()
++	for range seq(1) {
++		_, _ = w.Write(nil)
++	}
++}
++
++func c08WriteAndCloseTwice(w io.WriteCloser) {
++	cl := func() {
++		_, _ = w.Write(nil)
++		w.Close() // want "ERR005"
++	}
++	cl()
++	cl()
++}
++
++func c08WriteAndCloseOnce(w io.WriteCloser) {
++	func() {
++		_, _ = w.Write(nil)
++		w.Close() // want "ERR005"
++	}()
++}
++
++func c09Panic(w io.WriteCloser, c bool) {
++	func() {
++		if c {
++			panic("x")
++		}
++		_, _ = w.Write(nil)
++	}()
++	w.Close() // want "ERR005"
++}
++
++func c09Recover(w io.WriteCloser) {
++	defer w.Close() // want "ERR005"
++	defer func() {
++		recover()
++		_, _ = w.Write(nil)
++	}()
++}
++
++// The closure is created before the Close but only runs after it.
++func c10WriteAfterClose(w io.WriteCloser) {
++	f := func() { _, _ = w.Write(nil) }
++	w.Close()
++	f()
++}
++
++func c10WriteAfterCloseTwin(w io.WriteCloser) {
++	w.Close()
++	_, _ = w.Write(nil)
++}
++
++// Branches: the writing closure runs only on one side.
++func c11Branch(w io.WriteCloser, fast bool) {
++	write := func() { _, _ = w.Write(nil) }
++	if fast {
++		write()
++	} else {
++		w.Close()
++	}
++}
++
++func c11BranchTwin(w io.WriteCloser, fast bool) {
++	if fast {
++		_, _ = w.Write(nil)
++	} else {
++		w.Close()
++	}
++}
++
++// The creator replaces the resource after the closure ran.
++func c12ReplaceAfter(w io.WriteCloser) {
++	f := func() { _, _ = w.Write(nil) }
++	f()
++	w = open()
++	w.Close()
++}
++
++func c12ReplaceAfterTwin(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	w = open()
++	w.Close()
++}
++
++// Closures over different holders.
++func c13OtherResource(a, b io.WriteCloser) {
++	func() { _, _ = a.Write(nil) }()
++	b.Close()
++}
++
++func c13OtherResourceField(a, b *H) {
++	func() { _, _ = a.w.Write(nil) }()
++	b.w.Close()
++}
++
++func c13SameHolderFields(h *two) {
++	func() { _, _ = h.a.Write(nil) }()
++	h.b.Close()
++}
++
++// ================= more =================
++
++// Written, then the closure is returned: it closes a written resource.
++func s01EscapeWritten(w io.WriteCloser) func() {
++	_, _ = w.Write(nil)
++	return func() { w.Close() } // want "ERR005"
++}
++
++func c14DeferInClosureThenWriteTwin(w io.WriteCloser) {
++	w.Close()
++	_, _ = w.Write(nil)
++}
++
++func c14DeferInClosureAfterWrite(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	func() { defer w.Close() }() // want "ERR005"
++}
++
++// A write between two calls of a closure that closes by defer.
++func c14DeferTwice(w io.WriteCloser) {
++	cl := func() { defer w.Close() } // want "ERR005"
++	cl()
++	_, _ = w.Write(nil)
++	cl() // closes a written resource
++}
++
++// Bound method values.
++func b01BoundWrite(w io.WriteCloser) {
++	wr := w.Write
++	_, _ = wr(nil)
++	w.Close() // MISS (pre-existing): a bound method value is not a write of w
++}
++
++func b01BoundClose(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	cl := w.Close
++	cl() // want "ERR001"
++}
++
++func b01BoundWriteUnused(w io.WriteCloser) {
++	wr := w.Write
++	_ = wr
++	w.Close()
++}
++
++// Nested struct fields (a chain of field addresses).
++type outer struct{ in H }
++
++func ap14Flat(h *H) {
++	_, _ = h.w.Write(nil)
++	h.w.Close() // want "ERR005"
++}
++
++// Discards of calls that are not an error-returning Write.
++func e3Create() {
++	for i := 0; i < 2; i++ {
++		_, _ = os.Create("x")
++	}
++}
++
++func e3Copy(r io.Reader) {
++	for i := 0; i < 2; i++ {
++		_, _ = io.Copy(io.Discard, r)
++	}
++}
+diff --git a/passes/errcheck/testdata/src/errc7ddadv/b.go b/passes/errcheck/testdata/src/errc7ddadv/b.go
+new file mode 100644
+index 0000000..1c5b011
+--- /dev/null
++++ b/passes/errcheck/testdata/src/errc7ddadv/b.go
+@@ -0,0 +1,102 @@
++package errc7ddadv
++
++import (
++	"io"
++	"sync"
++)
++
++// Package-level closures and initializers.
++var global = func() func() {
++	var w io.WriteCloser
++	return func() {
++		_, _ = w.Write(nil)
++		w.Close() // want "ERR005"
++	}
++}()
++
++// A closure two layers down writes, the creator closes; the middle layer only passes it on.
++func w01TwoLayers(w io.WriteCloser) {
++	func() {
++		func() { _, _ = w.Write(nil) }()
++	}()
++	w.Close() // want "ERR005"
++}
++
++func w01TwoLayersCloseInside(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	func() {
++		func() { w.Close() }() // want "ERR005"
++	}()
++}
++
++func w01TwoLayersTwin(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++// A closure over a holder reached through a field, written in a goroutine, closed after Wait.
++func w02Goroutine(h *H) {
++	var wg sync.WaitGroup
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		_, _ = h.w.Write(nil)
++	}()
++	wg.Wait()
++	h.w.Close() // want "ERR005"
++}
++
++func w02GoroutineTwin(w io.WriteCloser) {
++	var wg sync.WaitGroup
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		_, _ = w.Write(nil)
++	}()
++	wg.Wait()
++	w.Close() // want "ERR005"
++}
++
++// The closure takes the resource as a parameter: nothing is captured.
++func w03Param(w io.WriteCloser) {
++	func(x io.WriteCloser) { _, _ = x.Write(nil) }(w)
++	w.Close()
++}
++
++func w03ParamTwin(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++// Generic closure over a type parameter.
++func w04Generic[T io.WriteCloser](w T) {
++	func() { _, _ = w.Write(nil) }()
++	w.Close() // want "ERR005"
++}
++
++// Two closures write, a third closes, all called in order.
++func w06ThreeClosures(w io.WriteCloser) {
++	a := func() { _, _ = w.Write(nil) }
++	b := func() { _, _ = w.Write(nil) }
++	c := func() { w.Close() } // want "ERR005"
++	a()
++	b()
++	c()
++}
++
++// The closure that closes is also called from a second closure.
++func w07CloseCalledFromClosure(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	cl := func() { w.Close() } // want "ERR005"
++	func() { cl() }()
++}
++
++// The closure closes a field and a variable, written in the creator.
++func w08TwoCloses(h *H, w io.WriteCloser) {
++	_, _ = h.w.Write(nil)
++	_, _ = w.Write(nil)
++	func() {
++		h.w.Close() // want "ERR005"
++		w.Close()   // want "ERR005"
++	}()
++}
+diff --git a/passes/errcheck/testdata/src/errc7ddadvdup/a.go b/passes/errcheck/testdata/src/errc7ddadvdup/a.go
+new file mode 100644
+index 0000000..ec640dc
+--- /dev/null
++++ b/passes/errcheck/testdata/src/errc7ddadvdup/a.go
+@@ -0,0 +1,56 @@
++package errc7ddadvdup
++
++import "io"
++
++// One Close statement, one diagnostic. d1, d2 and d5 (a deferred closure that writes and then
++// closes) report the Close twice at 498984f: once from the closure's own flow, once from the replay of
++// its Close as a deferred close in the creator. d3, d4 and d6 report once.
++func d1(w io.WriteCloser) {
++	defer func() {
++		_, _ = w.Write(nil)
++		w.Close() // want "ERR005"
++	}()
++}
++
++func d1Twin(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	w.Close() // want "ERR005"
++}
++
++func d2(ws []io.WriteCloser) {
++	for _, w := range ws {
++		defer func() {
++			_, _ = w.Write(nil)
++			w.Close() // want "ERR005"
++		}()
++	}
++}
++
++func d3(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	defer func() {
++		w.Close() // want "ERR005"
++	}()
++}
++
++func d4(w io.WriteCloser) {
++	func() {
++		_, _ = w.Write(nil)
++		w.Close() // want "ERR005"
++	}()
++}
++
++func d5(w io.WriteCloser) {
++	cl := func() {
++		_, _ = w.Write(nil)
++		w.Close() // want "ERR005"
++	}
++	defer cl()
++}
++
++func d6(w io.WriteCloser) {
++	defer func() {
++		_, _ = w.Write(nil)
++		defer w.Close() // want "ERR005"
++	}()
++}
+diff --git a/passes/errcheck/testdata/src/errc7ddadvfp/a.go b/passes/errcheck/testdata/src/errc7ddadvfp/a.go
+new file mode 100644
+index 0000000..b7e9679
+--- /dev/null
++++ b/passes/errcheck/testdata/src/errc7ddadvfp/a.go
+@@ -0,0 +1,108 @@
++package errc7ddadvfp
++
++import "io"
++
++type H struct{ w io.WriteCloser }
++
++func open() io.WriteCloser { return nil }
++
++func (h *H) reset() { h.w = open() }
++
++func swapW(p *io.WriteCloser) { *p = open() }
++
++// NEW FALSE POSITIVES: nothing here is reported on 90fa6e9, and in every function the Close is of
++// a resource that was not written.
++
++// A method replaces the resource: the call is not a store the path can see.
++func callReset(h *H) {
++	_, _ = h.w.Write(nil)
++	h.reset()
++	h.w.Close()
++}
++
++// The same through a pointer to the field; the plain twin (a local whose address escapes) too.
++func ptrArgReset(h *H) {
++	_, _ = h.w.Write(nil)
++	swapW(&h.w)
++	h.w.Close()
++}
++
++func ptrArgResetLocal(w io.WriteCloser) {
++	_, _ = w.Write(nil)
++	swapW(&w)
++	w.Close()
++}
++
++// An unknown alias of the holder replaces the resource.
++func otherHolderParam(h, alias *H) {
++	_, _ = h.w.Write(nil)
++	alias.w = open()
++	h.w.Close()
++}
++
++// The holder variable is reassigned. When it is a register (not captured) the twin is clean ...
++func holderReassigned(h, other *H) {
++	_, _ = h.w.Write(nil)
++	h = other
++	h.w.Close()
++}
++
++// ... when another closure captures it, its loads share one root and the old write is carried over.
++func holderReassignedCaptured(h, other *H) {
++	f := func() { _ = h }
++	_, _ = h.w.Write(nil)
++	h = other
++	h.w.Close()
++	f()
++}
++
++// A closure that closes is returned on the one path where nothing was written.
++func escapeBranch(w io.WriteCloser, c bool) func() {
++	if c {
++		_, _ = w.Write(nil)
++		return nil
++	}
++	return func() { w.Close() }
++}
++
++// A closure that closes is returned after the resource was written and replaced.
++func escapeReplaced(w io.WriteCloser) func() {
++	_, _ = w.Write(nil)
++	w = open()
++	return func() { w.Close() }
++}
++
++// A closure that closes by defer runs the Close when it returns, before the write that follows.
++func deferInClosureThenWrite(w io.WriteCloser) {
++	cl := func() { defer w.Close() }
++	cl()
++	_, _ = w.Write(nil)
++}
++
++func deferInClosureThenWriteTwin(w io.WriteCloser) {
++	w.Close()
++	_, _ = w.Write(nil)
++}
++
++// A write replayed at a use that does not run the closure.
++func compareIsNotARun(w io.WriteCloser) {
++	f := func() { _, _ = w.Write(nil) }
++	if f == nil {
++		return
++	}
++	w.Close()
++}
++
++type cbHolder struct{ cb func() }
++
++// The closure is stored before the Close and called after it: the write is after the Close.
++func registeredThenClosed(w io.WriteCloser, c *cbHolder) {
++	c.cb = func() { _, _ = w.Write(nil) }
++	w.Close()
++	c.cb()
++}
++
++func registeredThenClosedTwin(w io.WriteCloser) {
++	w.Close()
++	_, _ = w.Write(nil)
++}
+diff --git a/passes/errcheck/testdata/src/errc7ddadvgap/a.go b/passes/errcheck/testdata/src/errc7ddadvgap/a.go
+new file mode 100644
+index 0000000..abf3d3d
+--- /dev/null
++++ b/passes/errcheck/testdata/src/errc7ddadvgap/a.go
+@@ -0,0 +1,40 @@
++package errc7ddadvgap
++
++import "io"
++
++type H struct{ w io.WriteCloser }
++
++type outer struct{ in H }
++
++type H2 struct {
++	H
++	n int
++}
++
++func open() io.WriteCloser { return nil }
++
++// GAP (not a regression: 90fa6e9 reports nothing here either). A field of a field is a chain of
++// field addresses, and the chain is not flattened: `&o.in` is a different SSA value at each use, so
++// the two uses of o.in.w get different roots and different written-flag slots. The flat twin
++// (h.w) is reported.
++func nested(o *outer) {
++	_, _ = o.in.w.Write(nil)
++	o.in.w.Close() // want "ERR005"
++}
++
++func nestedValue() {
++	var o outer
++	o.in.w = open()
++	_, _ = o.in.w.Write(nil)
++	o.in.w.Close() // want "ERR005"
++}
++
++func embedded(h *H2) {
++	_, _ = h.w.Write(nil)
++	h.H.w.Close() // want "ERR005"
++}
++
++func flat(h *H) {
++	_, _ = h.w.Write(nil)
++	h.w.Close() // want "ERR005"
++}
+diff --git a/passes/errcheck/testdata/src/errc7ddadvmiss/a.go b/passes/errcheck/testdata/src/errc7ddadvmiss/a.go
+new file mode 100644
+index 0000000..f78c95b
+--- /dev/null
++++ b/passes/errcheck/testdata/src/errc7ddadvmiss/a.go
+@@ -0,0 +1,42 @@
++package errc7ddadvmiss
++
++import "io"
++
++type H struct{ w io.WriteCloser }
++
++func open() io.WriteCloser { return nil }
++
++// NEW MISS (reported on 90fa6e9, silent at 498984f): the alias a holds the written resource; the
++// field is replaced afterwards, and the store resets the written flag of the path that a is keyed
++// to. The plain twin below is still reported.
++func aliasThenReplace(h *H) {
++	a := h.w
++	_, _ = a.Write(nil)
++	h.w = open()
++	a.Close() // want "ERR005"
++}
++
++func aliasThenReplaceTwin(cur io.WriteCloser) {
++	a := cur
++	_, _ = a.Write(nil)
++	cur = open()
++	a.Close() // want "ERR005"
++}
++
++// Same through a pointer: a := *p, then *p is replaced.
++func aliasThenReplacePtr(p *io.WriteCloser) {
++	a := *p
++	_, _ = a.Write(nil)
++	*p = open()
++	a.Close() // want "ERR005"
++}
++
++// Same in a loop: each iteration writes the resource it holds, replaces the field, closes the old one.
++func aliasThenReplaceLoop(h *H) {
++	for i := 0; i < 2; i++ {
++		a := h.w
++		_, _ = a.Write(nil)
++		h.w = open()
++		a.Close() // want "ERR005"
++	}
++}
+-- 
+2.54.0 (Apple Git-157)
+
