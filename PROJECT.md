@@ -1,7 +1,7 @@
 # Project: GoSree (`gosree`) — Rust-Style Safety, Reference Capabilities & Second-Class Borrows
 
 ## Architecture & Overview
-`gosree` (Go + श्री *Śrī* · **S**tatic **R**ace & **E**scape **E**nforcer) is a static analysis suite for Go built on `golang.org/x/tools/go/analysis` and `golang.org/x/tools/go/ssa`. It enforces Rust-style memory safety, reference capabilities, borrow checking and `Result<T, E>`-style error discipline (`ERR001`–`ERR005`) with zero-cost erasure to standard Go code. The error-discipline solver is a Rust engine linked in-process through Gusset (`rust/gosree-errsolve`, `internal/gusseterr`), with a pure-Go oracle used when cgo is off. The Go module is `github.com/bharathvbcr/gosree`; the commands are `cmd/gosree` (the checker), `cmd/gosree-erase` (the eraser) and `cmd/gosree-corpus` (the measurement tool).
+`gosree` (Go + श्री *Śrī* · **S**tatic **R**ace & **E**scape **E**nforcer) is a static analysis suite for Go built on `golang.org/x/tools/go/analysis` and `golang.org/x/tools/go/ssa`. It enforces Rust-style memory safety, reference capabilities, borrow checking and `Result<T, E>`-style error discipline (`ERR001`–`ERR005`) with zero-cost erasure to standard Go code. The error-discipline solver is a Rust engine linked in-process through Gusset (`rust/gosree-errsolve`, `internal/gusseterr`), with a pure-Go oracle used when cgo is off. The Go module is `github.com/bharathvbcr/gosree`; the commands are `cmd/gosree` (the checker), `cmd/gosree-gate` (the `go build -toolexec` gate that stops a build on findings), `cmd/gosree-erase` (the eraser) and `cmd/gosree-corpus` (the measurement tool).
 
 Detailed documentation is available in the [`docs/`](docs/) directory:
 - [Architecture & Subsystem Design](docs/ARCHITECTURE.md)
@@ -45,11 +45,12 @@ flowchart TD
         O3 --> O4 --> O5
     end
 
-    subgraph Toolchain ["4. Zero-Cost Erasure & Tooling (cmd/gosree, cmd/gosree-erase, cap/)"]
+    subgraph Toolchain ["4. Zero-Cost Erasure & Tooling (cmd/gosree, cmd/gosree-gate, cmd/gosree-erase, cap/)"]
         T1["cap/ generic zero-cost type aliases (type Mut[T] = *T)"]
         T2["gosree-erase: AST rewriting tool stripping markers & imports"]
         T3["cmd/gosree multichecker driver (go vet -vettool)"]
         T4["cmd/gosree preflight: exit codes 0/1/2/3, refuses -fix and -diff"]
+        T5["cmd/gosree-gate: go build -toolexec gate, stops the compile on findings"]
     end
 
     subgraph Errors ["5. Error Discipline (passes/errcheck/, internal/gusseterr/, rust/)"]
@@ -116,6 +117,7 @@ Every feature is listed with the milestone it belongs to and the command that ch
 | 38 | Featherweight GoSree Formal Calculus | Go reference model of the container hook rules (`internal/formal`) and machine-checked Lean 4 specification (`specs/FeatherweightGoSree.lean`, verified under `leanprover/lean4:v4.16.0` + `lean4checker --fresh`); not used by the analyzers | M2 | `go test ./internal/formal` |
 | 39 | Cross-Package Unsafe Ban Detection | `passes/unsafeban` detects cross-package `unsafe.Pointer` exposure via type aliases, function signatures, variables, maps, and interface methods (`SAFE001`) | M1 | `go test ./passes/unsafeban` |
 | 40 | Lockset Fixpoint Convergence & Alias Union-by-Size | `passes/ownership` implements path-prefix widening, DAG post-order worklist, and union-by-size in alias graphs, preventing self-hosting CPU hangs and nondeterminism | M2 | `go test ./passes/ownership` |
+| 41 | Build Gate (`cmd/gosree-gate`) | `go build -toolexec` wrapper: analyses every non-standard-library package before it is compiled and stops the build on findings or a failed analysis (the compile step exits 3, `go build` exits 1); `-std` and symlinks cannot exempt user code; needs `-a` or its own `GOCACHE` to see cached packages ([Tooling §1.6](docs/TOOLING_AND_ERASURE.md#16-build-gate-cmdgosree-gate)) | M5 | `go test ./cmd/gosree-gate ./tests/gates` |
 
 ---
 
@@ -127,7 +129,7 @@ Every feature is listed with the milestone it belongs to and the command that ch
 | **M2** | Reference Capabilities Across Concurrency Boundaries | `\iso` move invalidation across channel sends, `go` closures, and stdlib concurrent containers (`atomic.Pointer`, `atomic.Value`, `sync.Map`, `sync.Pool`, `context.WithValue`) (`SAFE003`); fork-join recovery; `\imm` transitive deep immutability (`SAFE005`); stack-scoped borrow escape ban (`CAP003`); lockset fixpoint convergence with path-prefix widening; Featherweight GoSree formal semantics | `go test ./passes/ownership ./internal/formal` |
 | **M3** | Toolchain Compatibility & Zero-Cost Erasure | Directives as comments; `cap/` generic marker types and aliases; `cmd/gosree-erase` AST tool with `-verify` translation validation; CLI multi-checker wiring | `go test ./cap ./cmd/gosree-erase`; `bash tests/run_acceptance_tests.sh --tier 1` (assembly parity) |
 | **M4** | Dual-Track E2E Acceptance & Hardening | Dual-track 4-tier E2E acceptance test suite (`tests/e2e`, 12 top-level Go tests across Tiers 1-4); adversarial hardening (`tests/stress`) | `bash tests/run_acceptance_tests.sh`; `go test -timeout 30m ./tests/stress` |
-| **M5** | Error Discipline & Driver Preflight | `passes/errcheck` (`ERR001`–`ERR005`), the Rust solver and pure-Go oracle, `cmd/gosree` preflight | `go test ./passes/errcheck ./internal/gusseterr ./cmd/gosree`; `(cd rust && cargo test --release)` |
+| **M5** | Error Discipline, Driver Preflight & Build Gate | `passes/errcheck` (`ERR001`–`ERR005`), the Rust solver and pure-Go oracle, `cmd/gosree` preflight, the `cmd/gosree-gate` `go build -toolexec` gate | `go test ./passes/errcheck ./internal/gusseterr ./cmd/gosree ./cmd/gosree-gate ./tests/gates`; `(cd rust && cargo test --release)` |
 
 A milestone is complete when its check command exits 0. The stress suite takes minutes and can pass go test's default 10 minute timeout on a busy machine, hence `-timeout 30m`.
 
@@ -139,6 +141,7 @@ A milestone is complete when its check command exits 0. The stress suite takes m
 .
 ├── cmd/
 │   ├── gosree/             # Multichecker CLI (go vet -vettool) with exit-code and flag preflight
+│   ├── gosree-gate/        # go build -toolexec gate: stops the compile on findings
 │   ├── gosree-erase/       # AST zero-cost erasure tool
 │   └── gosree-corpus/      # Race corpus & real-world module evaluation engine
 ├── cap/                    # Zero-cost generic type aliases (type Mut[T] = *T)
@@ -156,6 +159,7 @@ A milestone is complete when its check command exits 0. The stress suite takes m
 ├── specs/                  # Lean 4 sketch of the hook rules (not machine-checked)
 ├── tests/
 │   ├── e2e/                # Dual-track 4-tier acceptance test suite (12 top-level Go tests)
+│   ├── gates/              # Real go build -toolexec and go vet runs of the gate and the driver
 │   ├── stress/             # Adversarial stress & runtime witness suite
 │   └── run_acceptance_tests.sh  # Master acceptance test runner
 └── docs/                   # Architectural & user documentation

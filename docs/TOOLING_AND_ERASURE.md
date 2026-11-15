@@ -4,7 +4,7 @@
 
 ---
 
-**GoSree** (`gosree`) ships with a static analysis driver (`cmd/gosree`), an AST erasure tool (`cmd/gosree-erase`), a corpus evaluation tool (`cmd/gosree-corpus`), and a 4-tier E2E acceptance test suite.
+**GoSree** (`gosree`) ships with a static analysis driver (`cmd/gosree`), a `go build` gate (`cmd/gosree-gate`), an AST erasure tool (`cmd/gosree-erase`), a corpus evaluation tool (`cmd/gosree-corpus`), and a 4-tier E2E acceptance test suite.
 
 ---
 
@@ -18,6 +18,8 @@
 - [`passes/errcheck`](../passes/errcheck/errcheck.go): `ERR001`-`ERR005` error-discipline checks (`safeerr`), solved by the Rust engine described in 1.5
 
 The stale-escape-hatch analyzer in `internal/annot/stale` is not registered in the driver; only its own tests run it.
+
+`cmd/gosree-gate` (1.6) runs this driver once per compiled package from inside `go build`.
 
 ```mermaid
 flowchart TD
@@ -126,6 +128,7 @@ Rules for a trustworthy gate, all derived from the behaviour above:
 - Do not pass `-fix`/`-diff` (refused), and avoid `-test=false` and `-NAME=false`: each only prints a warning, and the job still exits 0 for a narrower check than you intended.
 - With `-json`, read the exit status of `gosree`, not of the pipeline's last stage, or the findings status is lost.
 - Build tags go through `gosree -tags a,b` (comma-separated), not a space-separated list.
+- To make the compile itself the gate, so that `go build` fails on a finding, use `cmd/gosree-gate` (1.6).
 
 ### 1.5 Build Prerequisites (Rust Engine and the Pure-Go Fallback)
 The `safeerr` pass solves its dataflow in an in-process Rust engine hosted through [gusset](https://github.com/bharathvbcr/gusset). To link it you need:
@@ -143,6 +146,35 @@ Observed failures when a prerequisite is missing, in a scratch copy of the check
 - cgo build, no `rust/target/release/libgusset.a`: the link fails with `ld: library 'gusset' not found`.
 
 On `!unix || !cgo` the build selects `internal/gusseterr/engine_other.go` instead (`//go:build !unix || !cgo`): `NativeActive()` is false and `SolveFrame` runs the pure-Go reference oracle, documented in that file as bit-exact. No Rust toolchain or `../gusset` checkout is needed for that path: `CGO_ENABLED=0 go build ./cmd/gosree` exits 0 in a scratch copy of the checkout with no `../gusset` beside it. The error-discipline summary reports which engine ran (`UsedRustGusset` in the `Summary` of `passes/errcheck`), and `TestDifferentialParityRandomizedCFGs` in `internal/gusseterr/parity_test.go` compares the native engine with the oracle on randomized control-flow graphs when the native engine is active. The same diagnostics come out of the native build and the `CGO_ENABLED=0` build for every example in [Borrow & NLL](BORROW_CHECKING_AND_NLL.md).
+
+### 1.6 Build Gate (`cmd/gosree-gate`)
+[`cmd/gosree-gate`](../cmd/gosree-gate/main.go) makes `go build` itself fail on a GoSree finding. It is a `-toolexec` wrapper: the `go` command runs every toolchain step through it, and it runs GoSree on each package before the compiler writes that package's object file.
+
+```bash
+go build -o build/gosree ./cmd/gosree
+go build -o build/gosree-gate ./cmd/gosree-gate
+go build -toolexec=$(pwd)/build/gosree-gate -a ./...
+```
+`-toolexec` needs a program the `go` command can run: an absolute path, or a name on `PATH`. `go test`, `go run` and `go install` take the same flag; under `go test` each package's test files are compiled, and so analysed, too. Pass `-a` (see the limits below).
+
+What the gate does with each step (`main` in `cmd/gosree-gate/main.go`):
+1. A version query (`-V`, `-V=full`) is forwarded unchanged, so the `go` command's tool IDs, and with them its build cache keys, are the same as for a build without the gate.
+2. Every tool other than `compile` (`asm`, `link`, `cgo`, `buildid`, ...) runs unchanged.
+3. A `compile` step with no `.go` files runs unchanged.
+4. A standard-library package is compiled without analysis. It counts as standard library only when `-std` is on its command line **and** every source file lies under `GOROOT` with symlinks resolved, or, for a cgo package of the standard library, its import path is a standard one with a directory under `$GOROOT/src` and its generated `.cgo1.go` file carries a `//line` directive pointing into `GOROOT`. So `-gcflags=-std` does not exempt your own code, and neither does a symlink into `GOROOT` (`TestGateEvasionStdFlagRejectedOnUserCode`, `TestGateSymlinkMixedFileStdlibEvasionHalt`, `TestGoBuildGateEvasionResistance`).
+5. Every other package is analysed. If the analysis reports a finding, or cannot finish, the gate exits 3 without running the compiler: no object file is written and the build stops. The diagnostics are printed on the way.
+6. A clean package is compiled as usual, and the gate exits with the compiler's own status.
+
+**Which analyzer runs.** The gate looks for a `gosree` binary in this order: `$GOSREE_BIN` (when it names a file), `gosree` in the same directory as `gosree-gate`, then `gosree` on `PATH`. It runs that binary on the package's source files, with any `-toolexec` entry removed from `GOFLAGS` so that the analysis's own package loading does not re-enter the gate. The binary is the driver of 1.3, so its preflight applies and it runs every pass with its defaults; no `gosree` flag can be passed through the gate. With no binary found, the gate runs the five analyzers in-process (`annot`, `unsafeban`, `ownership`, `borrow`, `errcheck`), prints each finding as `file:line:col: message`, and treats any finding, load error or analyzer error as a failure (`TestChallengerInProcessFallback`). The gate starts `gosree` once per compiled package, so for a large build it pays to build `gosree` with the Rust engine (1.5).
+
+**Exit status.** The gate's own statuses are 2 when it is given no tool to wrap, 3 when a package has findings *or its analysis failed*, and 1 when the wrapped tool cannot be started; otherwise it exits with the wrapped tool's status. Any non-zero status from `gosree`, including 1 (no verdict), becomes 3: the gate fails closed. The `go` command reports a failed compile step as a failed build, so `go build` itself exits 1 and prints the findings under the package's `# import/path` header (checked with a stand-in wrapper that exits 3 the same way). The exit codes are covered by `TestChallengerExitCodes_Comprehensive`.
+
+**Limits:**
+- **The build cache can skip it.** The gate runs only when the `go` command actually compiles a package. Because version queries pass through unchanged, a package compiled earlier by a build without the gate has the same cache key and is reused, and the gate never sees it. Checked with a stand-in wrapper that forwards `-V=full` the same way: after a plain `go build`, a `-toolexec` build of the unchanged package never ran the wrapper's `compile` step; with `-a`, or after an edit, it did. Pass `-a`, or give gated builds their own `GOCACHE`, so that every package is compiled under the gate. A package that fails the gate produces no cache entry, so it is analysed again on the next build. The integration tests in `tests/gates` always pass `-a`.
+- **Dependencies are analysed too.** Every package the build compiles that is not standard library goes through the gate, including third-party modules from the module cache, and there is no allowlist. A finding in a dependency stops the build, and a `//gosree:unsafe` hatch cannot be added to code you do not own.
+- **Its strictness is the checker's.** The gate stops on whatever `gosree` reports. On code with unannotated goroutine transfers the ownership rules flag a large share of them ([the hatch ratio](ROADMAP.md) measured on the reference service), so expect to add `//gosree:` claims or `//gosree:unsafe <reason>` hatches before a large existing module builds under the gate.
+
+Tests: [`cmd/gosree-gate/gate_test.go`](../cmd/gosree-gate/gate_test.go) covers pass-through of other tools and version queries, standard-library detection, `-std` and symlink evasion, a halt on findings and a clean package. [`tests/gates`](../tests/gates/) builds `gosree` and `gosree-gate` and runs real `go build -toolexec=... -a` builds over clean packages, rule violations, the stress suite's concurrency witnesses and evasion attempts, plus the in-process fallback, the exit codes, and `go vet -vettool` on the same packages.
 
 ---
 

@@ -77,6 +77,7 @@ flowchart TD
     subgraph Output ["Drivers & Toolchain Integration"]
         Driver["cmd/gosree (multichecker)\nwith a flag/exit-code preflight"]
         Vet["go vet -vettool=build/gosree ./..."]
+        Gate["cmd/gosree-gate\n(go build -toolexec)"]
         Eraser["cmd/gosree-erase (AST Rewriter)"]
     end
 
@@ -104,6 +105,7 @@ flowchart TD
     Ownership --> Driver
     Errcheck --> Driver
     Driver --> Vet
+    Driver --> Gate
     Src --> Eraser
 ```
 
@@ -179,7 +181,25 @@ go test -timeout 30m ./tests/stress
 - **Warnings on stderr** when a flag makes a run cover less: `-test=false` (test files are not analysed), and `-NAME=false` or `-NAME` for an analyzer, which switches other passes off (exit 0 then does not mean those rules were checked).
 - **Under `go vet -vettool=...`** the exit status is `go vet`'s own: 1 for findings and for failures, 0 when clean.
 
-### 5. Optional: AST Erasure Tool (`cmd/gosree-erase`)
+### 5. Optional: Gate `go build` itself (`cmd/gosree-gate`)
+
+`cmd/gosree-gate` is a `-toolexec` wrapper. It runs GoSree on each package before the compiler writes that package's object file, and stops the build when anything is reported:
+
+```bash
+go build -o build/gosree ./cmd/gosree
+go build -o build/gosree-gate ./cmd/gosree-gate
+go build -toolexec=$(pwd)/build/gosree-gate -a ./...
+```
+
+- **Finds the checker** at `$GOSREE_BIN`, next to `gosree-gate`, or on `PATH`. With none, it runs the five analyzers in-process.
+- **Fails closed.** A finding, or an analysis that cannot finish, makes the compile step exit 3 before any object file is written, and `go build` then exits 1. A clean package compiles as usual.
+- **Exempts only the real standard library.** `-gcflags=-std` and symlinks into `GOROOT` do not exempt your own code. Third-party dependencies are analysed too, with no allowlist.
+- **Pass `-a`, or use a separate `GOCACHE`.** A package already in the build cache from a build without the gate is not recompiled, so the gate never sees it.
+- `go test`, `go run` and `go install` take the same `-toolexec` flag.
+
+Details, exit statuses and limits: [Tooling §1.6](docs/TOOLING_AND_ERASURE.md#16-build-gate-cmdgosree-gate).
+
+### 6. Optional: AST Erasure Tool (`cmd/gosree-erase`)
 Strip generic marker types (`cap.Mut[T]` → `*T`), helper intrinsics (`cap.BorrowMut(x)` → `x`), directive comments (`//gosree:`), and `cap` imports into dependency-free Go source:
 ```bash
 go build -o build/gosree-erase ./cmd/gosree-erase
@@ -199,7 +219,7 @@ Comprehensive guides, specifications, and reference manuals are located in [`doc
 - 🏷️ **[Directives & Capability Markers](docs/DIRECTIVES.md)**: Specification for comment directives (`//gosree:...`), attachment rules, and `cap.*` marker types.
 - ⏳ **[Second-Class Borrows & Non-Lexical Lifetimes (NLL)](docs/BORROW_CHECKING_AND_NLL.md)**: How second-class borrows avoid Rust's explicit lifetime parameters (`'a`), storage constraints, and flow-sensitive SSA conflict resolution.
 - 🔀 **[Concurrency Model & Goroutine Boundaries](docs/CONCURRENCY_MODEL.md)**: Goroutine boundary invariants, spawner taxonomy, fork-join join points, HTTP handler self-races, and mutex locksets.
-- 🛠️ **[Tooling, Erasure & Verification Guide](docs/TOOLING_AND_ERASURE.md)**: User guide for `cmd/gosree`, `cmd/gosree-erase`, `cmd/gosree-corpus`, and the 4-tier acceptance test suite.
+- 🛠️ **[Tooling, Erasure & Verification Guide](docs/TOOLING_AND_ERASURE.md)**: User guide for `cmd/gosree`, the `go build` gate `cmd/gosree-gate`, `cmd/gosree-erase`, `cmd/gosree-corpus`, and the 4-tier acceptance test suite.
 - 🦀 **[Error Discipline (`safeerr`, `ERR001`–`ERR005`)](docs/ERROR_DISCIPLINE.md)**: The `passes/errcheck` pass, its binary wire format, the Rust solver hosted through Gusset, and the pure-Go reference oracle.
 - 📐 **[Featherweight GoSree](specs/FeatherweightGoSree.lean)**: a machine-checked Lean 4 specification of the container hook rules (`leanprover/lean4:v4.16.0` + `lean4checker --fresh`) and a Go reference model of them in [`internal/formal`](internal/formal/featherweight_gosree.go); neither is used by the analyzers ([details](docs/ARCHITECTURE.md#8-formal-foundations--featherweight-gosree)).
 - 🗺️ **[Roadmap & Abandon Criterion](docs/ROADMAP.md)**: Build order with each item's prediction and measured result, and the hatch-ratio criterion for abandoning the project.
@@ -629,10 +649,11 @@ go test ./tests/stress -short               # markers and harness self-tests onl
 go test ./tests/stress -run TestStress -v   # print the per-rule HIT / MISS / FP ledger
 ```
 
-The stress ledger records **600 hits locked**, 186 known misses, 45 known false positives, and 0 crashes across 141 fixture packages in 132 roots. 21 runtime witnesses are convicted statically (`HIT` only).
+The stress ledger records **622 hits locked**, 178 known misses, 46 known false positives, and 0 crashes across 144 fixture packages in 134 roots ([`FINDINGS.md`](tests/stress/FINDINGS.md), re-counted 2026-11-11). Of its 58 runtime witnesses, 21 are convicted statically (`HIT` only).
 
 Each rule has `analysistest` cases with `// want` expectations, so a disabled rule fails its test:
 - [`cmd/gosree/`](cmd/gosree/main.go): the multichecker driver for standalone and `go vet -vettool` execution, with the exit-code and flag preflight ([`preflight.go`](cmd/gosree/preflight.go), tested in `cmd/gosree/preflight_test.go` and `cmd/gosree/main_test.go`).
+- [`cmd/gosree-gate/`](cmd/gosree-gate/main.go): the `go build -toolexec` gate (`gate_test.go`: pass-through of other tools and version queries, standard-library detection, `-std` and symlink evasion, halt on findings), with real `go build -toolexec` runs in [`tests/gates/`](tests/gates/): clean packages, rule violations, concurrency witnesses, evasion attempts, the in-process fallback, exit codes and `go vet -vettool` on the same packages.
 - [`passes/errcheck/`](passes/errcheck/errcheck.go) & [`internal/gusseterr/`](internal/gusseterr/wire.go): Error-discipline pass (`safeerr`), the wire frame, the cgo engine, and the pure-Go oracle (`parity_test.go` checks them against each other when the native engine is active; `bench_test.go`).
 - [`tests/e2e/`](tests/e2e/): Dual-track 4-tier E2E acceptance suite: 12 top-level Go tests over 12 `analysistest` packages (64 lines carrying `// want`). Tier 1 is organised by acceptance criteria AC1–AC7 (see the comments in `tier1_feature_test.go`); no total case count is asserted here.
 - [`tests/stress/`](tests/stress/README.md): Adversarial fixtures (`HIT`, `MISS`, `FP`, `WITNESS: race`, `WITNESS: panic`), scaling bounds, and standalone vs. `go vet -vettool` parity checks.

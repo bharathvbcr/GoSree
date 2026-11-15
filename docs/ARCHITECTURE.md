@@ -47,6 +47,7 @@ flowchart TD
 
     subgraph Tooling ["Toolchain & Drivers"]
         Driver["Multichecker Driver\n(cmd/gosree)"]
+        Gate["Build Gate\n(cmd/gosree-gate)\ngo build -toolexec"]
         Eraser["AST Erasure Tool\n(cmd/gosree-erase)"]
         Vet["go vet -vettool=gosree"]
     end
@@ -78,6 +79,7 @@ flowchart TD
     Ownership --> Driver
     ErrCheck --> Driver
     Driver --> Vet
+    Driver --> Gate
     Src --> Eraser
 ```
 
@@ -434,6 +436,7 @@ flowchart TD
     end
     internal_gusseterr -.-> gusseterr_internals
 
+    cmd_gosree_gate["cmd/gosree-gate"] -.->|runs once per compiled package| cmd_gosree["cmd/gosree"]
     cmd_gosree_erase["cmd/gosree-erase"] -.->|rewrites uses of| cap_pkg["cap"]
     cmd_gosree_erase -.->|validates| verify_equiv["verify_equiv.go"]
 ```
